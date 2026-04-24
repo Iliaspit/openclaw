@@ -23,6 +23,11 @@ import {
   steerControlledSubagentRun,
 } from "../subagent-control.js";
 import {
+  listControlledSubagentRuns,
+  resolveSubagentController,
+  steerControlledSubagentRun,
+} from "../subagent-control.js";
+import {
   describeSessionsSendTool,
   SESSIONS_SEND_TOOL_DISPLAY_SUMMARY,
 } from "../tool-description-presets.js";
