@@ -12,6 +12,7 @@ import {
   createRunningTaskRun,
   failTaskRunByRunId,
   recordTaskRunProgressByRunId,
+  reassignTaskRunByRunId,
   retryBlockedFlowAsQueuedTaskRun,
   runTaskInFlow,
   runTaskInFlowForOwner,
@@ -251,6 +252,104 @@ describe("task-executor", () => {
         endedAt: 40,
         goal: "Write summary",
         notifyPolicy: "done_only",
+      });
+    });
+  });
+
+  it("reassigns a detached terminal run id and reopens the existing task flow", async () => {
+    await withTaskExecutorStateDir(async () => {
+      const created = createRunningTaskRun({
+        runtime: "subagent",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:codex:subagent:child",
+        runId: "run-executor-remap-old",
+        sourceId: "run-executor-remap-old",
+        label: "Initial label",
+        task: "Initial task",
+        startedAt: 10,
+        deliveryStatus: "pending",
+      });
+
+      completeTaskRunByRunId({
+        runId: "run-executor-remap-old",
+        runtime: "subagent",
+        sessionKey: "agent:codex:subagent:child",
+        endedAt: 20,
+        lastEventAt: 20,
+        terminalSummary: "Initial completion.",
+      });
+      setDetachedTaskDeliveryStatusByRunId({
+        runId: "run-executor-remap-old",
+        runtime: "subagent",
+        sessionKey: "agent:codex:subagent:child",
+        deliveryStatus: "delivered",
+      });
+
+      const reassigned = reassignTaskRunByRunId({
+        currentRunId: "run-executor-remap-old",
+        nextRunId: "run-executor-remap-new",
+        runtime: "subagent",
+        sessionKey: "agent:codex:subagent:child",
+        sourceId: "run-executor-remap-new",
+        label: "Restarted label",
+        task: "Restarted task",
+        restart: true,
+        startedAt: 30,
+        lastEventAt: 30,
+        deliveryStatus: "pending",
+      });
+
+      expect(reassigned).toEqual([
+        expect.objectContaining({
+          taskId: created.taskId,
+          runId: "run-executor-remap-new",
+          sourceId: "run-executor-remap-new",
+          label: "Restarted label",
+          task: "Restarted task",
+          parentFlowId: created.parentFlowId,
+          status: "running",
+          startedAt: 30,
+          endedAt: undefined,
+          deliveryStatus: "pending",
+          cleanupAfter: undefined,
+        }),
+      ]);
+      expect(findTaskByRunId("run-executor-remap-old")).toBeUndefined();
+      expect(findTaskByRunId("run-executor-remap-new")).toMatchObject({
+        taskId: created.taskId,
+        label: "Restarted label",
+        task: "Restarted task",
+        status: "running",
+        deliveryStatus: "pending",
+      });
+      expect(getTaskFlowById(created.parentFlowId!)).toMatchObject({
+        flowId: created.parentFlowId,
+        status: "running",
+        goal: "Restarted label",
+        endedAt: undefined,
+      });
+
+      completeTaskRunByRunId({
+        runId: "run-executor-remap-new",
+        runtime: "subagent",
+        sessionKey: "agent:codex:subagent:child",
+        endedAt: 40,
+        lastEventAt: 40,
+        terminalSummary: "Done.",
+      });
+
+      expect(getTaskById(created.taskId)).toMatchObject({
+        taskId: created.taskId,
+        status: "succeeded",
+        runId: "run-executor-remap-new",
+        task: "Restarted task",
+      });
+      expect(getTaskFlowById(created.parentFlowId!)).toMatchObject({
+        flowId: created.parentFlowId,
+        status: "succeeded",
+        goal: "Restarted label",
+        endedAt: 40,
       });
     });
   });

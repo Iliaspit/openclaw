@@ -845,6 +845,35 @@ describe("messaging tool media URL tracking", () => {
     expect(ctx.state.pendingMessagingMediaUrls.has("tool-m2")).toBe(false);
   });
 
+  it("does not treat sessions_send as an externally delivered messaging tool", async () => {
+    const { ctx } = createTestContext();
+
+    const startEvt: ToolExecutionStartEvent = {
+      type: "tool_execution_start",
+      toolName: "sessions_send",
+      toolCallId: "tool-sessions-send",
+      args: { sessionKey: "agent:main:subagent:worker", message: "internal reroute" },
+    };
+    await handleToolExecutionStart(ctx, startEvt);
+
+    const endEvt: ToolExecutionEndEvent = {
+      type: "tool_execution_end",
+      toolName: "sessions_send",
+      toolCallId: "tool-sessions-send",
+      isError: false,
+      result: {
+        details: {
+          status: "accepted",
+          runId: "run-internal-send",
+        },
+      },
+    };
+    await handleToolExecutionEnd(ctx, endEvt);
+
+    expect(ctx.state.messagingToolSentTexts).toEqual([]);
+    expect(ctx.state.messagingToolSentTextsNormalized).toEqual([]);
+  });
+
   it("commits mediaUrls from tool result payload", async () => {
     const { ctx } = createTestContext();
 

@@ -16,6 +16,7 @@ import {
 import {
   addSubagentRunForTests,
   getSubagentRunByChildSessionKey,
+  listSubagentRunsForController,
   resetSubagentRegistryForTests,
 } from "./subagent-registry.js";
 
@@ -215,6 +216,106 @@ describe("sendControlledSubagentMessage", () => {
       status: "ok",
       runId: "run-followup-send",
       replyText: undefined,
+    });
+  });
+
+  it("restarts an ended current run that is still waiting on descendants before waiting for a reply", async () => {
+    const childSessionKey = "agent:main:subagent:finished-waiting-worker";
+    let oldRunWaitTimeoutMs: number | undefined;
+    let restartedRunWaitTimeoutMs: number | undefined;
+    addSubagentRunForTests({
+      runId: "run-stale-active-send",
+      childSessionKey,
+      controllerSessionKey: "agent:main:main",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "stale active task",
+      cleanup: "keep",
+      createdAt: Date.now() - 9_000,
+      startedAt: Date.now() - 8_000,
+    });
+    addSubagentRunForTests({
+      runId: "run-current-ended-send",
+      childSessionKey,
+      controllerSessionKey: "agent:main:main",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "finished task",
+      cleanup: "keep",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+      endedAt: Date.now() - 1_000,
+      outcome: { status: "ok" },
+    });
+    addSubagentRunForTests({
+      runId: "run-descendant-active-send",
+      childSessionKey: `${childSessionKey}:subagent:leaf`,
+      controllerSessionKey: childSessionKey,
+      requesterSessionKey: childSessionKey,
+      requesterDisplayKey: childSessionKey,
+      task: "leaf task",
+      cleanup: "keep",
+      createdAt: Date.now() - 500,
+      startedAt: Date.now() - 500,
+    });
+
+    __testing.setDepsForTest({
+      callGateway: async <T = Record<string, unknown>>(request: CallGatewayOptions) => {
+        if (request.method === "chat.history") {
+          return { messages: [] } as T;
+        }
+        if (request.method === "agent.wait") {
+          const params = request.params as { runId?: string; timeoutMs?: number } | undefined;
+          if (params?.runId === "run-current-ended-send") {
+            oldRunWaitTimeoutMs = params.timeoutMs;
+            return {} as T;
+          }
+          restartedRunWaitTimeoutMs = params?.timeoutMs;
+          return { status: "timeout" } as T;
+        }
+        if (request.method === "agent") {
+          return { runId: "run-followup-send" } as T;
+        }
+        throw new Error(`unexpected method: ${request.method}`);
+      },
+    });
+
+    const result = await sendControlledSubagentMessage({
+      cfg: {
+        channels: { whatsapp: { allowFrom: ["*"] } },
+      } as OpenClawConfig,
+      controller: {
+        controllerSessionKey: "agent:main:main",
+        callerSessionKey: "agent:main:main",
+        callerIsSubagent: false,
+        controlScope: "children",
+      },
+      entry: {
+        runId: "run-current-ended-send",
+        childSessionKey,
+        requesterSessionKey: "agent:main:main",
+        requesterDisplayKey: "main",
+        controllerSessionKey: "agent:main:main",
+        task: "finished task",
+        cleanup: "keep",
+        createdAt: Date.now() - 5_000,
+        startedAt: Date.now() - 4_000,
+        endedAt: Date.now() - 1_000,
+        outcome: { status: "ok" },
+      },
+      message: "continue",
+      waitTimeoutMs: 1_000,
+    });
+
+    expect(result).toEqual({
+      status: "timeout",
+      runId: "run-followup-send",
+    });
+    expect(oldRunWaitTimeoutMs).toBe(5_000);
+    expect(restartedRunWaitTimeoutMs).toBe(1_000);
+    expect(getSubagentRunByChildSessionKey(childSessionKey)).toMatchObject({
+      runId: "run-followup-send",
+      task: "continue",
     });
   });
 
@@ -1187,6 +1288,90 @@ describe("steerControlledSubagentRun", () => {
       sessionKey: "agent:main:subagent:stale-worker",
       text: "stale task is already finished.",
     });
+  });
+
+  it("restarts a finished current run by remapping tracking to the new run", async () => {
+    const childSessionKey = "agent:main:subagent:finished-steer-worker";
+    let requestedTimeout: number | undefined;
+    addSubagentRunForTests({
+      runId: "run-finished-steer-old",
+      childSessionKey,
+      controllerSessionKey: "agent:main:main",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "finished steer task",
+      cleanup: "keep",
+      spawnMode: "session",
+      runTimeoutSeconds: 42,
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+      endedAt: Date.now() - 1_000,
+      outcome: { status: "ok" },
+    });
+
+    __testing.setDepsForTest({
+      callGateway: async <T = Record<string, unknown>>(request: CallGatewayOptions) => {
+        if (request.method === "agent") {
+          const params = request.params as { timeout?: number } | undefined;
+          requestedTimeout = params?.timeout;
+          return { runId: "run-finished-steer-new" } as T;
+        }
+        if (request.method === "agent.wait") {
+          return { status: "pending" } as T;
+        }
+        throw new Error(`unexpected method: ${request.method}`);
+      },
+    });
+
+    const result = await steerControlledSubagentRun({
+      cfg: {} as OpenClawConfig,
+      controller: {
+        controllerSessionKey: "agent:main:main",
+        callerSessionKey: "agent:main:main",
+        callerIsSubagent: false,
+        controlScope: "children",
+      },
+      entry: {
+        runId: "run-finished-steer-old",
+        childSessionKey,
+        requesterSessionKey: "agent:main:main",
+        requesterDisplayKey: "main",
+        controllerSessionKey: "agent:main:main",
+        task: "finished steer task",
+        cleanup: "keep",
+        spawnMode: "session",
+        runTimeoutSeconds: 42,
+        createdAt: Date.now() - 5_000,
+        startedAt: Date.now() - 4_000,
+        endedAt: Date.now() - 1_000,
+        outcome: { status: "ok" },
+      },
+      message: "updated direction",
+    });
+
+    expect(result).toEqual({
+      status: "accepted",
+      runId: "run-finished-steer-new",
+      sessionKey: childSessionKey,
+      sessionId: undefined,
+      mode: "restart",
+      label: "finished steer task",
+      text: "steered finished steer task.",
+    });
+
+    expect(getSubagentRunByChildSessionKey(childSessionKey)).toMatchObject({
+      runId: "run-finished-steer-new",
+      task: "updated direction",
+      spawnMode: "session",
+      runTimeoutSeconds: 42,
+    });
+    expect(requestedTimeout).toBe(42);
+    expect(
+      listSubagentRunsForController("agent:main:main")
+        .filter((entry) => entry.childSessionKey === childSessionKey)
+        .map((entry) => entry.runId)
+        .toSorted(),
+    ).toEqual(["run-finished-steer-new"]);
   });
 
   it("steers an ended current run that is still waiting on active descendants even when stale older rows exist", async () => {

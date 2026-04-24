@@ -1689,6 +1689,85 @@ export function setTaskRunDeliveryStatusByRunId(params: {
   return updateTaskDeliveryByRunId(params);
 }
 
+export function reassignTaskRunByRunId(params: {
+  currentRunId: string;
+  nextRunId: string;
+  runtime?: TaskRuntime;
+  sessionKey?: string;
+  sourceId?: string;
+  label?: string;
+  task?: string;
+  restart?: boolean;
+  startedAt?: number;
+  lastEventAt?: number;
+  deliveryStatus?: TaskDeliveryStatus;
+  progressSummary?: string | null;
+}) {
+  ensureTaskRegistryReady();
+  const currentRunId = params.currentRunId.trim();
+  const nextRunId = params.nextRunId.trim();
+  if (!currentRunId || !nextRunId) {
+    return [];
+  }
+  const matches = getTasksByRunScope({
+    runId: currentRunId,
+    runtime: params.runtime,
+    sessionKey: params.sessionKey,
+  });
+  if (matches.length === 0) {
+    return [];
+  }
+  const nextSourceId = normalizeOptionalString(params.sourceId);
+  const nextLabel = normalizeOptionalString(params.label);
+  const nextTask = params.task?.trim();
+  const restarting = params.restart === true;
+  const restartedAt = restarting ? (params.startedAt ?? Date.now()) : undefined;
+  const restartLastEventAt = restarting ? (params.lastEventAt ?? restartedAt) : undefined;
+  const updated: TaskRecord[] = [];
+  for (const current of matches) {
+    const patch: Partial<TaskRecord> = {};
+    if ((normalizeOptionalString(current.runId) ?? "") !== nextRunId) {
+      patch.runId = nextRunId;
+    }
+    if (nextSourceId) {
+      if ((normalizeOptionalString(current.sourceId) ?? "") !== nextSourceId) {
+        patch.sourceId = nextSourceId;
+      }
+    } else if ((normalizeOptionalString(current.sourceId) ?? "") === currentRunId) {
+      patch.sourceId = nextRunId;
+    }
+    if (nextLabel && (normalizeOptionalString(current.label) ?? "") !== nextLabel) {
+      patch.label = nextLabel;
+    }
+    if (nextTask && current.task.trim() !== nextTask) {
+      patch.task = nextTask;
+    }
+    if (restarting) {
+      patch.status = "running";
+      patch.startedAt = restartedAt;
+      patch.lastEventAt = restartLastEventAt;
+      patch.endedAt = undefined;
+      patch.error = undefined;
+      patch.progressSummary = normalizeTaskSummary(params.progressSummary);
+      patch.terminalSummary = undefined;
+      patch.terminalOutcome = undefined;
+      patch.cleanupAfter = undefined;
+      patch.deliveryStatus =
+        params.deliveryStatus ??
+        (current.deliveryStatus === "not_applicable" ? "not_applicable" : "pending");
+    }
+    if (Object.keys(patch).length === 0) {
+      updated.push(cloneTaskRecord(current));
+      continue;
+    }
+    const task = updateTask(current.taskId, patch);
+    if (task) {
+      updated.push(task);
+    }
+  }
+  return updated;
+}
+
 export function updateTaskNotifyPolicyById(params: {
   taskId: string;
   notifyPolicy: TaskNotifyPolicy;

@@ -273,7 +273,7 @@ describe("subagent registry query regressions", () => {
     expect(countActiveRunsForSessionFromRuns(runs, "agent:main:main")).toBe(1);
   });
 
-  it("scopes direct child listings to the requester run window when requesterRunId is provided", () => {
+  it("scopes direct child listings to the requester run window while keeping overlapping descendants", () => {
     const requesterSessionKey = "agent:main:subagent:orchestrator";
     const runs = toRunMap([
       makeRun({
@@ -297,6 +297,24 @@ describe("subagent registry query regressions", () => {
         childSessionKey: `${requesterSessionKey}:subagent:stale`,
         requesterSessionKey,
         createdAt: 130,
+        endedAt: 150,
+        cleanupCompletedAt: 160,
+      }),
+      makeRun({
+        runId: "run-child-announced-before-window",
+        childSessionKey: `${requesterSessionKey}:subagent:announced`,
+        requesterSessionKey,
+        createdAt: 130,
+        endedAt: 180,
+        completionAnnouncedAt: 190,
+        cleanupCompletedAt: 230,
+      }),
+      makeRun({
+        runId: "run-child-overlap",
+        childSessionKey: `${requesterSessionKey}:subagent:overlap`,
+        requesterSessionKey,
+        createdAt: 130,
+        endedAt: 230,
       }),
       makeRun({
         runId: "run-child-current-a",
@@ -323,7 +341,11 @@ describe("subagent registry query regressions", () => {
     });
     const scopedRunIds = scoped.map((entry) => entry.runId).toSorted();
 
-    expect(scopedRunIds).toEqual(["run-child-current-a", "run-child-current-b"]);
+    expect(scopedRunIds).toEqual([
+      "run-child-current-a",
+      "run-child-current-b",
+      "run-child-overlap",
+    ]);
   });
 
   it("regression post-completion gating, run-mode sessions ignore late announces after cleanup completes", () => {

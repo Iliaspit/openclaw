@@ -4,6 +4,7 @@ export type ReplaceSubagentRunAfterSteerParams = {
   previousRunId: string;
   nextRunId: string;
   fallback?: SubagentRunRecord;
+  task?: string;
   runTimeoutSeconds?: number;
   preserveFrozenResultFallback?: boolean;
 };

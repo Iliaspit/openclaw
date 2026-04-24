@@ -1,8 +1,9 @@
 import path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelMessagingAdapter } from "../channels/plugins/types.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { createTestRegistry } from "../test-utils/channel-plugins.js";
+import { addSubagentRunForTests, resetSubagentRegistryForTests } from "./subagent-registry.js";
 
 const callGatewayMock = vi.fn();
 vi.mock("../gateway/call.js", () => ({
@@ -168,6 +169,10 @@ describe("sessions tools", () => {
     sessionsSendA2ATesting.setDepsForTest({
       callGateway: (opts: unknown) => callGatewayMock(opts),
     });
+  });
+
+  afterEach(() => {
+    resetSubagentRegistryForTests({ persist: false });
   });
 
   it("uses number (not integer) in tool schemas for Gemini compatibility", () => {
@@ -1091,5 +1096,169 @@ describe("sessions tools", () => {
       message: "announce now",
       threadId: "99",
     });
+  });
+
+  it("sessions_send routes finished controlled child sessions to tracked completion delivery", async () => {
+    const calls: Array<{ method?: string; params?: unknown }> = [];
+    const requesterKey = "agent:main:main";
+    const childKey = "agent:main:subagent:worker";
+    addSubagentRunForTests({
+      runId: "run-finished-child",
+      childSessionKey: childKey,
+      controllerSessionKey: requesterKey,
+      requesterSessionKey: requesterKey,
+      requesterDisplayKey: "main",
+      task: "finished child task",
+      cleanup: "keep",
+      spawnMode: "session",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+      endedAt: Date.now() - 1_000,
+      outcome: { status: "ok" },
+    });
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: unknown };
+      calls.push(request);
+      if (request.method === "sessions.list") {
+        return {
+          path: "/tmp/sessions.json",
+          sessions: [
+            { key: requesterKey, kind: "direct" },
+            { key: childKey, kind: "direct", spawnedBy: requesterKey },
+          ],
+        };
+      }
+      if (request.method === "agent") {
+        return { runId: "run-followup-child", status: "accepted" };
+      }
+      if (request.method === "agent.wait") {
+        return { runId: "run-followup-child", status: "pending" };
+      }
+      if (request.method === "chat.history") {
+        throw new Error("chat.history should not run for tracked child follow-up");
+      }
+      if (request.method === "send") {
+        throw new Error("send should not run for tracked child follow-up");
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "discord",
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const result = await tool.execute("call-finished-child", {
+      sessionKey: childKey,
+      message: "continue with the next slice",
+      timeoutSeconds: 0,
+    });
+    expect(result.details).toMatchObject({
+      status: "accepted",
+      runId: "run-followup-child",
+      sessionKey: childKey,
+      delivery: { status: "tracked", mode: "completion_event" },
+      mode: "restart",
+    });
+
+    const agentCalls = calls.filter((call) => call.method === "agent");
+    expect(agentCalls).toHaveLength(1);
+    expect(agentCalls[0]?.params).toMatchObject({
+      sessionKey: childKey,
+      deliver: false,
+      lane: "subagent",
+    });
+    expect(calls.some((call) => call.method === "chat.history")).toBe(false);
+    expect(calls.some((call) => call.method === "send")).toBe(false);
+  });
+
+  it("sessions_send restarts ended controlled child sessions with descendants and honors timeoutSeconds", async () => {
+    const requesterKey = "agent:main:main";
+    const childKey = "agent:main:subagent:wait-worker";
+    let oldRunWaitTimeoutMs: number | undefined;
+    let followupWaitTimeoutMs: number | undefined;
+    addSubagentRunForTests({
+      runId: "run-finished-wait-child",
+      childSessionKey: childKey,
+      controllerSessionKey: requesterKey,
+      requesterSessionKey: requesterKey,
+      requesterDisplayKey: "main",
+      task: "finished child wait task",
+      cleanup: "keep",
+      spawnMode: "session",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+      endedAt: Date.now() - 1_000,
+      outcome: { status: "ok" },
+    });
+    addSubagentRunForTests({
+      runId: "run-finished-wait-descendant",
+      childSessionKey: `${childKey}:subagent:leaf`,
+      controllerSessionKey: childKey,
+      requesterSessionKey: childKey,
+      requesterDisplayKey: childKey,
+      task: "descendant task",
+      cleanup: "keep",
+      createdAt: Date.now() - 500,
+      startedAt: Date.now() - 500,
+    });
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      if (request.method === "sessions.list") {
+        return {
+          path: "/tmp/sessions.json",
+          sessions: [
+            { key: requesterKey, kind: "direct" },
+            { key: childKey, kind: "direct", spawnedBy: requesterKey },
+          ],
+        };
+      }
+      if (request.method === "chat.history") {
+        return { messages: [] };
+      }
+      if (request.method === "agent") {
+        return { runId: "run-finished-wait-followup", status: "accepted" };
+      }
+      if (request.method === "agent.wait") {
+        if (request.params?.runId === "run-finished-wait-child") {
+          oldRunWaitTimeoutMs =
+            typeof request.params?.timeoutMs === "number" ? request.params.timeoutMs : undefined;
+          return { runId: "run-finished-wait-child", status: "ok" };
+        }
+        followupWaitTimeoutMs =
+          typeof request.params?.timeoutMs === "number" ? request.params.timeoutMs : undefined;
+        return { runId: "run-finished-wait-followup", status: "timeout" };
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "discord",
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const result = await tool.execute("call-finished-child-wait", {
+      sessionKey: childKey,
+      message: "continue with the next slice",
+      timeoutSeconds: 1,
+    });
+    expect(result.details).toMatchObject({
+      status: "timeout",
+      runId: "run-finished-wait-followup",
+      sessionKey: childKey,
+      delivery: { status: "tracked", mode: "completion_event" },
+    });
+    expect(oldRunWaitTimeoutMs).toBe(5_000);
+    expect(followupWaitTimeoutMs).toBe(1_000);
   });
 });

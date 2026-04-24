@@ -3,7 +3,7 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { callGateway } from "../gateway/call.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
-import { createRunningTaskRun } from "../tasks/task-executor.js";
+import { createRunningTaskRun, reassignTaskRunByRunId } from "../tasks/task-executor.js";
 import { type DeliveryContext, normalizeDeliveryContext } from "../utils/delivery-context.js";
 import { waitForAgentRun } from "./run-wait.js";
 import type { ensureRuntimePluginsLoaded as ensureRuntimePluginsLoadedFn } from "./runtime-plugins.js";
@@ -179,6 +179,7 @@ export function createSubagentRunManager(params: {
     previousRunId: string;
     nextRunId: string;
     fallback?: SubagentRunRecord;
+    task?: string;
     runTimeoutSeconds?: number;
     preserveFrozenResultFallback?: boolean;
   }) => {
@@ -216,6 +217,7 @@ export function createSubagentRunManager(params: {
     const runTimeoutSeconds = replaceParams.runTimeoutSeconds ?? source.runTimeoutSeconds ?? 0;
     const waitTimeoutMs = params.resolveSubagentWaitTimeoutMs(cfg, runTimeoutSeconds);
     const preserveFrozenResultFallback = replaceParams.preserveFrozenResultFallback === true;
+    const task = replaceParams.task?.trim();
     const sessionStartedAt = getSubagentSessionStartedAt(source) ?? now;
     const accumulatedRuntimeMs =
       getSubagentSessionRuntimeMs(
@@ -226,6 +228,7 @@ export function createSubagentRunManager(params: {
     const next: SubagentRunRecord = {
       ...source,
       runId: nextRunId,
+      task: task || source.task,
       createdAt: now,
       startedAt: now,
       sessionStartedAt,
@@ -253,6 +256,28 @@ export function createSubagentRunManager(params: {
     };
 
     params.runs.set(nextRunId, next);
+    try {
+      reassignTaskRunByRunId({
+        currentRunId: previousRunId,
+        nextRunId,
+        runtime: "subagent",
+        sessionKey: next.childSessionKey,
+        sourceId: nextRunId,
+        label: next.label,
+        task: next.task,
+        restart: true,
+        startedAt: now,
+        lastEventAt: now,
+        deliveryStatus: next.expectsCompletionMessage === false ? "not_applicable" : "pending",
+      });
+    } catch (error) {
+      log.warn("Failed to reassign background task for steered subagent run", {
+        previousRunId,
+        nextRunId,
+        childSessionKey: next.childSessionKey,
+        error,
+      });
+    }
     params.ensureListener();
     params.persist();
     // Always start sweeper — session-mode runs (no archiveAtMs) also need TTL cleanup.

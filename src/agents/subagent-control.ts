@@ -39,7 +39,6 @@ import {
 import { getSubagentRunsSnapshotForRead } from "./subagent-registry-state.js";
 import {
   clearSubagentRunSteerRestart,
-  countPendingDescendantRuns,
   markSubagentRunTerminated,
   markSubagentRunForSteerRestart,
   replaceSubagentRunAfterSteer,
@@ -451,15 +450,6 @@ export async function steerControlledSubagentRun(params: {
       error: "Leaf subagents cannot control other sessions.",
     };
   }
-  const targetHasPendingDescendants = countPendingDescendantRuns(params.entry.childSessionKey) > 0;
-  if (params.entry.endedAt && !targetHasPendingDescendants) {
-    return {
-      status: "done",
-      runId: params.entry.runId,
-      sessionKey: params.entry.childSessionKey,
-      text: `${resolveSubagentLabel(params.entry)} is already finished.`,
-    };
-  }
   if (params.controller.callerSessionKey === params.entry.childSessionKey) {
     return {
       status: "forbidden",
@@ -469,13 +459,7 @@ export async function steerControlledSubagentRun(params: {
     };
   }
   const currentEntry = getLatestSubagentRunByChildSessionKey(params.entry.childSessionKey);
-  const currentHasPendingDescendants =
-    currentEntry && countPendingDescendantRuns(currentEntry.childSessionKey) > 0;
-  if (
-    !currentEntry ||
-    currentEntry.runId !== params.entry.runId ||
-    (currentEntry.endedAt && !currentHasPendingDescendants)
-  ) {
+  if (!currentEntry || currentEntry.runId !== params.entry.runId) {
     return {
       status: "done",
       runId: params.entry.runId,
@@ -535,6 +519,7 @@ export async function steerControlledSubagentRun(params: {
   }
 
   const idempotencyKey = crypto.randomUUID();
+  const runTimeoutSeconds = params.entry.runTimeoutSeconds ?? 0;
   let runId: string = idempotencyKey;
   try {
     const response = await subagentControlDeps.callGateway<{ runId: string }>({
@@ -547,7 +532,7 @@ export async function steerControlledSubagentRun(params: {
         deliver: false,
         channel: INTERNAL_MESSAGE_CHANNEL,
         lane: AGENT_LANE_SUBAGENT,
-        timeout: 0,
+        timeout: runTimeoutSeconds,
       },
       timeoutMs: 10_000,
     });
@@ -570,7 +555,8 @@ export async function steerControlledSubagentRun(params: {
     previousRunId: params.entry.runId,
     nextRunId: runId,
     fallback: params.entry,
-    runTimeoutSeconds: params.entry.runTimeoutSeconds ?? 0,
+    task: params.message,
+    runTimeoutSeconds,
   });
   if (!replaced) {
     clearSubagentRunSteerRestart(params.entry.runId);
@@ -599,6 +585,7 @@ export async function sendControlledSubagentMessage(params: {
   controller: ResolvedSubagentController;
   entry: SubagentRunRecord;
   message: string;
+  waitTimeoutMs?: number;
 }) {
   const ownershipError = ensureControllerOwnsRun({
     controller: params.controller,
@@ -613,6 +600,11 @@ export async function sendControlledSubagentMessage(params: {
       error: "Leaf subagents cannot control other sessions.",
     };
   }
+  const targetSessionKey = params.entry.childSessionKey;
+  const waitTimeoutMs =
+    typeof params.waitTimeoutMs === "number" && Number.isFinite(params.waitTimeoutMs)
+      ? Math.max(1, Math.floor(params.waitTimeoutMs))
+      : 30_000;
   const currentEntry = getLatestSubagentRunByChildSessionKey(params.entry.childSessionKey);
   if (!currentEntry || currentEntry.runId !== params.entry.runId) {
     return {
@@ -621,8 +613,68 @@ export async function sendControlledSubagentMessage(params: {
       text: `${resolveSubagentLabel(params.entry)} is already finished.`,
     };
   }
+  if (typeof currentEntry.endedAt === "number") {
+    try {
+      const baselineReply = await readLatestAssistantReplySnapshot({
+        sessionKey: targetSessionKey,
+        limit: SUBAGENT_REPLY_HISTORY_LIMIT,
+        callGateway: subagentControlDeps.callGateway,
+      });
+      const restart = await steerControlledSubagentRun({
+        cfg: params.cfg,
+        controller: params.controller,
+        entry: currentEntry,
+        message: params.message,
+      });
+      if (restart.status !== "accepted") {
+        if (restart.status === "forbidden") {
+          return {
+            status: "forbidden" as const,
+            error: restart.error ?? restart.text ?? "send failed",
+          };
+        }
+        if (restart.status === "done") {
+          return {
+            status: "done" as const,
+            runId: restart.runId ?? params.entry.runId,
+            text: restart.text ?? `${resolveSubagentLabel(params.entry)} is already finished.`,
+          };
+        }
+        return {
+          status: "error" as const,
+          runId: restart.runId ?? params.entry.runId,
+          error: restart.error ?? restart.text ?? "send failed",
+        };
+      }
+      const result = await waitForAgentRunAndReadUpdatedAssistantReply({
+        runId: restart.runId,
+        sessionKey: targetSessionKey,
+        timeoutMs: waitTimeoutMs,
+        limit: SUBAGENT_REPLY_HISTORY_LIMIT,
+        baseline: baselineReply,
+        callGateway: subagentControlDeps.callGateway,
+      });
+      if (result.status === "timeout") {
+        return { status: "timeout" as const, runId: restart.runId };
+      }
+      if (result.status === "error") {
+        return {
+          status: "error" as const,
+          runId: restart.runId,
+          error: result.error ?? "unknown error",
+        };
+      }
+      return { status: "ok" as const, runId: restart.runId, replyText: result.replyText };
+    } catch (err) {
+      const error = formatErrorMessage(err);
+      return {
+        status: "error" as const,
+        runId: currentEntry.runId,
+        error,
+      };
+    }
+  }
 
-  const targetSessionKey = params.entry.childSessionKey;
   const parsed = parseAgentSessionKey(targetSessionKey);
   const storePath = resolveStorePath(params.cfg.session?.store, { agentId: parsed?.agentId });
   const store = loadSessionStore(storePath);
@@ -633,6 +685,7 @@ export async function sendControlledSubagentMessage(params: {
       : undefined;
 
   const idempotencyKey = crypto.randomUUID();
+  const runTimeoutSeconds = params.entry.runTimeoutSeconds ?? 0;
   let runId: string = idempotencyKey;
   try {
     const baselineReply = await readLatestAssistantReplySnapshot({
@@ -651,7 +704,7 @@ export async function sendControlledSubagentMessage(params: {
         deliver: false,
         channel: INTERNAL_MESSAGE_CHANNEL,
         lane: AGENT_LANE_SUBAGENT,
-        timeout: 0,
+        timeout: runTimeoutSeconds,
       },
       timeoutMs: 10_000,
     });
@@ -663,7 +716,7 @@ export async function sendControlledSubagentMessage(params: {
     const result = await waitForAgentRunAndReadUpdatedAssistantReply({
       runId,
       sessionKey: targetSessionKey,
-      timeoutMs: 30_000,
+      timeoutMs: waitTimeoutMs,
       limit: SUBAGENT_REPLY_HISTORY_LIMIT,
       baseline: baselineReply,
       callGateway: subagentControlDeps.callGateway,

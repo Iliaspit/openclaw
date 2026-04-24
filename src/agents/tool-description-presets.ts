@@ -1,5 +1,6 @@
 export const EXEC_TOOL_DISPLAY_SUMMARY = "Run shell commands that start now.";
 export const PROCESS_TOOL_DISPLAY_SUMMARY = "Inspect and control running exec sessions.";
+export const CATALOG_TOOL_DISPLAY_SUMMARY = "Inspect repo file summaries.";
 export const CRON_TOOL_DISPLAY_SUMMARY = "Schedule cron jobs, reminders, and wake events.";
 export const SESSIONS_LIST_TOOL_DISPLAY_SUMMARY =
   "List visible sessions and optional recent messages.";
@@ -27,7 +28,8 @@ export function describeSessionsHistoryTool(): string {
 export function describeSessionsSendTool(): string {
   return [
     "Send a message into another visible session by sessionKey or label.",
-    "Use this to delegate follow-up work to an existing session; waits for the target run and returns the updated assistant reply when available.",
+    "Use this for direct cross-session messaging; waits for the target run and returns the updated assistant reply when available.",
+    "For spawned child-session orchestration with push-based completion, use `subagents(action=steer|kill|list)` or `sessions_spawn` instead of pairing `sessions_send` with `sessions_yield`.",
   ].join(" ");
 }
 
