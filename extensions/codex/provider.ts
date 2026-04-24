@@ -6,6 +6,7 @@ import {
   type ModelProviderConfig,
   type ProviderPlugin,
 } from "openclaw/plugin-sdk/provider-model-shared";
+import { supportsOpenAiFamilyXHighModelId } from "../openai/xhigh-model-support.js";
 import { resolveCodexSystemPromptContribution } from "./prompt-overlay.js";
 import {
   buildCodexModelDefinition,
@@ -87,7 +88,7 @@ export function buildCodexProvider(options: BuildCodexProviderOptions = {}): Pro
         { id: "low" },
         { id: "medium" },
         { id: "high" },
-        ...(isKnownXHighCodexModel(modelId) ? [{ id: "xhigh" as const }] : []),
+        ...(supportsOpenAiFamilyXHighModelId(modelId) ? [{ id: "xhigh" as const }] : []),
       ],
     }),
     resolveSystemPromptContribution: ({ config, modelId }) =>
@@ -198,16 +199,6 @@ function shouldDefaultToReasoningModel(modelId: string): boolean {
     lower.startsWith("o1") ||
     lower.startsWith("o3") ||
     lower.startsWith("o4")
-  );
-}
-
-function isKnownXHighCodexModel(modelId: string): boolean {
-  const lower = modelId.trim().toLowerCase();
-  return (
-    lower.startsWith("gpt-5") ||
-    lower.startsWith("o3") ||
-    lower.startsWith("o4") ||
-    lower.includes("codex")
   );
 }
 
