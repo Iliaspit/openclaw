@@ -420,8 +420,21 @@ function resumeSubagentRun(runId: string) {
   if (entry.cleanupCompletedAt) {
     return;
   }
+  const interruptedCleanupPending =
+    typeof entry.endedAt === "number" &&
+    entry.cleanupHandled === true &&
+    typeof entry.cleanupCompletedAt !== "number";
+  if (interruptedCleanupPending) {
+    // A restart can persist "cleanup started" without persisting completion.
+    // Re-open that stranded state and bypass stale retry bookkeeping so the
+    // interrupted cleanup path gets one more chance to finish.
+    entry.cleanupHandled = false;
+    entry.announceRetryCount = undefined;
+    entry.lastAnnounceRetryAt = undefined;
+    persistSubagentRuns();
+  }
   // Skip entries that have exhausted their retry budget or expired (#18264).
-  if ((entry.announceRetryCount ?? 0) >= MAX_ANNOUNCE_RETRY_COUNT) {
+  if (!interruptedCleanupPending && (entry.announceRetryCount ?? 0) >= MAX_ANNOUNCE_RETRY_COUNT) {
     void finalizeResumedAnnounceGiveUp({
       runId,
       entry,
@@ -430,6 +443,7 @@ function resumeSubagentRun(runId: string) {
     return;
   }
   if (
+    !interruptedCleanupPending &&
     entry.expectsCompletionMessage !== true &&
     typeof entry.endedAt === "number" &&
     Date.now() - entry.endedAt > ANNOUNCE_EXPIRY_MS
@@ -514,12 +528,11 @@ function restoreSubagentRunsOnce() {
     if (restoredCount === 0) {
       return;
     }
-    if (
-      reconcileOrphanedRestoredRuns({
-        runs: subagentRuns,
-        resumedRuns,
-      })
-    ) {
+    const reconciledOrphans = reconcileOrphanedRestoredRuns({
+      runs: subagentRuns,
+      resumedRuns,
+    });
+    if (reconciledOrphans) {
       persistSubagentRuns();
     }
     if (subagentRuns.size === 0) {
@@ -748,6 +761,7 @@ export function replaceSubagentRunAfterSteer(params: {
   previousRunId: string;
   nextRunId: string;
   fallback?: SubagentRunRecord;
+  task?: string;
   runTimeoutSeconds?: number;
   preserveFrozenResultFallback?: boolean;
 }) {

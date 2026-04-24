@@ -347,15 +347,15 @@ function buildMessagingSection(params: {
   const hasSubagents = params.availableTools.has("subagents");
   const subagentOrchestrationGuidance = hasSessionsSpawn
     ? hasSubagents
-      ? '- Sub-agent orchestration → use `sessions_spawn(...)` to start delegated work; omit `context` for isolated children, set `context:"fork"` only when the child needs the current transcript; use `subagents(action=list|steer|kill)` to manage already-spawned children.'
+      ? '- Sub-agent orchestration → use `sessions_spawn(...)` to start delegated work; omit `context` for isolated children, set `context:"fork"` only when the child needs the current transcript; use `subagents(action=list|steer|kill)` for tracked completion, restarting finished child sessions, and managing already-spawned children.'
       : '- Sub-agent orchestration → use `sessions_spawn(...)` to start delegated work; omit `context` for isolated children, set `context:"fork"` only when the child needs the current transcript.'
     : hasSubagents
-      ? "- Sub-agent orchestration → use `subagents(action=list|steer|kill)` to manage already-spawned children."
+      ? "- Sub-agent orchestration → use `subagents(action=list|steer|kill)` for tracked completion, restarting finished child sessions, and managing already-spawned children."
       : "";
   return [
     "## Messaging",
     "- Reply in current session → automatically routes to the source channel (Signal, Telegram, etc.)",
-    "- Cross-session messaging → use sessions_send(sessionKey, message)",
+    "- Cross-session messaging → use sessions_send(sessionKey, message) for plain inter-session messages",
     subagentOrchestrationGuidance,
     `- Runtime-generated completion events may ask for a user update. Rewrite those in your normal assistant voice and send the update (do not forward raw internal metadata or default to ${SILENT_REPLY_TOKEN}).`,
     "- Never use exec/curl for provider messaging; OpenClaw handles all routing internally.",
@@ -499,11 +499,13 @@ export function buildAgentSystemPrompt(params: {
       : "List OpenClaw agent ids allowed for sessions_spawn",
     sessions_list: "List other sessions (incl. sub-agents) with filters/last",
     sessions_history: "Fetch history for another session/sub-agent",
-    sessions_send: "Send a message to another session/sub-agent",
+    sessions_send:
+      "Send a plain message to another session; not the tracked child-orchestration path",
     sessions_spawn: acpSpawnRuntimeEnabled
       ? 'Spawn a sub-agent or ACP coding session; defaults to isolated, native subagents may use context="fork" when current transcript context is required (runtime="acp" requires `agentId` unless `acp.defaultAgent` is configured; ACP harness ids follow acp.allowedAgents, not agents_list)'
       : 'Spawn an isolated sub-agent session; use context="fork" only when current transcript context is required',
-    subagents: "List, steer, or kill sub-agent runs for this requester session",
+    subagents:
+      "List, steer, or kill tracked sub-agent runs for this requester session, including restarting finished child sessions",
     session_status:
       "Show a /status-equivalent status card (usage + time + Reasoning/Verbose/Elevated); use for model-use questions (📊 session_status); optional per-session model override",
     image: "Analyze an image with the configured image model",
@@ -695,13 +697,13 @@ export function buildAgentSystemPrompt(params: {
           "- cron: manage cron jobs and wake events (use for reminders; when scheduling a reminder, write the systemEvent text as something that will read like a reminder when it fires, and mention that it is a reminder depending on the time gap between setting and firing; include recent context in reminder text if appropriate)",
           "- sessions_list: list sessions",
           "- sessions_history: fetch session history",
-          "- sessions_send: send to another session",
-          "- subagents: list/steer/kill sub-agent runs",
+          "- sessions_send: send a plain message to another session",
+          "- subagents: list/steer/kill tracked sub-agent runs (including restarting finished child sessions)",
           '- session_status: show usage/time/model state and answer "what model are we using?"',
         ].join("\n"),
     "TOOLS.md does not control tool availability; it is user guidance for how to use external tools.",
     `For long waits, avoid rapid poll loops: use ${execToolName} with enough yieldMs or ${processToolName}(action=poll, timeout=<ms>).`,
-    "If a task is more complex or takes longer, spawn a sub-agent. Completion is push-based: it will auto-announce when done.",
+    "If a task is more complex or takes longer, spawn a sub-agent. Completion is push-based: it will auto-announce when done. Re-task existing child sessions through subagents when you need that same tracked completion path.",
     'Sub-agents start isolated by default. Use `sessions_spawn` with `context:"fork"` only when the child needs the current transcript context; otherwise omit `context` or use `context:"isolated"`.',
     ...(acpHarnessSpawnAllowed
       ? [

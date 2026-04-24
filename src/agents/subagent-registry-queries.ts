@@ -46,7 +46,10 @@ export function listRunsForRequesterFromRuns(
       return false;
     }
     if (typeof lowerBound === "number" && entry.createdAt < lowerBound) {
-      return false;
+      const completedAt = entry.completionAnnouncedAt ?? entry.cleanupCompletedAt;
+      if (typeof completedAt === "number" && completedAt < lowerBound) {
+        return false;
+      }
     }
     if (typeof upperBound === "number" && entry.createdAt > upperBound) {
       return false;

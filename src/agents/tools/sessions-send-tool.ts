@@ -18,6 +18,11 @@ import {
 } from "../run-wait.js";
 import { loadSessionEntryByKey } from "../subagent-announce-delivery.js";
 import {
+  listControlledSubagentRuns,
+  resolveSubagentController,
+  steerControlledSubagentRun,
+} from "../subagent-control.js";
+import {
   describeSessionsSendTool,
   SESSIONS_SEND_TOOL_DISPLAY_SUMMARY,
 } from "../tool-description-presets.js";
@@ -251,6 +256,90 @@ export function createSessionsSendTool(opts?: {
           status: access.status,
           error: access.error,
           sessionKey: displayKey,
+        });
+      }
+
+      const subagentController = resolveSubagentController({
+        cfg,
+        agentSessionKey: effectiveRequesterKey,
+      });
+      // Finished child sessions already have tracked lifecycle state; route
+      // follow-up work through subagent control so long runs keep push-based
+      // completion instead of the best-effort A2A announce loop.
+      const controlledEndedRun =
+        subagentController.controlScope === "children"
+          ? listControlledSubagentRuns(subagentController.controllerSessionKey).find(
+              (entry) => entry.childSessionKey === resolvedKey && typeof entry.endedAt === "number",
+            )
+          : undefined;
+      if (controlledEndedRun) {
+        const trackedDelivery = { status: "tracked", mode: "completion_event" as const };
+        const baselineReply =
+          timeoutSeconds === 0
+            ? undefined
+            : await readLatestAssistantReplySnapshot({
+                sessionKey: resolvedKey,
+                limit: SESSIONS_SEND_REPLY_HISTORY_LIMIT,
+                callGateway: gatewayCall,
+              });
+        const restart = await steerControlledSubagentRun({
+          cfg,
+          controller: subagentController,
+          entry: controlledEndedRun,
+          message,
+        });
+        if (restart.status !== "accepted") {
+          return jsonResult({
+            runId: restart.runId ?? crypto.randomUUID(),
+            status: "error",
+            error: restart.error ?? restart.text ?? "failed to restart tracked child session",
+            sessionKey: displayKey,
+          });
+        }
+        if (timeoutSeconds === 0) {
+          return jsonResult({
+            runId: restart.runId,
+            status: "accepted",
+            sessionKey: displayKey,
+            sessionId: restart.sessionId,
+            label: restart.label,
+            mode: restart.mode,
+            delivery: trackedDelivery,
+            text: restart.text,
+          });
+        }
+
+        const result = await waitForAgentRunAndReadUpdatedAssistantReply({
+          runId: restart.runId,
+          sessionKey: resolvedKey,
+          timeoutMs,
+          limit: SESSIONS_SEND_REPLY_HISTORY_LIMIT,
+          baseline: baselineReply,
+          callGateway: gatewayCall,
+        });
+        if (result.status === "timeout") {
+          return jsonResult({
+            runId: restart.runId,
+            status: "timeout",
+            error: result.error,
+            sessionKey: displayKey,
+            delivery: trackedDelivery,
+          });
+        }
+        if (result.status === "error") {
+          return jsonResult({
+            runId: restart.runId,
+            status: "error",
+            error: result.error ?? "agent error",
+            sessionKey: displayKey,
+          });
+        }
+        return jsonResult({
+          runId: restart.runId,
+          status: "ok",
+          reply: result.replyText,
+          sessionKey: displayKey,
+          delivery: trackedDelivery,
         });
       }
 

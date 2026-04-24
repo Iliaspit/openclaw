@@ -279,9 +279,15 @@ describe("buildAgentSystemPrompt", () => {
     });
 
     expect(prompt).toContain(
+      "Cross-session messaging → use sessions_send(sessionKey, message) for plain inter-session messages",
+    );
+    expect(prompt).toContain(
       "For long waits, avoid rapid poll loops: use exec with enough yieldMs or process(action=poll, timeout=<ms>).",
     );
     expect(prompt).toContain("Completion is push-based: it will auto-announce when done.");
+    expect(prompt).toContain(
+      "Re-task existing child sessions through subagents when you need that same tracked completion path.",
+    );
     expect(prompt).toContain("Do not poll `subagents list` / `sessions_list` in a loop");
     expect(prompt).toContain(
       "When a first-class tool exists for an action, use the tool directly instead of asking the user to run equivalent CLI or slash commands.",
@@ -298,6 +304,9 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("sessions_list");
     expect(prompt).toContain("sessions_history");
     expect(prompt).toContain("sessions_send");
+    expect(prompt).toContain(
+      "sessions_send: Send a plain message to another session; not the tracked child-orchestration path",
+    );
   });
 
   it("documents ACP sessions_spawn agent targeting requirements", () => {
@@ -929,6 +938,12 @@ describe("buildSubagentSystemPrompt", () => {
     expect(prompt).toContain("Do not ask users to run slash commands or CLI");
     expect(prompt).toContain("Do not use `exec` (`openclaw ...`, `acpx ...`)");
     expect(prompt).toContain("Use `subagents` only for OpenClaw subagents");
+    expect(prompt).toContain(
+      "Use `sessions_send` only for plain cross-session messaging; do not pair `sessions_send` with `sessions_yield` when you need child completion events.",
+    );
+    expect(prompt).toContain(
+      "When you need tracked completion for an existing finished OpenClaw child session, re-task it through `subagents` instead of `sessions_send`.",
+    );
     expect(prompt).toContain("Subagent results auto-announce back to you");
     expect(prompt).toContain(
       "After spawning children, do NOT call sessions_list, sessions_history, exec sleep, or any polling tool.",

@@ -16,6 +16,7 @@ import {
   markTaskLostById,
   markTaskRunningByRunId,
   markTaskTerminalByRunId,
+  reassignTaskRunByRunId as reassignTaskRunByRunIdInternal,
   recordTaskProgressByRunId,
   setTaskRunDeliveryStatusByRunId,
 } from "./runtime-internal.js";
@@ -222,6 +223,23 @@ export function setDetachedTaskDeliveryStatusByRunId(params: {
   deliveryStatus: TaskDeliveryStatus;
 }) {
   return setTaskRunDeliveryStatusByRunId(params);
+}
+
+export function reassignTaskRunByRunId(params: {
+  currentRunId: string;
+  nextRunId: string;
+  runtime?: TaskRuntime;
+  sessionKey?: string;
+  sourceId?: string;
+  label?: string;
+  task?: string;
+  restart?: boolean;
+  startedAt?: number;
+  lastEventAt?: number;
+  deliveryStatus?: TaskDeliveryStatus;
+  progressSummary?: string | null;
+}) {
+  return reassignTaskRunByRunIdInternal(params);
 }
 
 type RetryBlockedFlowResult = {

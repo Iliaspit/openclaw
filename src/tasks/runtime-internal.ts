@@ -21,6 +21,7 @@ export {
   markTaskTerminalById,
   markTaskTerminalByRunId,
   maybeDeliverTaskTerminalUpdate,
+  reassignTaskRunByRunId,
   recordTaskProgressByRunId,
   resetTaskRegistryDeliveryRuntimeForTests,
   resolveTaskForLookupToken,
