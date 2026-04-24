@@ -31,6 +31,7 @@ import {
   findCatalogTemplate,
   matchesExactOrPrefix,
 } from "./shared.js";
+import { supportsOpenAiFamilyXHighModelId } from "./xhigh-model-support.js";
 
 const PROVIDER_ID = "openai-codex";
 const OPENAI_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
@@ -76,15 +77,6 @@ const OPENAI_CODEX_GPT_53_SPARK_MODEL_ID = "gpt-5.3-codex-spark";
 const OPENAI_CODEX_GPT_53_SPARK_CONTEXT_TOKENS = 128_000;
 const OPENAI_CODEX_GPT_53_SPARK_MAX_TOKENS = 128_000;
 const OPENAI_CODEX_TEMPLATE_MODEL_IDS = ["gpt-5.2-codex"] as const;
-const OPENAI_CODEX_XHIGH_MODEL_IDS = [
-  OPENAI_CODEX_GPT_54_MODEL_ID,
-  OPENAI_CODEX_GPT_54_PRO_MODEL_ID,
-  OPENAI_CODEX_GPT_54_MINI_MODEL_ID,
-  OPENAI_CODEX_GPT_53_MODEL_ID,
-  OPENAI_CODEX_GPT_53_SPARK_MODEL_ID,
-  "gpt-5.2-codex",
-  "gpt-5.1-codex",
-] as const;
 const OPENAI_CODEX_MODERN_MODEL_IDS = [
   OPENAI_CODEX_GPT_54_MODEL_ID,
   OPENAI_CODEX_GPT_54_PRO_MODEL_ID,
@@ -317,8 +309,7 @@ export function buildOpenAICodexProviderPlugin(): ProviderPlugin {
       });
       return profile ? [{ ...profile, persistence: "runtime-only" }] : undefined;
     },
-    supportsXHighThinking: ({ modelId }) =>
-      matchesExactOrPrefix(modelId, OPENAI_CODEX_XHIGH_MODEL_IDS),
+    supportsXHighThinking: ({ modelId }) => supportsOpenAiFamilyXHighModelId(modelId),
     isModernModelRef: ({ modelId }) => matchesExactOrPrefix(modelId, OPENAI_CODEX_MODERN_MODEL_IDS),
     preferRuntimeResolvedModel: (ctx) => {
       if (normalizeProviderId(ctx.provider) !== PROVIDER_ID) {

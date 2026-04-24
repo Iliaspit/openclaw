@@ -19,6 +19,7 @@ import {
   findCatalogTemplate,
   matchesExactOrPrefix,
 } from "./shared.js";
+import { supportsOpenAiFamilyXHighModelId } from "./xhigh-model-support.js";
 
 const PROVIDER_ID = "openai";
 const OPENAI_GPT_54_MODEL_ID = "gpt-5.4";
@@ -48,13 +49,6 @@ const OPENAI_GPT_54_TEMPLATE_MODEL_IDS = ["gpt-5.2"] as const;
 const OPENAI_GPT_54_PRO_TEMPLATE_MODEL_IDS = ["gpt-5.2-pro", "gpt-5.2"] as const;
 const OPENAI_GPT_54_MINI_TEMPLATE_MODEL_IDS = ["gpt-5-mini"] as const;
 const OPENAI_GPT_54_NANO_TEMPLATE_MODEL_IDS = ["gpt-5-nano", "gpt-5-mini"] as const;
-const OPENAI_XHIGH_MODEL_IDS = [
-  "gpt-5.4",
-  "gpt-5.4-pro",
-  "gpt-5.4-mini",
-  "gpt-5.4-nano",
-  "gpt-5.2",
-] as const;
 const OPENAI_MODERN_MODEL_IDS = [
   "gpt-5.4",
   "gpt-5.4-pro",
@@ -96,9 +90,7 @@ function normalizeOpenAITransport(model: ProviderRuntimeModel): ProviderRuntimeM
   };
 }
 
-function resolveOpenAIGpt54ForwardCompatModel(
-  ctx: ProviderResolveDynamicModelContext,
-): ProviderRuntimeModel | undefined {
+function resolveOpenAIGpt54ForwardCompatModel(ctx: ProviderResolveDynamicModelContext) {
   const trimmedModelId = ctx.modelId.trim();
   const lower = normalizeLowercaseStringOrEmpty(trimmedModelId);
   let templateIds: readonly string[];
@@ -218,7 +210,7 @@ export function buildOpenAIProvider(): ProviderPlugin {
     matchesContextOverflowError: ({ errorMessage }) =>
       /content_filter.*(?:prompt|input).*(?:too long|exceed)/i.test(errorMessage),
     resolveReasoningOutputMode: () => "native",
-    supportsXHighThinking: ({ modelId }) => matchesExactOrPrefix(modelId, OPENAI_XHIGH_MODEL_IDS),
+    supportsXHighThinking: ({ modelId }) => supportsOpenAiFamilyXHighModelId(modelId),
     isModernModelRef: ({ modelId }) => matchesExactOrPrefix(modelId, OPENAI_MODERN_MODEL_IDS),
     buildMissingAuthMessage: (ctx) => {
       if (ctx.provider !== PROVIDER_ID || ctx.listProfileIds("openai-codex").length === 0) {

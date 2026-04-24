@@ -5,6 +5,7 @@ import {
   type ModelProviderConfig,
   type ProviderPlugin,
 } from "openclaw/plugin-sdk/provider-model-shared";
+import { supportsOpenAiFamilyXHighModelId } from "../openai/xhigh-model-support.js";
 import {
   listCodexAppServerModels,
   type CodexAppServerModel,
@@ -89,7 +90,7 @@ export function buildCodexProvider(options: BuildCodexProviderOptions = {}): Pro
       source: "codex-app-server",
       mode: "token",
     }),
-    supportsXHighThinking: ({ modelId }) => isKnownXHighCodexModel(modelId),
+    supportsXHighThinking: ({ modelId }) => supportsOpenAiFamilyXHighModelId(modelId),
     isModernModelRef: ({ modelId }) => isModernCodexModel(modelId),
   };
 }
@@ -122,7 +123,7 @@ export async function buildCodexProviderCatalog(
   };
 }
 
-function resolveCodexDynamicModel(modelId: string): ProviderRuntimeModel | undefined {
+function resolveCodexDynamicModel(modelId: string) {
   const id = modelId.trim();
   if (!id) {
     return undefined;
@@ -206,16 +207,6 @@ function shouldDefaultToReasoningModel(modelId: string): boolean {
     lower.startsWith("o1") ||
     lower.startsWith("o3") ||
     lower.startsWith("o4")
-  );
-}
-
-function isKnownXHighCodexModel(modelId: string): boolean {
-  const lower = modelId.trim().toLowerCase();
-  return (
-    lower.startsWith("gpt-5") ||
-    lower.startsWith("o3") ||
-    lower.startsWith("o4") ||
-    lower.includes("codex")
   );
 }
 
