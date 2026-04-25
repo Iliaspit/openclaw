@@ -21,6 +21,7 @@ import {
   resolveWhatsAppOutboundMediaUrls,
 } from "./outbound-media-contract.js";
 import { loadOutboundMediaFromUrl } from "./outbound-media.runtime.js";
+import { assertWhatsAppBridgeOutboundRecipientAllowed } from "./resolve-outbound-target.js";
 import { markdownToWhatsApp, toWhatsappJid } from "./text-runtime.js";
 
 const outboundLog = createSubsystemLogger("gateway/channels/whatsapp").child("outbound");
@@ -79,11 +80,11 @@ export async function sendMessageWhatsApp(
   },
 ): Promise<{ messageId: string; toJid: string }> {
   let text = options.preserveLeadingWhitespace ? body : normalizeWhatsAppPayloadText(body);
-  const jid = toWhatsappJid(to);
+  const emptySendToJid = toWhatsappJid(to);
   const mediaUrls = resolveWhatsAppOutboundMediaUrls(options);
   const primaryMediaUrl = mediaUrls[0];
   if (!text && !primaryMediaUrl) {
-    return { messageId: "", toJid: jid };
+    return { messageId: "", toJid: emptySendToJid };
   }
   const correlationId = generateSecureUuid();
   const startedAt = Date.now();
@@ -96,6 +97,11 @@ export async function sendMessageWhatsApp(
     cfg,
     accountId: resolvedAccountId ?? options.accountId,
   });
+  const sendTarget = assertWhatsAppBridgeOutboundRecipientAllowed({
+    to,
+    allowFrom: account.allowFrom ?? [],
+  });
+  const jid = toWhatsappJid(sendTarget);
   const tableMode = resolveMarkdownTableMode({
     cfg,
     channel: "whatsapp",
@@ -103,7 +109,7 @@ export async function sendMessageWhatsApp(
   });
   text = convertMarkdownTables(text ?? "", tableMode);
   text = markdownToWhatsApp(text);
-  const redactedTo = redactIdentifier(to);
+  const redactedTo = redactIdentifier(sendTarget);
   const logger = getChildLogger({
     module: "web-outbound",
     correlationId,
@@ -136,7 +142,7 @@ export async function sendMessageWhatsApp(
     }
     outboundLog.info(`Sending message -> ${redactedJid}${primaryMediaUrl ? " (media)" : ""}`);
     logger.info({ jid: redactedJid, hasMedia: Boolean(primaryMediaUrl) }, "sending message");
-    await active.sendComposingTo(to);
+    await active.sendComposingTo(sendTarget);
     const hasExplicitAccountId = Boolean(options.accountId?.trim());
     const accountId = hasExplicitAccountId ? resolvedAccountId : undefined;
     const sendOptions: ActiveWebSendOptions | undefined =
@@ -149,8 +155,8 @@ export async function sendMessageWhatsApp(
           }
         : undefined;
     const result = sendOptions
-      ? await active.sendMessage(to, text, mediaBuffer, mediaType, sendOptions)
-      : await active.sendMessage(to, text, mediaBuffer, mediaType);
+      ? await active.sendMessage(sendTarget, text, mediaBuffer, mediaType, sendOptions)
+      : await active.sendMessage(sendTarget, text, mediaBuffer, mediaType);
     const messageId = (result as { messageId?: string })?.messageId ?? "unknown";
     const durationMs = Date.now() - startedAt;
     outboundLog.info(
@@ -200,7 +206,15 @@ export async function sendReactionWhatsApp(
     cfg,
     accountId: options.accountId,
   });
-  const redactedChatJid = redactIdentifier(chatJid);
+  const reactionAccount = resolveWhatsAppAccount({
+    cfg,
+    accountId: options.accountId,
+  });
+  const chatTarget = assertWhatsAppBridgeOutboundRecipientAllowed({
+    to: chatJid,
+    allowFrom: reactionAccount.allowFrom ?? [],
+  });
+  const redactedChatJid = redactIdentifier(chatTarget);
   const logger = getChildLogger({
     module: "web-outbound",
     correlationId,
@@ -208,12 +222,12 @@ export async function sendReactionWhatsApp(
     messageId,
   });
   try {
-    const jid = toWhatsappJid(chatJid);
+    const jid = toWhatsappJid(chatTarget);
     const redactedJid = redactIdentifier(jid);
     outboundLog.info(`Sending reaction "${emoji}" -> message ${messageId}`);
     logger.info({ chatJid: redactedJid, messageId, emoji }, "sending reaction");
     await active.sendReaction(
-      chatJid,
+      chatTarget,
       messageId,
       emoji,
       options.fromMe ?? false,
@@ -242,14 +256,22 @@ export async function sendPollWhatsApp(
     cfg,
     accountId: options.accountId,
   });
-  const redactedTo = redactIdentifier(to);
+  const pollAccount = resolveWhatsAppAccount({
+    cfg,
+    accountId: options.accountId,
+  });
+  const sendTarget = assertWhatsAppBridgeOutboundRecipientAllowed({
+    to,
+    allowFrom: pollAccount.allowFrom ?? [],
+  });
+  const redactedTo = redactIdentifier(sendTarget);
   const logger = getChildLogger({
     module: "web-outbound",
     correlationId,
     to: redactedTo,
   });
   try {
-    const jid = toWhatsappJid(to);
+    const jid = toWhatsappJid(sendTarget);
     const redactedJid = redactIdentifier(jid);
     const normalized = normalizePollInput(poll, { maxOptions: 12 });
     outboundLog.info(`Sending poll -> ${redactedJid}`);
@@ -261,7 +283,7 @@ export async function sendPollWhatsApp(
       },
       "sending poll",
     );
-    const result = await active.sendPoll(to, normalized);
+    const result = await active.sendPoll(sendTarget, normalized);
     const messageId = (result as { messageId?: string })?.messageId ?? "unknown";
     const durationMs = Date.now() - startedAt;
     outboundLog.info(`Sent poll ${messageId} -> ${redactedJid} (${durationMs}ms)`);

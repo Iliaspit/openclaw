@@ -42,7 +42,7 @@ describe("createWhatsAppOutboundBase", () => {
     });
 
     expect(sendMessageWhatsApp).toHaveBeenCalledWith(
-      "whatsapp:+15551234567",
+      "+15551234567",
       "photo",
       expect.objectContaining({
         verbose: false,

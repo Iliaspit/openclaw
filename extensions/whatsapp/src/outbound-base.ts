@@ -15,8 +15,10 @@ import {
   normalizeWhatsAppOutboundPayload,
   normalizeWhatsAppPayloadText,
 } from "./outbound-media-contract.js";
+import { resolveWhatsAppAccount } from "./accounts.js";
 import { WHATSAPP_LEGACY_OUTBOUND_SEND_DEP_KEYS } from "./outbound-send-deps.js";
 import { lookupInboundMessageMetaForTarget } from "./quoted-message.js";
+import { assertWhatsAppBridgeOutboundRecipientAllowed } from "./resolve-outbound-target.js";
 import { toWhatsappJid } from "./text-runtime.js";
 
 type WhatsAppChunker = NonNullable<ChannelOutboundAdapter["chunker"]>;
@@ -78,6 +80,21 @@ function resolveQuoteLookupAccountId(cfg?: OpenClawConfig, accountId?: string | 
   return resolveListedDefaultAccountId({
     accountIds: configuredIds,
     configuredDefaultAccountId: normalizeOptionalAccountId(channelCfg?.defaultAccount),
+  });
+}
+
+function resolveGuardedOutboundTarget(params: {
+  cfg: OpenClawConfig;
+  to: string;
+  accountId?: string;
+}): string {
+  const account = resolveWhatsAppAccount({
+    cfg: params.cfg,
+    accountId: params.accountId,
+  });
+  return assertWhatsAppBridgeOutboundRecipientAllowed({
+    to: params.to,
+    allowFrom: account.allowFrom ?? [],
   });
 }
 
@@ -156,13 +173,18 @@ export function createWhatsAppOutboundBase({
           resolveOutboundSendDep<WhatsAppSendMessage>(deps, "whatsapp", {
             legacyKeys: WHATSAPP_LEGACY_OUTBOUND_SEND_DEP_KEYS,
           }) ?? sendMessageWhatsApp;
+        const sendTarget = resolveGuardedOutboundTarget({
+          cfg,
+          to,
+          accountId: accountId ?? undefined,
+        });
         const lookupAccountId = resolveQuoteLookupAccountId(cfg, accountId);
         const quotedMessageKey = resolveQuotedMessageKey({
           accountId: lookupAccountId,
-          to,
+          to: sendTarget,
           replyToId,
         });
-        return await send(to, normalizedText, {
+        return await send(sendTarget, normalizedText, {
           verbose: false,
           cfg,
           accountId: accountId ?? undefined,
@@ -187,13 +209,18 @@ export function createWhatsAppOutboundBase({
           resolveOutboundSendDep<WhatsAppSendMessage>(deps, "whatsapp", {
             legacyKeys: WHATSAPP_LEGACY_OUTBOUND_SEND_DEP_KEYS,
           }) ?? sendMessageWhatsApp;
+        const sendTarget = resolveGuardedOutboundTarget({
+          cfg,
+          to,
+          accountId: accountId ?? undefined,
+        });
         const lookupAccountId = resolveQuoteLookupAccountId(cfg, accountId);
         const quotedMessageKey = resolveQuotedMessageKey({
           accountId: lookupAccountId,
-          to,
+          to: sendTarget,
           replyToId,
         });
-        return await send(to, normalizeText(text), {
+        return await send(sendTarget, normalizeText(text), {
           verbose: false,
           cfg,
           mediaUrl,
@@ -205,12 +232,18 @@ export function createWhatsAppOutboundBase({
           quotedMessageKey,
         });
       },
-      sendPoll: async ({ cfg, to, poll, accountId }) =>
-        await sendPollWhatsApp(to, poll, {
+      sendPoll: async ({ cfg, to, poll, accountId }) => {
+        const sendTarget = resolveGuardedOutboundTarget({
+          cfg,
+          to,
+          accountId: accountId ?? undefined,
+        });
+        return await sendPollWhatsApp(sendTarget, poll, {
           verbose: shouldLogVerbose(),
           accountId: accountId ?? undefined,
           cfg,
-        }),
+        });
+      },
     }),
   };
   return {
