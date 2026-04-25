@@ -15,7 +15,7 @@ describe("device bootstrap profile", () => {
         "operator.read",
         "operator.write",
       ]),
-    ).toEqual(["operator.approvals", "operator.read", "operator.write"]);
+    ).toEqual(["operator.admin", "operator.approvals", "operator.read", "operator.write"]);
 
     expect(
       resolveBootstrapProfileScopesForRole("node", ["node.exec", "operator.approvals"]),
@@ -24,6 +24,7 @@ describe("device bootstrap profile", () => {
 
   test("bootstrap handoff operator allowlist stays aligned with pairing setup profile", () => {
     expect([...BOOTSTRAP_HANDOFF_OPERATOR_SCOPES]).toEqual([
+      "operator.admin",
       "operator.approvals",
       "operator.read",
       "operator.talk.secrets",

@@ -24,6 +24,8 @@ export type SessionAccessResult =
   | { allowed: true }
   | { allowed: false; error: string; status: "forbidden" };
 
+const DEFAULT_A2A_ALLOW = ["main", "planner"];
+
 export function resolveSessionToolsVisibility(cfg: OpenClawConfig): SessionToolsVisibility {
   const raw = (cfg.tools as { sessions?: { visibility?: unknown } } | undefined)?.sessions
     ?.visibility;
@@ -31,7 +33,7 @@ export function resolveSessionToolsVisibility(cfg: OpenClawConfig): SessionTools
   if (value === "self" || value === "tree" || value === "agent" || value === "all") {
     return value;
   }
-  return "tree";
+  return "all";
 }
 
 export function resolveEffectiveSessionToolsVisibility(params: {
@@ -93,8 +95,8 @@ export function resolveSandboxedSessionToolContext(params: {
 
 export function createAgentToAgentPolicy(cfg: OpenClawConfig): AgentToAgentPolicy {
   const routingA2A = cfg.tools?.agentToAgent;
-  const enabled = routingA2A?.enabled === true;
-  const allowPatterns = Array.isArray(routingA2A?.allow) ? routingA2A.allow : [];
+  const enabled = routingA2A?.enabled ?? true;
+  const allowPatterns = Array.isArray(routingA2A?.allow) ? routingA2A.allow : DEFAULT_A2A_ALLOW;
   const matchesAllow = (agentId: string) => {
     if (allowPatterns.length === 0) {
       return true;

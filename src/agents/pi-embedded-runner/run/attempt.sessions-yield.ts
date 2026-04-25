@@ -103,6 +103,24 @@ export function createYieldAbortedResponse(model: {
   };
 }
 
+export function resolveSessionsYieldAbortedResponse(params: {
+  yieldDetected: boolean;
+  abortSignal: AbortSignal & { reason?: unknown };
+  abortForYield: () => void;
+  model: { api?: string; provider?: string; id?: string };
+}): ReturnType<typeof createYieldAbortedResponse> | null {
+  if (!params.yieldDetected) {
+    return null;
+  }
+  if (!params.abortSignal.aborted) {
+    params.abortForYield();
+  }
+  if (params.abortSignal.aborted && params.abortSignal.reason === "sessions_yield") {
+    return createYieldAbortedResponse(params.model);
+  }
+  return null;
+}
+
 // Queue a hidden steering message so pi-agent-core injects it before the next
 // LLM call once the current assistant turn finishes executing its tool calls.
 export function queueSessionsYieldInterruptMessage(activeSession: {

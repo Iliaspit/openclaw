@@ -69,6 +69,14 @@
         "fileName"
       ]
     },
+    "catalog": {
+      "emoji": "🗂️",
+      "title": "Catalog",
+      "detailKeys": [
+        "paths",
+        "summarizer"
+      ]
+    },
     "browser": {
       "emoji": "🌐",
       "title": "Browser",

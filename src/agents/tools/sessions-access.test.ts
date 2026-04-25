@@ -11,13 +11,13 @@ import {
 import { __testing as sessionsResolutionTesting } from "./sessions-resolution.js";
 
 describe("resolveSessionToolsVisibility", () => {
-  it("defaults to tree when unset or invalid", () => {
-    expect(resolveSessionToolsVisibility({} as unknown as OpenClawConfig)).toBe("tree");
+  it("defaults to all when unset or invalid", () => {
+    expect(resolveSessionToolsVisibility({} as unknown as OpenClawConfig)).toBe("all");
     expect(
       resolveSessionToolsVisibility({
         tools: { sessions: { visibility: "invalid" } },
       } as unknown as OpenClawConfig),
-    ).toBe("tree");
+    ).toBe("all");
   });
 
   it("accepts known visibility values case-insensitively", () => {
@@ -85,11 +85,23 @@ describe("sandbox session-tools context", () => {
 });
 
 describe("createAgentToAgentPolicy", () => {
-  it("denies cross-agent access when disabled", () => {
+  it("allows main and planner by default", () => {
     const policy = createAgentToAgentPolicy({} as unknown as OpenClawConfig);
+    expect(policy.enabled).toBe(true);
+    expect(policy.isAllowed("main", "main")).toBe(true);
+    expect(policy.isAllowed("main", "planner")).toBe(true);
+    expect(policy.isAllowed("planner", "main")).toBe(true);
+    expect(policy.isAllowed("main", "ops")).toBe(false);
+  });
+
+  it("denies cross-agent access when explicitly disabled", () => {
+    const policy = createAgentToAgentPolicy({
+      tools: { agentToAgent: { enabled: false } },
+    } as unknown as OpenClawConfig);
+
     expect(policy.enabled).toBe(false);
     expect(policy.isAllowed("main", "main")).toBe(true);
-    expect(policy.isAllowed("main", "ops")).toBe(false);
+    expect(policy.isAllowed("main", "planner")).toBe(false);
   });
 
   it("honors allow patterns when enabled", () => {
@@ -146,7 +158,9 @@ describe("createSessionVisibilityGuard", () => {
       action: "send",
       requesterSessionKey: "agent:main:main",
       visibility: "all",
-      a2aPolicy: createAgentToAgentPolicy({} as unknown as OpenClawConfig),
+      a2aPolicy: createAgentToAgentPolicy({
+        tools: { agentToAgent: { enabled: false } },
+      } as unknown as OpenClawConfig),
     });
 
     expect(guard.check("agent:ops:main")).toEqual({
