@@ -4,7 +4,9 @@ import {
 } from "openclaw/plugin-sdk/channel-send-result";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
 import { resolveOutboundSendDep, sanitizeForPlainText } from "openclaw/plugin-sdk/infra-runtime";
+import { resolveWhatsAppAccount } from "./accounts.js";
 import { WHATSAPP_LEGACY_OUTBOUND_SEND_DEP_KEYS } from "./outbound-send-deps.js";
+import { assertWhatsAppBridgeOutboundRecipientAllowed } from "./resolve-outbound-target.js";
 
 type WhatsAppChunker = NonNullable<ChannelOutboundAdapter["chunker"]>;
 type WhatsAppSendTextOptions = {
@@ -40,6 +42,21 @@ type CreateWhatsAppOutboundBaseParams = {
   normalizeText?: (text: string | undefined) => string;
   skipEmptyText?: boolean;
 };
+
+function resolveGuardedOutboundTarget(params: {
+  cfg: OpenClawConfig;
+  to: string;
+  accountId?: string;
+}): string {
+  const account = resolveWhatsAppAccount({
+    cfg: params.cfg,
+    accountId: params.accountId,
+  });
+  return assertWhatsAppBridgeOutboundRecipientAllowed({
+    to: params.to,
+    allowFrom: account.allowFrom ?? [],
+  });
+}
 
 export function createWhatsAppOutboundBase({
   chunker,
@@ -77,11 +94,16 @@ export function createWhatsAppOutboundBase({
         if (skipEmptyText && !normalizedText) {
           return { messageId: "" };
         }
+        const sendTarget = resolveGuardedOutboundTarget({
+          cfg,
+          to,
+          accountId: accountId ?? undefined,
+        });
         const send =
           resolveOutboundSendDep<WhatsAppSendMessage>(deps, "whatsapp", {
             legacyKeys: WHATSAPP_LEGACY_OUTBOUND_SEND_DEP_KEYS,
           }) ?? sendMessageWhatsApp;
-        return await send(to, normalizedText, {
+        return await send(sendTarget, normalizedText, {
           verbose: false,
           cfg,
           accountId: accountId ?? undefined,
@@ -100,11 +122,16 @@ export function createWhatsAppOutboundBase({
         deps,
         gifPlayback,
       }) => {
+        const sendTarget = resolveGuardedOutboundTarget({
+          cfg,
+          to,
+          accountId: accountId ?? undefined,
+        });
         const send =
           resolveOutboundSendDep<WhatsAppSendMessage>(deps, "whatsapp", {
             legacyKeys: WHATSAPP_LEGACY_OUTBOUND_SEND_DEP_KEYS,
           }) ?? sendMessageWhatsApp;
-        return await send(to, normalizeText(text), {
+        return await send(sendTarget, normalizeText(text), {
           verbose: false,
           cfg,
           mediaUrl,
@@ -115,12 +142,18 @@ export function createWhatsAppOutboundBase({
           gifPlayback,
         });
       },
-      sendPoll: async ({ cfg, to, poll, accountId }) =>
-        await sendPollWhatsApp(to, poll, {
+      sendPoll: async ({ cfg, to, poll, accountId }) => {
+        const sendTarget = resolveGuardedOutboundTarget({
+          cfg,
+          to,
+          accountId: accountId ?? undefined,
+        });
+        return await sendPollWhatsApp(sendTarget, poll, {
           verbose: shouldLogVerbose(),
           accountId: accountId ?? undefined,
           cfg,
-        }),
+        });
+      },
     }),
   };
 }

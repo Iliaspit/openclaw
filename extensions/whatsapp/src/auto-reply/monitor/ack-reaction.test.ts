@@ -55,8 +55,9 @@ describe("maybeSendAckReaction", () => {
   it.each(["ack", "minimal", "extensive"] as const)(
     "sends ack reactions when reactionLevel is %s",
     (reactionLevel) => {
+      const cfg = createConfig(reactionLevel);
       maybeSendAckReaction({
-        cfg: createConfig(reactionLevel),
+        cfg,
         msg: createMessage(),
         agentId: "agent",
         sessionKey: "whatsapp:default:15551234567",
@@ -76,6 +77,7 @@ describe("maybeSendAckReaction", () => {
           fromMe: false,
           participant: undefined,
           accountId: "default",
+          cfg,
         },
       );
     },
@@ -98,14 +100,15 @@ describe("maybeSendAckReaction", () => {
   });
 
   it("uses the active account reactionLevel override for ack gating", () => {
-    maybeSendAckReaction({
-      cfg: createConfig("off", {
-        accounts: {
-          work: {
-            reactionLevel: "ack",
-          },
+    const cfg = createConfig("off", {
+      accounts: {
+        work: {
+          reactionLevel: "ack",
         },
-      }),
+      },
+    });
+    maybeSendAckReaction({
+      cfg,
       msg: createMessage({
         accountId: "work",
       }),
@@ -127,6 +130,7 @@ describe("maybeSendAckReaction", () => {
         fromMe: false,
         participant: undefined,
         accountId: "work",
+        cfg,
       },
     );
   });

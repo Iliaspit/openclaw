@@ -39,10 +39,12 @@ describe("handleWhatsAppAction", () => {
       fromMe: undefined,
       participant: undefined,
       accountId: DEFAULT_ACCOUNT_ID,
+      cfg: enabledConfig,
     });
   });
 
   it("adds reactions when reactionLevel is minimal", async () => {
+    const cfg = reactionConfig("minimal");
     await handleWhatsAppAction(
       {
         action: "react",
@@ -50,17 +52,19 @@ describe("handleWhatsAppAction", () => {
         messageId: "msg1",
         emoji: "✅",
       },
-      reactionConfig("minimal"),
+      cfg,
     );
     expect(sendReactionWhatsApp).toHaveBeenLastCalledWith("+123", "msg1", "✅", {
       verbose: false,
       fromMe: undefined,
       participant: undefined,
       accountId: DEFAULT_ACCOUNT_ID,
+      cfg,
     });
   });
 
   it("adds reactions when reactionLevel is extensive", async () => {
+    const cfg = reactionConfig("extensive");
     await handleWhatsAppAction(
       {
         action: "react",
@@ -68,13 +72,14 @@ describe("handleWhatsAppAction", () => {
         messageId: "msg1",
         emoji: "✅",
       },
-      reactionConfig("extensive"),
+      cfg,
     );
     expect(sendReactionWhatsApp).toHaveBeenLastCalledWith("+123", "msg1", "✅", {
       verbose: false,
       fromMe: undefined,
       participant: undefined,
       accountId: DEFAULT_ACCOUNT_ID,
+      cfg,
     });
   });
 
@@ -93,6 +98,7 @@ describe("handleWhatsAppAction", () => {
       fromMe: undefined,
       participant: undefined,
       accountId: DEFAULT_ACCOUNT_ID,
+      cfg: enabledConfig,
     });
   });
 
@@ -112,6 +118,7 @@ describe("handleWhatsAppAction", () => {
       fromMe: undefined,
       participant: undefined,
       accountId: DEFAULT_ACCOUNT_ID,
+      cfg: enabledConfig,
     });
   });
 
@@ -133,6 +140,7 @@ describe("handleWhatsAppAction", () => {
       fromMe: true,
       participant: "999@s.whatsapp.net",
       accountId: "work",
+      cfg: enabledConfig,
     });
   });
 
@@ -152,6 +160,7 @@ describe("handleWhatsAppAction", () => {
       fromMe: undefined,
       participant: "123@lid",
       accountId: DEFAULT_ACCOUNT_ID,
+      cfg: enabledConfig,
     });
   });
 
@@ -285,6 +294,7 @@ describe("handleWhatsAppAction", () => {
       fromMe: undefined,
       participant: undefined,
       accountId: "work",
+      cfg,
     });
   });
 });

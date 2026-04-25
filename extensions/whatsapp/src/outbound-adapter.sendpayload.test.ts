@@ -12,7 +12,7 @@ describe("whatsappOutbound sendPayload", () => {
       deps: { sendWhatsApp },
     });
 
-    expect(sendWhatsApp).toHaveBeenCalledWith("5511999999999@c.us", "hello", {
+    expect(sendWhatsApp).toHaveBeenCalledWith("+5511999999999", "hello", {
       verbose: false,
       cfg: {},
       accountId: undefined,
@@ -31,7 +31,7 @@ describe("whatsappOutbound sendPayload", () => {
       deps: { sendWhatsApp },
     });
 
-    expect(sendWhatsApp).toHaveBeenCalledWith("5511999999999@c.us", "caption", {
+    expect(sendWhatsApp).toHaveBeenCalledWith("+5511999999999", "caption", {
       verbose: false,
       cfg: {},
       mediaUrl: "/tmp/test.png",
@@ -59,13 +59,13 @@ describe("whatsappOutbound sendPayload", () => {
       deps: { sendWhatsApp },
     });
 
-    expect(sendWhatsApp).toHaveBeenNthCalledWith(1, "5511999999999@c.us", "hello", {
+    expect(sendWhatsApp).toHaveBeenNthCalledWith(1, "+5511999999999", "hello", {
       verbose: false,
       cfg: {},
       accountId: undefined,
       gifPlayback: undefined,
     });
-    expect(sendWhatsApp).toHaveBeenNthCalledWith(2, "5511999999999@c.us", "caption", {
+    expect(sendWhatsApp).toHaveBeenNthCalledWith(2, "+5511999999999", "caption", {
       verbose: false,
       cfg: {},
       mediaUrl: "/tmp/test.png",
@@ -87,6 +87,21 @@ describe("whatsappOutbound sendPayload", () => {
     });
 
     expect(result).toEqual({ channel: "whatsapp", messageId: "" });
+    expect(sendWhatsApp).not.toHaveBeenCalled();
+  });
+
+  it("blocks injected send deps when recipient is outside allowFrom", async () => {
+    const sendWhatsApp = vi.fn(async () => ({ messageId: "wa-1", toJid: "jid" }));
+
+    await expect(
+      whatsappOutbound.sendText!({
+        cfg: { channels: { whatsapp: { allowFrom: ["+15550001111"] } } },
+        to: "+15550002222",
+        text: "hello",
+        deps: { sendWhatsApp },
+      }),
+    ).rejects.toThrow(/not listed in the configured WhatsApp allowFrom policy/);
+
     expect(sendWhatsApp).not.toHaveBeenCalled();
   });
 });

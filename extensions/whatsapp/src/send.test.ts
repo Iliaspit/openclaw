@@ -367,12 +367,72 @@ describe("web outbound", () => {
       verbose: false,
       fromMe: false,
     });
-    expect(sendReaction).toHaveBeenCalledWith(
-      "1555@s.whatsapp.net",
-      "msg123",
-      "✅",
-      false,
-      undefined,
-    );
+    expect(sendReaction).toHaveBeenCalledWith("+1555", "msg123", "✅", false, undefined);
+  });
+
+  describe("bridge allowFrom guard", () => {
+    const restrictiveCfg = {
+      channels: {
+        whatsapp: {
+          allowFrom: ["+19990001111"],
+        },
+      },
+    } as OpenClawConfig;
+
+    it("blocks sendMessageWhatsApp when recipient is outside allowFrom", async () => {
+      await expect(
+        sendMessageWhatsApp("+15550002222", "hi", { verbose: false, cfg: restrictiveCfg }),
+      ).rejects.toThrow(/not listed in the configured WhatsApp allowFrom policy/);
+      expect(sendComposingTo).not.toHaveBeenCalled();
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
+
+    it("allows sendMessageWhatsApp when recipient matches allowFrom", async () => {
+      await sendMessageWhatsApp("+19990001111", "hi", { verbose: false, cfg: restrictiveCfg });
+      expect(sendMessage).toHaveBeenCalled();
+    });
+
+    it("sends the canonical target after allowFrom normalization", async () => {
+      await sendMessageWhatsApp("19990001111@s.whatsapp.net", "hi", {
+        verbose: false,
+        cfg: restrictiveCfg,
+      });
+      expect(sendComposingTo).toHaveBeenCalledWith("+19990001111");
+      expect(sendMessage).toHaveBeenCalledWith("+19990001111", "hi", undefined, undefined);
+    });
+
+    it("allows sendMessageWhatsApp to group JIDs regardless of DM allowFrom", async () => {
+      await sendMessageWhatsApp("120363123456789012@g.us", "group hi", {
+        verbose: false,
+        cfg: restrictiveCfg,
+      });
+      expect(sendMessage).toHaveBeenCalledWith(
+        "120363123456789012@g.us",
+        "group hi",
+        undefined,
+        undefined,
+      );
+    });
+
+    it("blocks sendPollWhatsApp when recipient is outside allowFrom", async () => {
+      await expect(
+        sendPollWhatsApp(
+          "+15550002222",
+          { question: "Q?", options: ["A", "B"], maxSelections: 1 },
+          { verbose: false, cfg: restrictiveCfg },
+        ),
+      ).rejects.toThrow(/not listed in the configured WhatsApp allowFrom policy/);
+      expect(sendPoll).not.toHaveBeenCalled();
+    });
+
+    it("blocks sendReactionWhatsApp when chat is outside allowFrom", async () => {
+      await expect(
+        sendReactionWhatsApp("15550002222@s.whatsapp.net", "msg1", "👍", {
+          verbose: false,
+          cfg: restrictiveCfg,
+        }),
+      ).rejects.toThrow(/not listed in the configured WhatsApp allowFrom policy/);
+      expect(sendReaction).not.toHaveBeenCalled();
+    });
   });
 });
