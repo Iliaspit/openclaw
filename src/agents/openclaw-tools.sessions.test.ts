@@ -804,6 +804,92 @@ describe("sessions tools", () => {
     expect(sendCallCount).toBe(0);
   });
 
+  it("sessions_send keeps late announce flow alive after a synchronous timeout", async () => {
+    const calls: Array<{ method?: string; params?: unknown }> = [];
+    let agentCallCount = 0;
+    let runOneWaitCount = 0;
+    let lastWaitedRunId: string | undefined;
+    const runOneWaitTimeouts: number[] = [];
+    const replyByRunId = new Map<string, string>();
+    const requesterKey = "discord:group:req";
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      calls.push(request);
+      if (request.method === "agent") {
+        agentCallCount += 1;
+        const runId = `run-${agentCallCount}`;
+        const message = typeof request.params?.message === "string" ? request.params.message : "";
+        replyByRunId.set(runId, message === "slow" ? "late done" : "ANNOUNCE_SKIP");
+        return { runId, status: "accepted" };
+      }
+      if (request.method === "agent.wait") {
+        const runId = typeof request.params?.runId === "string" ? request.params.runId : "";
+        lastWaitedRunId = runId;
+        if (runId === "run-1") {
+          runOneWaitCount += 1;
+          runOneWaitTimeouts.push(
+            typeof request.params?.timeoutMs === "number" ? request.params.timeoutMs : 0,
+          );
+          return { runId, status: runOneWaitCount === 1 ? "timeout" : "ok" };
+        }
+        return { runId, status: "ok" };
+      }
+      if (request.method === "chat.history") {
+        return {
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "text", text: replyByRunId.get(lastWaitedRunId ?? "") ?? "" }],
+              timestamp: 20,
+            },
+          ],
+        };
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "discord",
+      config: {
+        ...TEST_CONFIG,
+        session: {
+          ...TEST_CONFIG.session,
+          agentToAgent: { maxPingPongTurns: 0 },
+        },
+      },
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const result = await tool.execute("call-timeout-late-announce", {
+      sessionKey: "main",
+      message: "slow",
+      timeoutSeconds: 1,
+    });
+
+    expect(result.details).toMatchObject({
+      status: "timeout",
+      runId: "run-1",
+      delivery: { status: "pending", mode: "announce" },
+    });
+    await waitForCalls(
+      () =>
+        calls.filter(
+          (call) =>
+            call.method === "agent.wait" &&
+            (call.params as { runId?: string } | undefined)?.runId === "run-1",
+        ).length,
+      2,
+    );
+    await waitForCalls(() => calls.filter((call) => call.method === "chat.history").length, 1);
+
+    expect(runOneWaitTimeouts[0]).toBe(1_000);
+    expect(runOneWaitTimeouts[1]).toBe(600_000);
+  });
+
   it("sessions_send resolves sessionId inputs", async () => {
     const sessionId = "sess-send";
     const targetKey = "agent:main:discord:channel:123";
@@ -1175,6 +1261,75 @@ describe("sessions tools", () => {
     });
     expect(calls.some((call) => call.method === "chat.history")).toBe(false);
     expect(calls.some((call) => call.method === "send")).toBe(false);
+  });
+
+  it("sessions_send lets a requester message its own cross-agent child despite agentToAgent allowlist", async () => {
+    const calls: Array<{ method?: string; params?: unknown }> = [];
+    const requesterKey = "agent:planner:main";
+    const childKey = "agent:implementer:subagent:impl-review-fix-1";
+    addSubagentRunForTests({
+      runId: "run-finished-implementer-child",
+      childSessionKey: childKey,
+      controllerSessionKey: requesterKey,
+      requesterSessionKey: requesterKey,
+      requesterDisplayKey: requesterKey,
+      task: "implementer review fix",
+      cleanup: "keep",
+      spawnMode: "session",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+      endedAt: Date.now() - 1_000,
+      outcome: { status: "ok" },
+    });
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: unknown };
+      calls.push(request);
+      if (request.method === "agent") {
+        return { runId: "run-implementer-followup", status: "accepted" };
+      }
+      if (request.method === "agent.wait") {
+        return { runId: "run-implementer-followup", status: "pending" };
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "discord",
+      config: {
+        ...TEST_CONFIG,
+        tools: {
+          ...TEST_CONFIG.tools,
+          agentToAgent: { enabled: true, allow: ["planner"] },
+        },
+      },
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const result = await tool.execute("call-cross-agent-owned-child", {
+      sessionKey: childKey,
+      message: "Task T4: apply the reviewer fix",
+      timeoutSeconds: 0,
+    });
+
+    expect(result.details).toMatchObject({
+      status: "accepted",
+      runId: "run-implementer-followup",
+      sessionKey: childKey,
+      delivery: { status: "tracked", mode: "completion_event" },
+      mode: "restart",
+    });
+    const agentCalls = calls.filter((call) => call.method === "agent");
+    expect(agentCalls).toHaveLength(1);
+    expect(agentCalls[0]?.params).toMatchObject({
+      sessionKey: childKey,
+      deliver: false,
+      lane: "subagent",
+    });
   });
 
   it("sessions_send restarts ended controlled child sessions with descendants and honors timeoutSeconds", async () => {

@@ -34,6 +34,7 @@ export async function runSessionsSendA2AFlow(params: {
   displayKey: string;
   message: string;
   announceTimeoutMs: number;
+  waitTimeoutMs?: number;
   maxPingPongTurns: number;
   requesterSessionKey?: string;
   requesterChannel?: GatewayMessageChannel;
@@ -45,9 +46,13 @@ export async function runSessionsSendA2AFlow(params: {
     let primaryReply = params.roundOneReply;
     let latestReply = params.roundOneReply;
     if (!primaryReply && params.waitRunId) {
+      const waitTimeoutMs =
+        typeof params.waitTimeoutMs === "number" && Number.isFinite(params.waitTimeoutMs)
+          ? Math.max(1, Math.floor(params.waitTimeoutMs))
+          : Math.min(params.announceTimeoutMs, 60_000);
       const wait = await waitForAgentRun({
         runId: params.waitRunId,
-        timeoutMs: Math.min(params.announceTimeoutMs, 60_000),
+        timeoutMs: waitTimeoutMs,
         callGateway: sessionsSendA2ADeps.callGateway,
       });
       if (wait.status === "ok") {

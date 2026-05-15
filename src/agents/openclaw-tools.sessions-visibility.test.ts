@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { subagentRuns } from "./subagent-registry-memory.js";
+import type { SubagentRunRecord } from "./subagent-registry.types.js";
 import { createSessionsHistoryTool } from "./tools/sessions-history-tool.js";
 
 const callGatewayMock = vi.fn();
@@ -17,9 +19,9 @@ vi.mock("../config/config.js", async () => {
     resolveGatewayPort: () => 18789,
   };
 });
-function getSessionsHistoryTool(options?: { sandboxed?: boolean }) {
+function getSessionsHistoryTool(options?: { agentSessionKey?: string; sandboxed?: boolean }) {
   return createSessionsHistoryTool({
-    agentSessionKey: "main",
+    agentSessionKey: options?.agentSessionKey ?? "main",
     sandboxed: options?.sandboxed,
     config: mockConfig as never,
     callGateway: (opts: unknown) => callGatewayMock(opts),
@@ -46,6 +48,7 @@ function mockGatewayWithHistory(
 describe("sessions tools visibility", () => {
   beforeEach(() => {
     callGatewayMock.mockClear();
+    subagentRuns.clear();
   });
 
   it("defaults to tree visibility (self + spawned) for sessions_history", async () => {
@@ -90,6 +93,39 @@ describe("sessions tools visibility", () => {
     });
     expect(result.details).toMatchObject({
       sessionKey: "agent:main:discord:direct:someone-else",
+    });
+  });
+
+  it("allows parent sessions_history for tracked cross-agent child subagents", async () => {
+    mockConfig = {
+      session: { mainKey: "main", scope: "per-sender" },
+      tools: {
+        sessions: { visibility: "all" },
+        agentToAgent: { enabled: true, allow: ["planner-4"] },
+      },
+    };
+    const childSessionKey = "agent:planner-helper:subagent:child-1";
+    const run: SubagentRunRecord = {
+      runId: "run-child-1",
+      childSessionKey,
+      controllerSessionKey: "agent:planner-4:main",
+      requesterSessionKey: "agent:planner-4:main",
+      requesterDisplayKey: "agent:planner-4:main",
+      task: "inspect child result",
+      cleanup: "keep",
+      createdAt: 100,
+    };
+    subagentRuns.set(run.runId, run);
+    mockGatewayWithHistory();
+    const tool = getSessionsHistoryTool({ agentSessionKey: "agent:planner-4:main" });
+
+    const result = await tool.execute("call-controlled-child-history", {
+      sessionKey: childSessionKey,
+    });
+
+    expect(result.details).toMatchObject({
+      sessionKey: childSessionKey,
+      messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }],
     });
   });
 
