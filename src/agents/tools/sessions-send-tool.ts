@@ -54,6 +54,7 @@ const SessionsSendToolSchema = Type.Object({
 
 type GatewayCaller = typeof callGateway;
 const SESSIONS_SEND_REPLY_HISTORY_LIMIT = 50;
+const SESSIONS_SEND_LATE_ANNOUNCE_WAIT_MS = 10 * 60_000;
 
 async function startAgentRun(params: {
   callGateway: GatewayCaller;
@@ -136,24 +137,6 @@ export function createSessionsSendTool(opts?: {
             status: "forbidden",
             error: "Sandboxed sessions_send label lookup is limited to this agent",
           });
-        }
-
-        if (requesterAgentId && requestedAgentId && requestedAgentId !== requesterAgentId) {
-          if (!a2aPolicy.enabled) {
-            return jsonResult({
-              runId: crypto.randomUUID(),
-              status: "forbidden",
-              error:
-                "Agent-to-agent messaging is disabled. Set tools.agentToAgent.enabled=true to allow cross-agent sends.",
-            });
-          }
-          if (!a2aPolicy.isAllowed(requesterAgentId, requestedAgentId)) {
-            return jsonResult({
-              runId: crypto.randomUUID(),
-              status: "forbidden",
-              error: "Agent-to-agent messaging denied by tools.agentToAgent.allow.",
-            });
-          }
         }
 
         const resolveParams: Record<string, unknown> = {
@@ -248,6 +231,16 @@ export function createSessionsSendTool(opts?: {
       const announceTimeoutMs = timeoutSeconds === 0 ? 30_000 : timeoutMs;
       const idempotencyKey = crypto.randomUUID();
       let runId: string = idempotencyKey;
+      const subagentController = resolveSubagentController({
+        cfg,
+        agentSessionKey: effectiveRequesterKey,
+      });
+      const controlledChildRun =
+        subagentController.controlScope === "children"
+          ? listControlledSubagentRuns(subagentController.controllerSessionKey).find(
+              (entry) => entry.childSessionKey === resolvedKey,
+            )
+          : undefined;
       const visibilityGuard = await createSessionVisibilityGuard({
         action: "send",
         requesterSessionKey: effectiveRequesterKey,
@@ -255,7 +248,9 @@ export function createSessionsSendTool(opts?: {
         a2aPolicy,
       });
       const access = visibilityGuard.check(resolvedKey);
-      if (!access.allowed) {
+      // A controlled child is already scoped by the subagent registry, so parent
+      // follow-ups should not depend on the broader cross-agent allowlist.
+      if (!access.allowed && !controlledChildRun) {
         return jsonResult({
           runId: crypto.randomUUID(),
           status: access.status,
@@ -264,18 +259,12 @@ export function createSessionsSendTool(opts?: {
         });
       }
 
-      const subagentController = resolveSubagentController({
-        cfg,
-        agentSessionKey: effectiveRequesterKey,
-      });
       // Finished child sessions already have tracked lifecycle state; route
       // follow-up work through subagent control so long runs keep push-based
       // completion instead of the best-effort A2A announce loop.
       const controlledEndedRun =
-        subagentController.controlScope === "children"
-          ? listControlledSubagentRuns(subagentController.controllerSessionKey).find(
-              (entry) => entry.childSessionKey === resolvedKey && typeof entry.endedAt === "number",
-            )
+        controlledChildRun && typeof controlledChildRun.endedAt === "number"
+          ? controlledChildRun
           : undefined;
       if (controlledEndedRun) {
         const trackedDelivery = { status: "tracked", mode: "completion_event" as const };
@@ -412,7 +401,11 @@ export function createSessionsSendTool(opts?: {
         ? ({ status: "skipped", mode: "announce" } as const)
         : ({ status: "pending", mode: "announce" } as const);
 
-      const startA2AFlow = (roundOneReply?: string, waitRunId?: string) => {
+      const startA2AFlow = (
+        roundOneReply?: string,
+        waitRunId?: string,
+        options?: { waitTimeoutMs?: number },
+      ) => {
         if (skipA2AFlow) {
           return;
         }
@@ -421,6 +414,7 @@ export function createSessionsSendTool(opts?: {
           displayKey,
           message,
           announceTimeoutMs,
+          waitTimeoutMs: options?.waitTimeoutMs,
           maxPingPongTurns,
           requesterSessionKey,
           requesterChannel,
@@ -469,11 +463,15 @@ export function createSessionsSendTool(opts?: {
       });
 
       if (result.status === "timeout") {
+        startA2AFlow(undefined, runId, {
+          waitTimeoutMs: Math.max(announceTimeoutMs, SESSIONS_SEND_LATE_ANNOUNCE_WAIT_MS),
+        });
         return jsonResult({
           runId,
           status: "timeout",
           error: result.error,
           sessionKey: displayKey,
+          delivery,
         });
       }
       if (result.status === "error") {

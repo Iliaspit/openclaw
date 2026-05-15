@@ -7,6 +7,7 @@ import { jsonUtf8Bytes } from "../../infra/json-utf8-bytes.js";
 import { redactSensitiveText } from "../../logging/redact.js";
 import { readStringValue } from "../../shared/string-coerce.js";
 import { truncateUtf16Safe } from "../../utils.js";
+import { listControlledSubagentRuns, resolveSubagentController } from "../subagent-control.js";
 import {
   describeSessionsHistoryTool,
   SESSIONS_HISTORY_TOOL_DISPLAY_SUMMARY,
@@ -236,7 +237,19 @@ export function createSessionsHistoryTool(opts?: {
         a2aPolicy,
       });
       const access = visibilityGuard.check(resolvedKey);
-      if (!access.allowed) {
+      const subagentController = resolveSubagentController({
+        cfg,
+        agentSessionKey: effectiveRequesterKey,
+      });
+      const controlledChildRun =
+        subagentController.controlScope === "children"
+          ? listControlledSubagentRuns(subagentController.controllerSessionKey).find(
+              (entry) => entry.childSessionKey === resolvedKey,
+            )
+          : undefined;
+      // A controlled child is already scoped by the subagent registry; parent
+      // history reads should not depend on the broader cross-agent allowlist.
+      if (!access.allowed && !controlledChildRun) {
         return jsonResult({
           status: access.status,
           error: access.error,
