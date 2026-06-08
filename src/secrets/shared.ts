@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { resolvePositiveTimerTimeoutMs } from "../shared/number-coercion.js";
 export { isRecord } from "../utils.js";
 
 export function isNonEmptyString(value: unknown): value is string {
@@ -22,6 +23,10 @@ export function normalizePositiveInt(value: unknown, fallback: number): number {
     return Math.max(1, Math.floor(value));
   }
   return Math.max(1, Math.floor(fallback));
+}
+
+export function normalizePositiveTimerMs(value: unknown, fallback: number): number {
+  return resolvePositiveTimerTimeoutMs(value, fallback);
 }
 
 export function parseDotPath(pathname: string): string[] {
