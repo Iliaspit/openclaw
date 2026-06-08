@@ -213,14 +213,12 @@ describe("prepareCliBundleMcpConfig", () => {
       env: {
         OPENCLAW_MCP_TOKEN: "loopback-token-123",
         OPENCLAW_MCP_SESSION_KEY: "agent:main:telegram:group:chat123",
-        OPENCLAW_MCP_SENDER_IS_OWNER: "false",
       },
     });
 
     expect(prepared.env).toEqual({
       OPENCLAW_MCP_TOKEN: "loopback-token-123",
       OPENCLAW_MCP_SESSION_KEY: "agent:main:telegram:group:chat123",
-      OPENCLAW_MCP_SENDER_IS_OWNER: "false",
     });
 
     await prepared.cleanup?.();
@@ -258,7 +256,6 @@ describe("prepareCliBundleMcpConfig", () => {
             headers: {
               Authorization: "Bearer ${OPENCLAW_MCP_TOKEN}",
               "x-session-key": "${OPENCLAW_MCP_SESSION_KEY}",
-              "x-openclaw-sender-is-owner": "${OPENCLAW_MCP_SENDER_IS_OWNER}",
             },
           },
         },
@@ -269,14 +266,14 @@ describe("prepareCliBundleMcpConfig", () => {
       "exec",
       "--json",
       "-c",
-      'mcp_servers={ openclaw = { url = "http://127.0.0.1:23119/mcp", bearer_token_env_var = "OPENCLAW_MCP_TOKEN", env_http_headers = { x-session-key = "OPENCLAW_MCP_SESSION_KEY", x-openclaw-sender-is-owner = "OPENCLAW_MCP_SENDER_IS_OWNER" } } }',
+      'mcp_servers={ openclaw = { url = "http://127.0.0.1:23119/mcp", bearer_token_env_var = "OPENCLAW_MCP_TOKEN", env_http_headers = { x-session-key = "OPENCLAW_MCP_SESSION_KEY" } } }',
     ]);
     expect(prepared.backend.resumeArgs).toEqual([
       "exec",
       "resume",
       "{sessionId}",
       "-c",
-      'mcp_servers={ openclaw = { url = "http://127.0.0.1:23119/mcp", bearer_token_env_var = "OPENCLAW_MCP_TOKEN", env_http_headers = { x-session-key = "OPENCLAW_MCP_SESSION_KEY", x-openclaw-sender-is-owner = "OPENCLAW_MCP_SENDER_IS_OWNER" } } }',
+      'mcp_servers={ openclaw = { url = "http://127.0.0.1:23119/mcp", bearer_token_env_var = "OPENCLAW_MCP_TOKEN", env_http_headers = { x-session-key = "OPENCLAW_MCP_SESSION_KEY" } } }',
     ]);
     expect(prepared.cleanup).toBeUndefined();
   });
