@@ -335,6 +335,79 @@ describe("export html security hardening", () => {
     expect(messages?.querySelector(`img[src="${dataImage}"]`)).toBeTruthy();
   });
 
+  it("escapes entry.id in element id and data-entry-id attributes", async () => {
+    const xssId = `"><script>alert(1)</script><div data-x="`;
+    const session: SessionData = {
+      header: { id: "session-xss-id", timestamp: now() },
+      entries: [
+        {
+          id: xssId,
+          parentId: null,
+          timestamp: now(),
+          type: "message",
+          message: { role: "user", content: "hello" },
+        },
+        {
+          id: "safe-child",
+          parentId: xssId,
+          timestamp: now(),
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "world" }],
+          },
+        },
+      ],
+      leafId: "safe-child",
+      systemPrompt: "",
+      tools: [],
+    };
+
+    const { document } = await renderTemplate(session);
+    const messages = document.getElementById("messages");
+    expect(messages).toBeTruthy();
+    expect(messages?.querySelectorAll("script").length).toBe(0);
+    expect(messages?.querySelector("[onmouseover]")).toBeNull();
+
+    const copyBtn = messages?.querySelector(".copy-link-btn");
+    expect(copyBtn).toBeTruthy();
+    expect(copyBtn?.hasAttribute("data-entry-id")).toBe(true);
+    expect(copyBtn?.hasAttribute("data-x")).toBe(false);
+
+    const userMsg = messages?.querySelector(".user-message");
+    expect(userMsg?.getAttribute("data-x")).toBeNull();
+    expect(userMsg?.getAttribute("id")?.startsWith("entry-")).toBe(true);
+  });
+
+  it("preserves raw entry.id when reading copy-link dataset values", async () => {
+    const specialId = `msg-with"quotes&amp's`;
+    const session: SessionData = {
+      header: { id: "session-roundtrip", timestamp: now() },
+      entries: [
+        {
+          id: specialId,
+          parentId: null,
+          timestamp: now(),
+          type: "message",
+          message: { role: "user", content: "test" },
+        },
+      ],
+      leafId: specialId,
+      systemPrompt: "",
+      tools: [],
+    };
+
+    const { document } = await renderTemplate(session);
+    const messages = document.getElementById("messages");
+    const copyBtn = messages?.querySelector(".copy-link-btn") as HTMLElement | null;
+
+    expect(copyBtn).toBeTruthy();
+    expect(copyBtn?.dataset.entryId).toBe(specialId);
+    expect(document.getElementById(`entry-${specialId}`)?.classList.contains("user-message")).toBe(
+      true,
+    );
+  });
+
   it("escapes markdown data-image attributes", async () => {
     const dataImage = "data:image/png;base64,AAAA";
     const session: SessionData = {
