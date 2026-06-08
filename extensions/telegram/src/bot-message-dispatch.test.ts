@@ -2688,6 +2688,17 @@ describe("dispatchTelegramMessage draft streaming", () => {
     expect(deliverReplies).not.toHaveBeenCalled();
   });
 
+  it("does not emit an empty-response fallback for internal artifact skips", async () => {
+    dispatchReplyWithBufferedBlockDispatcher.mockImplementation(async ({ dispatcherOptions }) => {
+      dispatcherOptions.onSkip?.({ text: "<channel|>" }, { reason: "silent", kind: "final" });
+      return { queuedFinal: false, counts: { block: 0, final: 0, tool: 0 } };
+    });
+
+    await dispatchWithContext({ context: createContext(), streamMode: "off" });
+
+    expect(deliverReplies).not.toHaveBeenCalled();
+  });
+
   it("sends fallback and clears preview when deliver throws (dispatcher swallows error)", async () => {
     const draftStream = createDraftStream();
     createTelegramDraftStream.mockReturnValue(draftStream);
