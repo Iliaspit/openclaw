@@ -25,6 +25,7 @@ export type DeviceBootstrapTokenRecord = {
   publicKey?: string;
   profile?: DeviceBootstrapProfile;
   redeemedProfile?: DeviceBootstrapProfile;
+  pendingProfile?: DeviceBootstrapProfile;
   roles?: string[];
   scopes?: string[];
   issuedAtMs: number;
@@ -49,6 +50,35 @@ function resolvePersistedRedeemedProfile(
   record: Partial<DeviceBootstrapTokenRecord>,
 ): DeviceBootstrapProfile {
   return normalizeDeviceBootstrapProfile(record.redeemedProfile);
+}
+
+function resolvePersistedPendingProfile(
+  record: Partial<DeviceBootstrapTokenRecord>,
+): DeviceBootstrapProfile | null {
+  return record.pendingProfile ? normalizeDeviceBootstrapProfile(record.pendingProfile) : null;
+}
+
+function resolveRequestedBootstrapProfile(params: {
+  role: string;
+  scopes: readonly string[];
+}): DeviceBootstrapProfile {
+  return normalizeDeviceBootstrapProfile({
+    roles: [params.role],
+    scopes: resolveBootstrapProfileScopes(params.role, params.scopes),
+  });
+}
+
+function sameBootstrapProfile(
+  left: DeviceBootstrapProfile,
+  right: DeviceBootstrapProfile,
+): boolean {
+  if (left.roles.length !== right.roles.length || left.scopes.length !== right.scopes.length) {
+    return false;
+  }
+  return (
+    left.roles.every((role, index) => role === right.roles[index]) &&
+    left.scopes.every((scope, index) => scope === right.scopes[index])
+  );
 }
 
 function resolveIssuedBootstrapProfile(params: {
@@ -143,10 +173,12 @@ async function loadState(baseDir?: string): Promise<DeviceBootstrapStateFile> {
       typeof record.token === "string" && record.token.trim().length > 0 ? record.token : tokenKey;
     const issuedAtMs = typeof record.issuedAtMs === "number" ? record.issuedAtMs : 0;
     const profile = resolvePersistedBootstrapProfile(record);
+    const pendingProfile = resolvePersistedPendingProfile(record);
     state[tokenKey] = {
       token,
       profile,
       redeemedProfile: resolvePersistedRedeemedProfile(record),
+      ...(pendingProfile ? { pendingProfile } : {}),
       deviceId: typeof record.deviceId === "string" ? record.deviceId : undefined,
       publicKey: typeof record.publicKey === "string" ? record.publicKey : undefined,
       issuedAtMs,
@@ -272,6 +304,7 @@ export async function redeemDeviceBootstrapTokenProfile(params: {
     }
     const [tokenKey, record] = found;
     const issuedProfile = resolvePersistedBootstrapProfile(record);
+    const pendingProfile = resolvePersistedPendingProfile(record);
     const redeemedProfile = normalizeDeviceBootstrapProfile({
       roles: [...resolvePersistedRedeemedProfile(record).roles, params.role],
       scopes: [
@@ -279,11 +312,25 @@ export async function redeemDeviceBootstrapTokenProfile(params: {
         ...resolveBootstrapProfileScopes(params.role, params.scopes),
       ],
     });
-    state[tokenKey] = {
+    const nextPendingProfile =
+      pendingProfile &&
+      !bootstrapProfileSatisfiesProfile({
+        actualProfile: redeemedProfile,
+        requiredProfile: pendingProfile,
+      })
+        ? pendingProfile
+        : undefined;
+    const nextRecord: DeviceBootstrapTokenRecord = {
       ...record,
       profile: issuedProfile,
       redeemedProfile,
     };
+    if (nextPendingProfile) {
+      nextRecord.pendingProfile = nextPendingProfile;
+    } else {
+      delete nextRecord.pendingProfile;
+    }
+    state[tokenKey] = nextRecord;
     await persistState(state, params.baseDir);
     return {
       recorded: true,
@@ -336,6 +383,10 @@ export async function verifyDeviceBootstrapToken(params: {
     ) {
       return { ok: false, reason: "bootstrap_token_invalid" };
     }
+    const requestedProfile = resolveRequestedBootstrapProfile({
+      role,
+      scopes: params.scopes,
+    });
 
     const boundDeviceId = record.deviceId?.trim();
     const boundPublicKey =
@@ -346,9 +397,14 @@ export async function verifyDeviceBootstrapToken(params: {
       if (boundDeviceId !== deviceId || boundPublicKey !== publicKey) {
         return { ok: false, reason: "bootstrap_token_invalid" };
       }
+      const pendingProfile = resolvePersistedPendingProfile(record);
+      if (pendingProfile && !sameBootstrapProfile(pendingProfile, requestedProfile)) {
+        return { ok: false, reason: "bootstrap_token_invalid" };
+      }
       state[tokenKey] = {
         ...record,
         profile: allowedProfile,
+        pendingProfile: pendingProfile ?? requestedProfile,
         deviceId,
         publicKey,
         lastUsedAtMs: Date.now(),
@@ -360,6 +416,7 @@ export async function verifyDeviceBootstrapToken(params: {
     state[tokenKey] = {
       ...record,
       profile: allowedProfile,
+      pendingProfile: requestedProfile,
       deviceId,
       publicKey,
       lastUsedAtMs: Date.now(),
