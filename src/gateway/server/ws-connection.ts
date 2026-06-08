@@ -14,7 +14,11 @@ import type { AuthRateLimiter } from "../auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "../auth.js";
 import { getPreauthHandshakeTimeoutMsFromEnv } from "../handshake-timeouts.js";
 import { isLoopbackAddress } from "../net.js";
-import { MAX_PAYLOAD_BYTES, MAX_PREAUTH_PAYLOAD_BYTES } from "../server-constants.js";
+import {
+  MAX_BUFFERED_BYTES,
+  MAX_PAYLOAD_BYTES,
+  MAX_PREAUTH_PAYLOAD_BYTES,
+} from "../server-constants.js";
 import { clearNodeWakeState } from "../server-methods/nodes.js";
 import type { GatewayRequestContext, GatewayRequestHandlers } from "../server-methods/types.js";
 import { formatError } from "../server-utils.js";
@@ -251,21 +255,7 @@ export function attachGatewayWsConnectionHandler(params: AttachGatewayWsConnecti
       }
     };
 
-    const send = (obj: unknown) => {
-      try {
-        socket.send(JSON.stringify(obj));
-      } catch {
-        /* ignore */
-      }
-    };
-
-    const connectNonce = randomUUID();
-    send({
-      type: "event",
-      event: "connect.challenge",
-      payload: { nonce: connectNonce, ts: Date.now() },
-    });
-
+    let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
     const close = (code = 1000, reason?: string) => {
       if (closed) {
         return;
@@ -282,6 +272,50 @@ export function attachGatewayWsConnectionHandler(params: AttachGatewayWsConnecti
         /* ignore */
       }
     };
+
+    const handshakeTimeoutMs = getPreauthHandshakeTimeoutMsFromEnv();
+    handshakeTimer = setTimeout(() => {
+      if (!client) {
+        handshakeState = "failed";
+        setCloseCause("handshake-timeout", {
+          handshakeMs: Date.now() - openedAt,
+          endpoint,
+        });
+        logWsControl.warn(
+          `handshake timeout conn=${connId} peer=${endpoint ?? "n/a"} remote=${remoteAddr ?? "?"}`,
+        );
+        close();
+      }
+    }, handshakeTimeoutMs);
+
+    const send = (obj: unknown) => {
+      if (closed) {
+        return;
+      }
+      if (socket.bufferedAmount > MAX_BUFFERED_BYTES) {
+        setCloseCause("outbound-buffer-exceeded", {
+          bytes: socket.bufferedAmount,
+          limitBytes: MAX_BUFFERED_BYTES,
+        });
+        logWsControl.warn(
+          `closing slow ws consumer conn=${connId} buffered=${socket.bufferedAmount} limit=${MAX_BUFFERED_BYTES}`,
+        );
+        close(1008, "slow consumer");
+        return;
+      }
+      try {
+        socket.send(JSON.stringify(obj));
+      } catch {
+        /* ignore */
+      }
+    };
+
+    const connectNonce = randomUUID();
+    send({
+      type: "event",
+      event: "connect.challenge",
+      payload: { nonce: connectNonce, ts: Date.now() },
+    });
 
     socket.once("error", (err) => {
       if (isWsPayloadLimitError(err)) {
@@ -366,21 +400,6 @@ export function attachGatewayWsConnectionHandler(params: AttachGatewayWsConnecti
       });
       close();
     });
-
-    const handshakeTimeoutMs = getPreauthHandshakeTimeoutMsFromEnv();
-    const handshakeTimer = setTimeout(() => {
-      if (!client) {
-        handshakeState = "failed";
-        setCloseCause("handshake-timeout", {
-          handshakeMs: Date.now() - openedAt,
-          endpoint,
-        });
-        logWsControl.warn(
-          `handshake timeout conn=${connId} peer=${endpoint ?? "n/a"} remote=${remoteAddr ?? "?"}`,
-        );
-        close();
-      }
-    }, handshakeTimeoutMs);
 
     attachGatewayWsMessageHandler({
       socket,
