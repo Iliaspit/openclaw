@@ -1,11 +1,52 @@
 import { describe, it, expect } from "vitest";
 import {
+  isInternalFormattingArtifact,
   isSilentReplyPrefixText,
   isSilentReplyText,
   startsWithSilentToken,
   stripLeadingSilentToken,
   stripSilentToken,
 } from "./tokens.js";
+
+describe("isInternalFormattingArtifact", () => {
+  it("matches Harmony channel markers", () => {
+    expect(isInternalFormattingArtifact("<channel|>")).toBe(true);
+    expect(isInternalFormattingArtifact("  <channel|>  ")).toBe(true);
+    expect(isInternalFormattingArtifact("\n<channel|>\n")).toBe(true);
+    expect(isInternalFormattingArtifact("<channel|answer>")).toBe(true);
+    expect(isInternalFormattingArtifact("<lane|reasoning>")).toBe(true);
+    expect(isInternalFormattingArtifact("<|>")).toBe(true);
+    expect(isInternalFormattingArtifact("<|channel|>")).toBe(true);
+    expect(isInternalFormattingArtifact("<|message|>")).toBe(true);
+    expect(isInternalFormattingArtifact("<|call|>")).toBe(true);
+  });
+
+  it("matches set-thought directives", () => {
+    expect(isInternalFormattingArtifact("set-thought <channel|>")).toBe(true);
+    expect(isInternalFormattingArtifact("  set-thought <channel|>  ")).toBe(true);
+    expect(isInternalFormattingArtifact("set-thought <lane|reasoning>")).toBe(true);
+  });
+
+  it("matches box-drawing separators", () => {
+    expect(isInternalFormattingArtifact("───")).toBe(true);
+    expect(isInternalFormattingArtifact("─────────")).toBe(true);
+    expect(isInternalFormattingArtifact("  ───  ")).toBe(true);
+  });
+
+  it("rejects common user-facing text shapes", () => {
+    expect(isInternalFormattingArtifact(undefined)).toBe(false);
+    expect(isInternalFormattingArtifact("")).toBe(false);
+    expect(isInternalFormattingArtifact("---")).toBe(false);
+    expect(isInternalFormattingArtifact("___")).toBe(false);
+    expect(isInternalFormattingArtifact("***")).toBe(false);
+    expect(isInternalFormattingArtifact("<tag>")).toBe(false);
+    expect(isInternalFormattingArtifact("</tag>")).toBe(false);
+    expect(isInternalFormattingArtifact("<br/>")).toBe(false);
+    expect(isInternalFormattingArtifact("Hello! How can I help?")).toBe(false);
+    expect(isInternalFormattingArtifact("Here are the options:\n───\n1. Option A")).toBe(false);
+    expect(isInternalFormattingArtifact("Use <channel|> in your config.")).toBe(false);
+  });
+});
 
 describe("isSilentReplyText", () => {
   it("returns true for exact token", () => {
