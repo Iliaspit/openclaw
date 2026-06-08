@@ -28,7 +28,7 @@ import {
 } from "../../infra/restart-sentinel.js";
 import { scheduleGatewaySigusr1Restart } from "../../infra/restart.js";
 import { prepareSecretsRuntimeSnapshot } from "../../secrets/runtime.js";
-import { resolveEffectiveSharedGatewayAuth } from "../auth.js";
+import { resolveEffectiveSharedGatewayAuth, resolveGatewayAuth } from "../auth.js";
 import {
   buildGatewayReloadPlan,
   diffConfigPaths,
@@ -226,7 +226,49 @@ function parseValidateConfigFromRawOrRespond(
   return { config: validated.config, schema };
 }
 
+function normalizeStringListForAuthCompare(items: readonly string[] | undefined): string[] {
+  return [...(items ?? [])].toSorted();
+}
+
+function normalizeTrustedProxyAuthForCompare(auth: ReturnType<typeof resolveGatewayAuth>): {
+  userHeader: string | undefined;
+  requiredHeaders: string[];
+  allowUsers: string[];
+} {
+  return {
+    userHeader: auth.trustedProxy?.userHeader,
+    requiredHeaders: normalizeStringListForAuthCompare(auth.trustedProxy?.requiredHeaders),
+    allowUsers: normalizeStringListForAuthCompare(auth.trustedProxy?.allowUsers),
+  };
+}
+
 function didSharedGatewayAuthChange(prev: OpenClawConfig, next: OpenClawConfig): boolean {
+  const prevResolvedAuth = resolveGatewayAuth({
+    authConfig: prev.gateway?.auth,
+    env: process.env,
+    tailscaleMode: prev.gateway?.tailscale?.mode,
+  });
+  const nextResolvedAuth = resolveGatewayAuth({
+    authConfig: next.gateway?.auth,
+    env: process.env,
+    tailscaleMode: next.gateway?.tailscale?.mode,
+  });
+  if (prevResolvedAuth.mode === "trusted-proxy" || nextResolvedAuth.mode === "trusted-proxy") {
+    if (prevResolvedAuth.mode !== nextResolvedAuth.mode) {
+      return true;
+    }
+    return (
+      !isDeepStrictEqual(
+        normalizeTrustedProxyAuthForCompare(prevResolvedAuth),
+        normalizeTrustedProxyAuthForCompare(nextResolvedAuth),
+      ) ||
+      !isDeepStrictEqual(
+        normalizeStringListForAuthCompare(prev.gateway?.trustedProxies),
+        normalizeStringListForAuthCompare(next.gateway?.trustedProxies),
+      )
+    );
+  }
+
   const prevAuth = resolveEffectiveSharedGatewayAuth({
     authConfig: prev.gateway?.auth,
     env: process.env,
