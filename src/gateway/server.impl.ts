@@ -416,9 +416,13 @@ export async function startGatewayServer(
         env: process.env,
         tailscaleMode,
       }),
+      config.gateway?.trustedProxies,
     );
   const resolveCurrentSharedGatewaySessionGeneration = () =>
-    resolveSharedGatewaySessionGeneration(getResolvedAuth());
+    resolveSharedGatewaySessionGeneration(
+      getResolvedAuth(),
+      getRuntimeConfig().gateway?.trustedProxies,
+    );
   const resolveSharedGatewaySessionGenerationForRuntimeSnapshot = () =>
     resolveSharedGatewaySessionGeneration(
       resolveGatewayAuth({
@@ -427,6 +431,7 @@ export async function startGatewayServer(
         env: process.env,
         tailscaleMode,
       }),
+      getRuntimeConfig().gateway?.trustedProxies,
     );
   const sharedGatewaySessionGenerationState: SharedGatewaySessionGenerationState = {
     current: resolveCurrentSharedGatewaySessionGeneration(),
