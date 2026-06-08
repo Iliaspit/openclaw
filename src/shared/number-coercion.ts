@@ -8,3 +8,17 @@ export function resolvePositiveTimerTimeoutMs(value: unknown, fallback: number):
   const candidate = asFiniteNumber(value) ?? asFiniteNumber(fallback) ?? 1;
   return Math.max(1, Math.min(Math.floor(candidate), MAX_TIMER_TIMEOUT_MS));
 }
+
+export function resolveIntegerOption(
+  value: unknown,
+  fallback: number,
+  range: {
+    min?: number;
+    max?: number;
+  } = {},
+): number {
+  const candidate = asFiniteNumber(value) ?? asFiniteNumber(fallback) ?? 0;
+  const floored = Math.floor(candidate);
+  const minBounded = range.min === undefined ? floored : Math.max(range.min, floored);
+  return range.max === undefined ? minBounded : Math.min(range.max, minBounded);
+}
