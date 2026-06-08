@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, test, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
@@ -5,6 +7,7 @@ import { applyAgentDefaultPrimaryModel } from "../plugins/provider-model-primary
 import type { RuntimeEnv } from "../runtime.js";
 import {
   buildCleanupPlan,
+  removePath,
   removeStateAndLinkedPaths,
   removeWorkspaceDirs,
 } from "./cleanup-utils.js";
@@ -99,5 +102,39 @@ describe("cleanup path removals", () => {
     const logs = runtime.log.mock.calls.map(([line]) => line);
     expect(logs).toContain("[dry-run] remove /tmp/openclaw-workspace-1");
     expect(logs).toContain("[dry-run] remove /tmp/openclaw-workspace-2");
+  });
+
+  it("refuses to remove the current working directory", async () => {
+    const runtime = createRuntimeMock();
+    const result = await removePath(process.cwd(), runtime, { dryRun: true });
+
+    expect(result.ok).toBe(false);
+    expect(result.skipped).toBeUndefined();
+    expect(runtime.error.mock.calls.length).toBe(1);
+    expect(runtime.error.mock.calls[0][0]).toMatch(/Refusing to remove unsafe path/);
+    expect(runtime.log.mock.calls.length).toBe(0);
+  });
+
+  it("refuses to remove a directory containing the current working directory", async () => {
+    const runtime = createRuntimeMock();
+    const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-cleanup-cwd-"));
+    const nestedCwd = path.join(tmpRoot, "nested");
+    const cwdSpy = vi.spyOn(process, "cwd");
+
+    try {
+      await fs.mkdir(nestedCwd);
+      cwdSpy.mockReturnValue(nestedCwd);
+
+      const result = await removePath(tmpRoot, runtime, { dryRun: true });
+
+      expect(result.ok).toBe(false);
+      expect(result.skipped).toBeUndefined();
+      expect(runtime.error.mock.calls.length).toBe(1);
+      expect(runtime.error.mock.calls[0][0]).toMatch(/Refusing to remove unsafe path/);
+      expect(runtime.log.mock.calls.length).toBe(0);
+    } finally {
+      cwdSpy.mockRestore();
+      await fs.rm(tmpRoot, { recursive: true, force: true });
+    }
   });
 });
