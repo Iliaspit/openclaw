@@ -14,6 +14,7 @@ import {
 import { resolveGatewayScopedTools } from "./tool-resolution.js";
 
 const TOOL_CACHE_TTL_MS = 30_000;
+const TOOL_CACHE_MAX_ENTRIES = 256;
 const NATIVE_TOOL_EXCLUDE = new Set(["read", "write", "edit", "apply_patch", "exec", "process"]);
 
 type CachedScopedTools = {
@@ -41,6 +42,11 @@ export class McpLoopbackToolCache {
       params.senderIsOwner === true ? "owner" : "non-owner",
     ].join("\u0000");
     const now = Date.now();
+    for (const [key, entry] of this.#entries) {
+      if (now - entry.time >= TOOL_CACHE_TTL_MS) {
+        this.#entries.delete(key);
+      }
+    }
     const cached = this.#entries.get(cacheKey);
     if (cached && cached.configRef === params.cfg && now - cached.time < TOOL_CACHE_TTL_MS) {
       return cached;
@@ -64,10 +70,12 @@ export class McpLoopbackToolCache {
       time: now,
     };
     this.#entries.set(cacheKey, nextEntry);
-    for (const [key, entry] of this.#entries) {
-      if (now - entry.time >= TOOL_CACHE_TTL_MS) {
-        this.#entries.delete(key);
+    while (this.#entries.size > TOOL_CACHE_MAX_ENTRIES) {
+      const oldestKey = this.#entries.keys().next().value;
+      if (oldestKey === undefined) {
+        break;
       }
+      this.#entries.delete(oldestKey);
     }
     return nextEntry;
   }
