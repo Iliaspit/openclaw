@@ -22,6 +22,7 @@ const baseCatalog = [
   },
 ];
 let catalog = [...baseCatalog];
+const plantedVisionSentinel = "PLANTED_VISION_DESC_zq7x";
 
 const loadModelCatalog = vi.hoisted(() => vi.fn(async () => catalog));
 const modelAuthMocks = vi.hoisted(() => ({
@@ -64,6 +65,7 @@ vi.mock("../agents/model-catalog.js", async () => {
 });
 
 let buildProviderRegistry: typeof import("./runner.js").buildProviderRegistry;
+let applyMediaUnderstanding: typeof import("./apply.js").applyMediaUnderstanding;
 let resolveAutoImageModel: typeof import("./runner.js").resolveAutoImageModel;
 let runCapability: typeof import("./runner.js").runCapability;
 
@@ -112,6 +114,7 @@ describe("runCapability image skip", () => {
       };
     });
     ({ buildProviderRegistry, resolveAutoImageModel, runCapability } = await import("./runner.js"));
+    ({ applyMediaUnderstanding } = await import("./apply.js"));
   });
 
   beforeEach(() => {
@@ -148,6 +151,310 @@ describe("runCapability image skip", () => {
       );
     } finally {
       await cache.cleanup();
+    }
+  });
+
+  it("skips agents.defaults.imageModel fallback when the active model supports vision", async () => {
+    await withMediaFixture(
+      {
+        filePrefix: "openclaw-image-default-model-native-skip",
+        extension: "png",
+        mediaType: "image/png",
+        fileContents: Buffer.from("image"),
+      },
+      async ({ ctx }) => {
+        let describeCalls = 0;
+        const msgCtx = ctx as MsgContext;
+        msgCtx.Body = "please inspect this image";
+        const cfg = {
+          agents: {
+            defaults: {
+              imageModel: { primary: "minimax/MiniMax-M3" },
+            },
+          },
+        } as unknown as OpenClawConfig;
+
+        const result = await applyMediaUnderstanding({
+          ctx: msgCtx,
+          cfg,
+          agentDir: "/tmp",
+          providers: {
+            minimax: {
+              id: "minimax",
+              capabilities: ["image"],
+              describeImage: async (req) => {
+                describeCalls += 1;
+                return { text: plantedVisionSentinel, model: req.model };
+              },
+            },
+          },
+          activeModel: { provider: "openai", model: "gpt-4.1" },
+        });
+
+        const imageDecision = result.decisions.find((decision) => decision.capability === "image");
+        const attempt = imageDecision?.attachments[0]?.attempts[0];
+        expect(result.appliedImage).toBe(false);
+        expect(imageDecision?.outcome).toBe("skipped");
+        expect(attempt?.outcome).toBe("skipped");
+        expect(attempt?.reason).toBe("primary model supports vision natively");
+        expect(describeCalls).toBe(0);
+        expect(msgCtx.Body).not.toContain(plantedVisionSentinel);
+      },
+    );
+  });
+
+  it("skips agents.defaults.imageModel fallback when MiniMax M3 supports vision", async () => {
+    catalog = [
+      ...baseCatalog,
+      {
+        id: "MiniMax-M3",
+        name: "MiniMax M3",
+        provider: "minimax",
+        input: ["text", "image"] as const,
+      },
+    ];
+
+    await withMediaFixture(
+      {
+        filePrefix: "openclaw-image-default-model-minimax-m3-native-skip",
+        extension: "png",
+        mediaType: "image/png",
+        fileContents: Buffer.from("image"),
+      },
+      async ({ ctx }) => {
+        let describeCalls = 0;
+        const msgCtx = ctx as MsgContext;
+        msgCtx.Body = "please inspect this minimax image";
+        const cfg = {
+          agents: {
+            defaults: {
+              imageModel: { primary: "minimax/MiniMax-M3" },
+            },
+          },
+        } as unknown as OpenClawConfig;
+
+        const result = await applyMediaUnderstanding({
+          ctx: msgCtx,
+          cfg,
+          agentDir: "/tmp",
+          providers: {
+            minimax: {
+              id: "minimax",
+              capabilities: ["image"],
+              describeImage: async (req) => {
+                describeCalls += 1;
+                return { text: plantedVisionSentinel, model: req.model };
+              },
+            },
+          },
+          activeModel: { provider: "minimax", model: "MiniMax-M3" },
+        });
+
+        const imageDecision = result.decisions.find((decision) => decision.capability === "image");
+        const attempt = imageDecision?.attachments[0]?.attempts[0];
+        expect(result.appliedImage).toBe(false);
+        expect(imageDecision?.outcome).toBe("skipped");
+        expect(attempt?.outcome).toBe("skipped");
+        expect(attempt?.reason).toBe("primary model supports vision natively");
+        expect(describeCalls).toBe(0);
+        expect(msgCtx.Body).not.toContain(plantedVisionSentinel);
+      },
+    );
+  });
+
+  it("uses explicit media image models instead of native vision skip", async () => {
+    await withMediaFixture(
+      {
+        filePrefix: "openclaw-image-explicit-vision",
+        extension: "png",
+        mediaType: "image/png",
+        fileContents: Buffer.from("image"),
+      },
+      async ({ ctx, media, cache }) => {
+        const cfg = {} as OpenClawConfig;
+
+        const result = await runCapability({
+          capability: "image",
+          cfg,
+          ctx,
+          attachments: cache,
+          media,
+          agentDir: "/tmp",
+          providerRegistry: new Map([
+            [
+              "openrouter",
+              {
+                id: "openrouter",
+                capabilities: ["image"],
+                describeImage: async (req) => ({ text: "explicit ok", model: req.model }),
+              },
+            ],
+          ]),
+          config: {
+            models: [{ provider: "openrouter", model: "google/gemini-2.5-flash" }],
+          },
+          activeModel: { provider: "openai", model: "gpt-4.1" },
+        });
+
+        expect(result.decision.outcome).toBe("success");
+        expect(result.outputs[0]).toEqual({
+          kind: "image.description",
+          attachmentIndex: 0,
+          provider: "openrouter",
+          model: "google/gemini-2.5-flash",
+          text: "explicit ok",
+        });
+      },
+    );
+  });
+
+  it("keeps agents.defaults.imageModel available to exported auto image resolution", async () => {
+    const cfg = {
+      agents: {
+        defaults: {
+          imageModel: { primary: "openrouter/google/gemini-2.5-flash" },
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    await expect(
+      resolveAutoImageModel({
+        cfg,
+        activeModel: { provider: "openai", model: "gpt-4.1" },
+      }),
+    ).resolves.toEqual({
+      provider: "openrouter",
+      model: "google/gemini-2.5-flash",
+    });
+  });
+
+  it("falls back from a MiniMax chat model to the provider image default", async () => {
+    catalog = [
+      {
+        id: "MiniMax-M2.7",
+        name: "MiniMax M2.7",
+        provider: "minimax-portal",
+        input: ["text", "image"] as const,
+      },
+      {
+        id: "MiniMax-VL-01",
+        name: "MiniMax VL 01",
+        provider: "minimax-portal",
+        input: ["text", "image"] as const,
+      },
+    ];
+    const cfg = {
+      models: {
+        providers: {
+          "minimax-portal": {
+            models: [
+              {
+                id: "MiniMax-M2.7",
+                input: ["text", "image"],
+              },
+            ],
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+    const pluginRegistry = createEmptyPluginRegistry();
+    pluginRegistry.mediaUnderstandingProviders.push({
+      pluginId: "minimax",
+      pluginName: "MiniMax Provider",
+      source: "test",
+      provider: {
+        id: "minimax-portal",
+        capabilities: ["image"],
+        defaultModels: { image: "MiniMax-VL-01" },
+        describeImage: async () => ({ text: "ok" }),
+      },
+    });
+    setCompatibleActiveMediaUnderstandingRegistry(pluginRegistry, cfg);
+
+    try {
+      await expect(
+        resolveAutoImageModel({
+          cfg,
+          activeModel: { provider: "minimax-portal", model: "MiniMax-M2.7" },
+        }),
+      ).resolves.toEqual({
+        provider: "minimax-portal",
+        model: "MiniMax-VL-01",
+      });
+    } finally {
+      setActivePluginRegistry(createEmptyPluginRegistry());
+    }
+  });
+
+  it("routes legacy MiniMax chat models through the VLM fallback even when cataloged with image input", async () => {
+    catalog = [
+      {
+        id: "MiniMax-M2.7",
+        name: "MiniMax M2.7",
+        provider: "minimax-portal",
+        input: ["text", "image"] as const,
+      },
+    ];
+    const cfg = {
+      models: {
+        providers: {
+          "minimax-portal": {
+            models: [
+              {
+                id: "MiniMax-M2.7",
+                input: ["text", "image"],
+              },
+            ],
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+    const pluginRegistry = createEmptyPluginRegistry();
+    pluginRegistry.mediaUnderstandingProviders.push({
+      pluginId: "minimax",
+      pluginName: "MiniMax Provider",
+      source: "test",
+      provider: {
+        id: "minimax-portal",
+        capabilities: ["image"],
+        defaultModels: { image: "MiniMax-VL-01" },
+        describeImage: async (req) => ({ text: "vlm ok", model: req.model }),
+      },
+    });
+    setCompatibleActiveMediaUnderstandingRegistry(pluginRegistry, cfg);
+
+    try {
+      await withMediaFixture(
+        {
+          filePrefix: "openclaw-minimax-vlm-no-native-skip",
+          extension: "png",
+          mediaType: "image/png",
+          fileContents: Buffer.from("image"),
+        },
+        async ({ ctx, media, cache }) => {
+          const result = await runCapability({
+            capability: "image",
+            cfg,
+            ctx,
+            attachments: cache,
+            media,
+            agentDir: "/tmp",
+            providerRegistry: buildProviderRegistry(undefined, cfg),
+            activeModel: { provider: "minimax-portal", model: "MiniMax-M2.7" },
+          });
+
+          expect(result.decision.outcome).toBe("success");
+          expect(result.outputs[0]).toEqual({
+            kind: "image.description",
+            attachmentIndex: 0,
+            provider: "minimax-portal",
+            model: "MiniMax-VL-01",
+            text: "vlm ok",
+          });
+        },
+      );
+    } finally {
+      setActivePluginRegistry(createEmptyPluginRegistry());
     }
   });
 
