@@ -21,7 +21,13 @@ Recommended: use the built-in uninstaller:
 openclaw uninstall
 ```
 
-Non-interactive (automation / npx):
+Preview what will be removed:
+
+```bash
+openclaw uninstall --dry-run --all
+```
+
+Non-interactive (automation / npx). Use with caution and only after confirming scopes:
 
 ```bash
 openclaw uninstall --all --yes --non-interactive
