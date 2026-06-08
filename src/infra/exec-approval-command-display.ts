@@ -1,7 +1,10 @@
 import type { ExecApprovalRequestPayload } from "./exec-approvals.js";
 
-// Escape invisible characters that can spoof approval prompts in common UIs.
-const EXEC_APPROVAL_INVISIBLE_CHAR_REGEX = /[\p{Cf}\u115F\u1160\u3164\uFFA0]/gu;
+// Escape control characters, Unicode format/line/paragraph separators, and non-ASCII space
+// separators that can spoof approval prompts in common UIs. Ordinary ASCII space (U+0020) is
+// intentionally excluded so normal command text renders unchanged.
+const EXEC_APPROVAL_INVISIBLE_CHAR_REGEX =
+  /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\u115F\u1160\u3164\uFFA0]/gu;
 
 function formatCodePointEscape(char: string): string {
   return `\\u{${char.codePointAt(0)?.toString(16).toUpperCase() ?? "FFFD"}}`;
