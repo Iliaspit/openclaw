@@ -36,4 +36,41 @@ describe("uninstallCommand", () => {
 
     expect(runtime.log).not.toHaveBeenCalledWith(expect.stringContaining("openclaw backup create"));
   });
+
+  it("preserves workspace dirs during state-only uninstall", async () => {
+    await uninstallCommand(runtime, {
+      state: true,
+      yes: true,
+      nonInteractive: true,
+      dryRun: true,
+    });
+
+    expect(removeStateAndLinkedPaths).toHaveBeenCalledWith(
+      expect.any(Object),
+      runtime,
+      expect.objectContaining({
+        dryRun: true,
+        preservePaths: ["/tmp/.openclaw/workspace"],
+      }),
+    );
+  });
+
+  it("does not preserve workspace dirs when workspace removal is selected", async () => {
+    await uninstallCommand(runtime, {
+      state: true,
+      workspace: true,
+      yes: true,
+      nonInteractive: true,
+      dryRun: true,
+    });
+
+    expect(removeStateAndLinkedPaths).toHaveBeenCalledWith(
+      expect.any(Object),
+      runtime,
+      expect.objectContaining({
+        dryRun: true,
+        preservePaths: [],
+      }),
+    );
+  });
 });
