@@ -7,6 +7,7 @@ import {
   drainCollectQueueStep,
   drainNextQueueItem,
   hasCrossChannelItems,
+  removeQueuedItemsByRef,
   previewQueueSummaryPrompt,
   waitForQueueDebounce,
 } from "../../../utils/queue-helpers.js";
@@ -230,7 +231,7 @@ export function scheduleFollowupDrain(
               ...routing,
               ...collectQueuedImages(groupItems),
             });
-            queue.items.splice(0, groupItems.length);
+            removeQueuedItemsByRef(queue.items, groupItems);
             if (pendingSummary) {
               clearQueueSummaryState(queue);
               pendingSummary = undefined;
