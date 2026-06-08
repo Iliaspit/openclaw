@@ -4,7 +4,9 @@ import {
   buildQueueSummaryPrompt,
   clearQueueSummaryState,
   drainCollectItemIfNeeded,
+  drainNextQueueItem,
   previewQueueSummaryPrompt,
+  removeQueuedItemsByRef,
 } from "./queue-helpers.js";
 
 describe("applyQueueRuntimeSettings", () => {
@@ -165,5 +167,36 @@ describe("drainCollectItemIfNeeded", () => {
 
     expect(result).toBe("empty");
     expect(forced).toBe(true);
+  });
+});
+
+describe("queue item reference removal", () => {
+  it("removes processed items by reference", () => {
+    const a = { id: "a" };
+    const b = { id: "b" };
+    const c = { id: "c" };
+    const d = { id: "d" };
+    const items = [c, a, d, b];
+
+    removeQueuedItemsByRef(items, [a, b]);
+
+    expect(items).toEqual([c, d]);
+  });
+
+  it("does not remove a newer front item when the drained item moved while running", async () => {
+    const first = { id: "first" };
+    const second = { id: "second" };
+    const third = { id: "third" };
+    const newer = { id: "newer" };
+    const items = [first, second, third];
+
+    const drained = await drainNextQueueItem(items, async (item) => {
+      expect(item).toBe(first);
+      items.shift();
+      items.unshift(newer);
+    });
+
+    expect(drained).toBe(true);
+    expect(items).toEqual([newer, second, third]);
   });
 });
