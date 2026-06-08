@@ -149,6 +149,12 @@ async function resolveAutoImageModelId(params: {
   explicitModel?: string;
 }): Promise<string | undefined> {
   const explicit = normalizeOptionalString(params.explicitModel);
+  if (isMinimaxVlmProviderId(params.providerId)) {
+    if (explicit && isMinimaxNativeVisionModel({ provider: params.providerId, model: explicit })) {
+      return explicit;
+    }
+    return "MiniMax-VL-01";
+  }
   if (explicit) {
     const explicitStatus = await explicitImageModelVisionStatus({
       cfg: params.cfg,
@@ -530,13 +536,45 @@ function resolveImageModelFromAgentDefaults(cfg: OpenClawConfig): MediaUnderstan
 }
 
 function hasExplicitImageUnderstandingConfig(params: {
-  cfg: OpenClawConfig;
   config?: MediaUnderstandingConfig;
 }): boolean {
+  return (params.config?.models?.length ?? 0) > 0;
+}
+
+function isMinimaxVlmProviderId(provider: string): boolean {
+  const normalized = normalizeMediaProviderId(provider);
+  return normalized === "minimax" || normalized === "minimax-portal";
+}
+
+function isMinimaxNativeVisionModel(params: { provider: string; model?: string }): boolean {
+  // MiniMax M2.x catalog rows may advertise image input but still need the
+  // MiniMax-VL-01 media-understanding path; only M3/M3.x is native vision here.
   return (
-    (params.config?.models?.length ?? 0) > 0 ||
-    resolveImageModelFromAgentDefaults(params.cfg).length > 0
+    isMinimaxVlmProviderId(params.provider) &&
+    /^MiniMax-M3(\b|[-.])/i.test(params.model?.trim() ?? "")
   );
+}
+
+async function activeModelSupportsNativeVision(params: {
+  cfg: OpenClawConfig;
+  activeModel?: ActiveMediaModel;
+}): Promise<boolean> {
+  const activeProvider = params.activeModel?.provider?.trim();
+  if (!activeProvider) {
+    return false;
+  }
+  if (
+    isMinimaxVlmProviderId(activeProvider) &&
+    !isMinimaxNativeVisionModel({
+      provider: activeProvider,
+      model: params.activeModel?.model,
+    })
+  ) {
+    return false;
+  }
+  const catalog = await loadModelCatalog({ config: params.cfg });
+  const entry = findModelInCatalog(catalog, activeProvider, params.activeModel?.model ?? "");
+  return modelSupportsVision(entry);
 }
 
 async function resolveAutoEntries(params: {
@@ -547,9 +585,15 @@ async function resolveAutoEntries(params: {
   activeModel?: ActiveMediaModel;
 }): Promise<MediaUnderstandingModelConfig[]> {
   if (params.capability === "image") {
-    const imageModelEntries = resolveImageModelFromAgentDefaults(params.cfg);
-    if (imageModelEntries.length > 0) {
-      return imageModelEntries;
+    const activeSupportsVision = await activeModelSupportsNativeVision({
+      cfg: params.cfg,
+      activeModel: params.activeModel,
+    });
+    if (!activeSupportsVision) {
+      const imageModelEntries = resolveImageModelFromAgentDefaults(params.cfg);
+      if (imageModelEntries.length > 0) {
+        return imageModelEntries;
+      }
     }
   }
   const activeEntry = await resolveActiveModelEntry(params);
@@ -822,11 +866,11 @@ export async function runCapability(params: {
   if (
     capability === "image" &&
     activeProvider &&
-    !hasExplicitImageUnderstandingConfig({ cfg, config })
+    !hasExplicitImageUnderstandingConfig({
+      config,
+    })
   ) {
-    const catalog = await loadModelCatalog({ config: cfg });
-    const entry = findModelInCatalog(catalog, activeProvider, params.activeModel?.model ?? "");
-    if (modelSupportsVision(entry)) {
+    if (await activeModelSupportsNativeVision({ cfg, activeModel: params.activeModel })) {
       if (shouldLogVerbose()) {
         logVerbose("Skipping image understanding: primary model supports vision natively");
       }
