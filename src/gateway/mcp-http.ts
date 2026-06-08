@@ -55,6 +55,50 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function createMcpJsonParseError(error: unknown): Error & { code: "mcp_json_parse_error" } {
+  return Object.assign(new Error("MCP JSON parse error"), {
+    cause: error,
+    code: "mcp_json_parse_error" as const,
+  });
+}
+
+function isMcpJsonParseError(error: unknown): error is Error & { code: "mcp_json_parse_error" } {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "mcp_json_parse_error"
+  );
+}
+
+function parseMcpJsonBody(body: string): JsonRpcRequest | JsonRpcRequest[] {
+  try {
+    return JSON.parse(body) as JsonRpcRequest | JsonRpcRequest[];
+  } catch (error) {
+    throw createMcpJsonParseError(error);
+  }
+}
+
+function readJsonRpcRequestId(message: unknown) {
+  if (!isRecord(message)) {
+    return null;
+  }
+  const id = message.id;
+  return typeof id === "string" || typeof id === "number" || id === null ? id : undefined;
+}
+
+function isJsonRpcRequest(message: unknown): message is JsonRpcRequest {
+  return isRecord(message) && message.jsonrpc === "2.0" && typeof message.method === "string";
+}
+
+function jsonRpcInternalError(parsed: JsonRpcRequest | JsonRpcRequest[] | undefined) {
+  if (Array.isArray(parsed)) {
+    return parsed.map((message) =>
+      jsonRpcError(readJsonRpcRequestId(message), -32603, "Internal error"),
+    );
+  }
+  return jsonRpcError(readJsonRpcRequestId(parsed), -32603, "Internal error");
+}
+
 function createRequestAbortSignal(req: IncomingMessage, res: ServerResponse) {
   const controller = new AbortController();
   const abort = () => {
@@ -102,9 +146,10 @@ export async function startMcpLoopbackServer(port = 0): Promise<{
 
     const requestAbort = createRequestAbortSignal(req, res);
     void (async () => {
+      let parsed: JsonRpcRequest | JsonRpcRequest[] | undefined;
       try {
         const body = await readMcpHttpBody(req);
-        const parsed: JsonRpcRequest | JsonRpcRequest[] = JSON.parse(body);
+        parsed = parseMcpJsonBody(body);
         const cfg = loadConfig();
         const requestContext = resolveMcpRequestContext(req, cfg, auth);
         const scopedTools = toolCache.resolve({
@@ -118,7 +163,9 @@ export async function startMcpLoopbackServer(port = 0): Promise<{
         const messages = Array.isArray(parsed) ? parsed : [parsed];
         logMcpLoopbackTraffic("request", {
           batchSize: messages.length,
-          methods: messages.map((message) => message.method),
+          methods: messages.map((message) =>
+            isRecord(message) && typeof message.method === "string" ? message.method : undefined,
+          ),
           sessionKey: requestContext.sessionKey,
           senderIsOwner: requestContext.senderIsOwner,
           toolCount: scopedTools.toolSchema.length,
@@ -126,6 +173,10 @@ export async function startMcpLoopbackServer(port = 0): Promise<{
         });
         const responses: object[] = [];
         for (const message of messages) {
+          if (!isJsonRpcRequest(message)) {
+            responses.push(jsonRpcError(readJsonRpcRequestId(message), -32600, "Invalid Request"));
+            continue;
+          }
           const response = await handleMcpJsonRpc({
             message,
             tools: scopedTools.tools,
@@ -169,8 +220,13 @@ export async function startMcpLoopbackServer(port = 0): Promise<{
           message: formatErrorMessage(error),
         });
         if (!res.headersSent) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(jsonRpcError(null, -32700, "Parse error")));
+          if (isMcpJsonParseError(error)) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(jsonRpcError(null, -32700, "Parse error")));
+          } else {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(jsonRpcInternalError(parsed)));
+          }
         }
       } finally {
         requestAbort.cleanup();
