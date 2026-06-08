@@ -42,7 +42,7 @@ This plan tracks selective fixes to port from upstream `openclaw/openclaw` after
 | Done     | `53357e8e7f`    | Neutralize browser media directives.                                   | `pnpm test extensions/browser/src/browser-tool.test.ts --run`                                                                                                                   |
 | Done     | `f658abae50` + `e7f1b24d9d` | Suppress internal protocol artifacts from user-facing replies.          | `pnpm test src/auto-reply/tokens.test.ts src/auto-reply/reply/reply-utils.test.ts extensions/telegram/src/bot-message-dispatch.test.ts --run`                                  |
 | Done     | `22bda60cbe`    | Rebind QMD collections after collection-root changes.                  | `pnpm test extensions/memory-core/src/memory/qmd-manager.test.ts -t "rebinds sessions collection|avoids destructive rebind|rebinds collection when qmd text output|migrates unscoped legacy collections before adding scoped names|rebinds conflicting collection name|warns instead of silently succeeding|falls back to --mask|rebinds a managed collection when its root path changed|rebinds a stale in-container collection root|parseShownCollection extracts path" --run`; full-file target currently fails on unrelated dirty `src/memory-host-sdk/host/backend-config.ts` limit drift (4 vs expected 6). |
-| Planned  | `57633c42b6`    | Preserve CLI silent empty-reply policy for message-tool-only turns.    | `pnpm test src/auto-reply/reply/agent-runner-execution.test.ts src/auto-reply/reply/followup-runner.test.ts --run`                                                             |
+| Deferred | `57633c42b6`    | Preserve CLI silent empty-reply policy for message-tool-only turns.    | Not a clean cherry-pick in this checkout: local CLI/queued-run types do not have the upstream delivery-mode/empty-reply policy fields.                                           |
 
 ## Deferred
 
@@ -62,4 +62,7 @@ This plan tracks selective fixes to port from upstream `openclaw/openclaw` after
   conflicts; defer to a plugin-local pass.
 - `2ffbea20d2`: real stale exec-approval followup fix, but it spans gateway protocol, Swift, and
   multiple renamed exec-host surfaces in this checkout.
+- `57633c42b6`: the local `RunCliAgentParams` and `FollowupRun["run"]` contracts do not expose
+  `sourceReplyDeliveryMode`, `silentReplyPromptMode`, or `allowEmptyAssistantReplyAsSilent`;
+  applying it would require a larger delivery-mode contract backport rather than a narrow fix.
 - `81234fbf12`: feature/prompt-shape change, prompt-cache-sensitive, and broader than this fix pass.
