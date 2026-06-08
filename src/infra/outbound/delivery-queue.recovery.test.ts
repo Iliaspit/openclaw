@@ -205,7 +205,7 @@ describe("delivery-queue recovery", () => {
     );
   });
 
-  it("respects maxRecoveryMs time budget and bumps deferred retries", async () => {
+  it("respects maxRecoveryMs time budget without bumping deferred retries", async () => {
     await enqueueCrashRecoveryEntries();
     await enqueueDelivery(
       { channel: "demo-channel-c", to: "#c", payloads: [{ text: "c" }] },
@@ -228,7 +228,7 @@ describe("delivery-queue recovery", () => {
 
     const remaining = await loadPendingDeliveries(tmpDir());
     expect(remaining).toHaveLength(3);
-    expect(remaining.every((entry) => entry.retryCount === 1)).toBe(true);
+    expect(remaining.map((entry) => entry.retryCount)).toStrictEqual([0, 0, 0]);
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("deferred to next startup"));
   });
 
