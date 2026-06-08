@@ -590,6 +590,31 @@ export class QmdMemoryManager implements MemorySearchManager {
     } catch {
       // ignore; older qmd versions might not support list --json.
     }
+
+    // `qmd collection list` may only return names, so enrich managed
+    // collections with `collection show` before deciding whether to rebind.
+    for (const collection of this.qmd.collections) {
+      const entry = existing.get(collection.name);
+      if (!entry || entry.path) {
+        continue;
+      }
+      try {
+        const showResult = await this.runQmd(["collection", "show", collection.name], {
+          timeoutMs: this.qmd.update.commandTimeoutMs,
+        });
+        const shown = this.parseShownCollection(showResult.stdout);
+        if (shown.path) {
+          entry.path = shown.path;
+        }
+        if (shown.pattern && !entry.pattern) {
+          entry.pattern = shown.pattern;
+        }
+      } catch {
+        // Preserve the defensive no-path behavior for older qmd builds or
+        // transient failures; remove+add can drop collections if add fails.
+      }
+    }
+
     return existing;
   }
 
@@ -894,6 +919,22 @@ export class QmdMemoryManager implements MemorySearchManager {
       }
     }
     return listed;
+  }
+
+  private parseShownCollection(output: string): { path?: string; pattern?: string } {
+    const result: { path?: string; pattern?: string } = {};
+    for (const rawLine of output.split(/\r?\n/)) {
+      const pathMatch = /^\s*Path\s*:\s*(.+?)\s*$/.exec(rawLine);
+      if (pathMatch) {
+        result.path = pathMatch[1].trim();
+        continue;
+      }
+      const patternMatch = /^\s*Pattern\s*:\s*(.+?)\s*$/.exec(rawLine);
+      if (patternMatch) {
+        result.pattern = patternMatch[1].trim();
+      }
+    }
+    return result;
   }
 
   private shouldRebindCollection(collection: ManagedCollection, listed: ListedCollection): boolean {
