@@ -39,7 +39,7 @@ This plan tracks selective fixes to port from upstream `openclaw/openclaw` after
 | Done     | `23e0be355a`    | Bound async session-list transcript reads; already satisfied locally.   | `pnpm test src/gateway/session-utils.fs.test.ts --run`                                                                                                                         |
 | Done     | `aec83af23d`    | Bound chat-history transcript reads.                                   | `pnpm test src/gateway/session-utils.fs.test.ts --run`; `pnpm test src/gateway/server.chat.gateway-server-chat.test.ts -t "chat.history" --run`; `pnpm test src/gateway/server.chat.gateway-server-chat-b.test.ts -t "chat.history" --run` |
 | Done     | `d1cb6cd0b5`    | Preserve native vision skip with imageModel fallback.                  | `pnpm test src/media-understanding/runner.vision-skip.test.ts --run`                                                                                                            |
-| Planned  | `53357e8e7f`    | Neutralize browser media directives.                                   | Browser tool action tests                                                                                                                                                       |
+| Done     | `53357e8e7f`    | Neutralize browser media directives.                                   | `pnpm test extensions/browser/src/browser-tool.test.ts --run`                                                                                                                   |
 
 ## Deferred
 
