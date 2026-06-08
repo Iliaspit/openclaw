@@ -2,6 +2,7 @@ import { ensureMcpLoopbackServer } from "../../gateway/mcp-http.js";
 import {
   createMcpLoopbackServerConfig,
   getActiveMcpLoopbackRuntime,
+  resolveMcpLoopbackBearerToken,
 } from "../../gateway/mcp-http.loopback-runtime.js";
 import type {
   CliBackendAuthEpochMode,
@@ -181,10 +182,10 @@ export async function prepareCliRunContext(
       : undefined,
     env: mcpLoopbackRuntime
       ? {
-          OPENCLAW_MCP_TOKEN:
-            params.senderIsOwner === true
-              ? mcpLoopbackRuntime.ownerToken
-              : mcpLoopbackRuntime.nonOwnerToken,
+          OPENCLAW_MCP_TOKEN: resolveMcpLoopbackBearerToken(
+            mcpLoopbackRuntime,
+            params.senderIsOwner === true,
+          ),
           OPENCLAW_MCP_AGENT_ID: sessionAgentId ?? "",
           OPENCLAW_MCP_ACCOUNT_ID: params.agentAccountId ?? "",
           OPENCLAW_MCP_SESSION_KEY: params.sessionKey ?? "",
@@ -280,6 +281,7 @@ export async function prepareCliRunContext(
     resolveSystemPromptOverride({
       config: params.config,
       agentId: sessionAgentId,
+      workspaceDir,
     }) ??
     buildSystemPrompt({
       workspaceDir,

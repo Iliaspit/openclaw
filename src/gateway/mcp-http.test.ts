@@ -297,7 +297,6 @@ describe("mcp loopback server", () => {
       headers: {
         "content-type": "application/json",
         "x-session-key": "agent:main:main",
-        "x-openclaw-sender-is-owner": "false",
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     });
@@ -343,7 +342,6 @@ describe("mcp loopback server", () => {
       headers: {
         "content-type": "application/json",
         "x-session-key": "agent:main:main",
-        "x-openclaw-sender-is-owner": "true",
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     });
@@ -389,7 +387,6 @@ describe("mcp loopback server", () => {
       headers: {
         "content-type": "application/json",
         "x-session-key": "agent:main:main",
-        "x-openclaw-sender-is-owner": "false",
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -436,7 +433,6 @@ describe("mcp loopback server", () => {
       headers: {
         "content-type": "application/json",
         "x-session-key": "agent:main:main",
-        "x-openclaw-sender-is-owner": "false",
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -490,7 +486,6 @@ describe("mcp loopback server", () => {
       headers: {
         "content-type": "application/json",
         "x-session-key": "agent:main:main",
-        "x-openclaw-sender-is-owner": "false",
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
