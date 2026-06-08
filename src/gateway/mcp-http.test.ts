@@ -56,6 +56,7 @@ import {
   ensureMcpLoopbackServer,
   startMcpLoopbackServer,
 } from "./mcp-http.js";
+import { McpLoopbackToolCache } from "./mcp-http.runtime.js";
 
 let server: Awaited<ReturnType<typeof startMcpLoopbackServer>> | undefined;
 
@@ -587,6 +588,37 @@ describe("mcp loopback server", () => {
     });
 
     expect(response.status).toBe(200);
+  });
+
+  it("caps loopback tool cache cardinality by evicting oldest contexts", () => {
+    const cache = new McpLoopbackToolCache();
+    const baseParams = {
+      accountId: undefined,
+      cfg: { session: { mainKey: "main" } } as never,
+      messageProvider: "telegram",
+      senderIsOwner: true,
+      sessionKey: "agent:main:telegram:group:chat123",
+    } satisfies Parameters<McpLoopbackToolCache["resolve"]>[0];
+
+    for (let index = 0; index < 257; index += 1) {
+      cache.resolve({
+        ...baseParams,
+        sessionKey: `agent:main:telegram:group:chat${index}`,
+      });
+    }
+    expect(resolveGatewayScopedToolsMock).toHaveBeenCalledTimes(257);
+
+    cache.resolve({
+      ...baseParams,
+      sessionKey: "agent:main:telegram:group:chat0",
+    });
+    expect(resolveGatewayScopedToolsMock).toHaveBeenCalledTimes(258);
+
+    cache.resolve({
+      ...baseParams,
+      sessionKey: "agent:main:telegram:group:chat256",
+    });
+    expect(resolveGatewayScopedToolsMock).toHaveBeenCalledTimes(258);
   });
 });
 
