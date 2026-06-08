@@ -14,6 +14,7 @@ import {
   resolveProfile,
   wrapExternalContent,
 } from "./core-api.js";
+import { neutralizeMediaDirectives } from "./browser/vision.js";
 
 const browserToolActionDeps = {
   browserAct,
@@ -60,7 +61,12 @@ function wrapBrowserExternalJson(params: {
   payload: unknown;
   includeWarning?: boolean;
 }): { wrappedText: string; safeDetails: Record<string, unknown> } {
-  const extractedText = JSON.stringify(params.payload, null, 2);
+  const extractedText = JSON.stringify(
+    params.payload,
+    (_key: string, value: unknown) =>
+      typeof value === "string" ? neutralizeMediaDirectives(value) : value,
+    2,
+  );
   const wrappedText = wrapExternalContent(extractedText, {
     source: "browser",
     includeWarning: params.includeWarning ?? true,
@@ -245,7 +251,7 @@ export async function executeSnapshotAction(params: {
       });
   if (snapshot.format === "ai") {
     const extractedText = snapshot.snapshot ?? "";
-    const wrappedSnapshot = wrapExternalContent(extractedText, {
+    const wrappedSnapshot = wrapExternalContent(neutralizeMediaDirectives(extractedText), {
       source: "browser",
       includeWarning: true,
     });
