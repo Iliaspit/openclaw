@@ -11,6 +11,7 @@ import {
   readFileWithinRoot,
   writeFileWithinRoot,
 } from "../infra/fs-safe.js";
+import { expandHomePrefix, resolveOsHomeDir } from "../infra/home-dir.js";
 import { hasEncodedFileUrlSeparator, trySafeFileURLToPath } from "../infra/local-file-access.js";
 import { detectMime } from "../media/mime.js";
 import { sniffMimeFromBase64 } from "../media/sniff-mime-from-base64.js";
@@ -41,11 +42,11 @@ type ToolContentBlock = AgentToolResult<unknown>["content"][number];
 type ImageContentBlock = Extract<ToolContentBlock, { type: "image" }>;
 type TextContentBlock = Extract<ToolContentBlock, { type: "text" }>;
 
-const DEFAULT_READ_PAGE_MAX_BYTES = 50 * 1024;
-const MAX_ADAPTIVE_READ_MAX_BYTES = 512 * 1024;
-const ADAPTIVE_READ_CONTEXT_SHARE = 0.2;
+const DEFAULT_READ_PAGE_MAX_BYTES = 32 * 1024;
+const MAX_ADAPTIVE_READ_MAX_BYTES = 128 * 1024;
+const ADAPTIVE_READ_CONTEXT_SHARE = 0.1;
 const CHARS_PER_TOKEN_ESTIMATE = 4;
-const MAX_ADAPTIVE_READ_PAGES = 8;
+const MAX_ADAPTIVE_READ_PAGES = 4;
 
 type OpenClawReadToolOptions = {
   modelContextWindowTokens?: number;
@@ -625,6 +626,10 @@ type SandboxToolParams = {
   bridge: SandboxFsBridge;
   modelContextWindowTokens?: number;
   imageSanitization?: ImageSanitizationLimits;
+  routeHealth?: {
+    childSessionKey?: string;
+    runId?: string;
+  };
 };
 
 export function createSandboxedReadTool(params: SandboxToolParams) {
@@ -648,12 +653,13 @@ export function createSandboxedEditTool(params: SandboxToolParams) {
   const base = createEditTool(params.root, {
     operations: createSandboxEditOperations(params),
   }) as unknown as AnyAgentTool;
-  const withRecovery = wrapEditToolWithRecovery(base, {
+  const withValidation = wrapToolParamValidation(base, REQUIRED_PARAM_GROUPS.edit);
+  return wrapEditToolWithRecovery(withValidation, {
     root: params.root,
     readFile: async (absolutePath: string) =>
       (await params.bridge.readFile({ filePath: absolutePath, cwd: params.root })).toString("utf8"),
+    routeHealth: params.routeHealth,
   });
-  return wrapToolParamValidation(withRecovery, REQUIRED_PARAM_GROUPS.edit);
 }
 
 export function createHostWorkspaceWriteTool(root: string, options?: { workspaceOnly?: boolean }) {
@@ -663,15 +669,25 @@ export function createHostWorkspaceWriteTool(root: string, options?: { workspace
   return wrapToolParamValidation(base, REQUIRED_PARAM_GROUPS.write);
 }
 
-export function createHostWorkspaceEditTool(root: string, options?: { workspaceOnly?: boolean }) {
+export function createHostWorkspaceEditTool(
+  root: string,
+  options?: {
+    workspaceOnly?: boolean;
+    routeHealth?: {
+      childSessionKey?: string;
+      runId?: string;
+    };
+  },
+) {
   const base = createEditTool(root, {
     operations: createHostEditOperations(root, options),
   }) as unknown as AnyAgentTool;
-  const withRecovery = wrapEditToolWithRecovery(base, {
+  const withValidation = wrapToolParamValidation(base, REQUIRED_PARAM_GROUPS.edit);
+  return wrapEditToolWithRecovery(withValidation, {
     root,
     readFile: (absolutePath: string) => fs.readFile(absolutePath, "utf-8"),
+    routeHealth: options?.routeHealth,
   });
-  return wrapToolParamValidation(withRecovery, REQUIRED_PARAM_GROUPS.edit);
 }
 
 export function createOpenClawReadTool(
@@ -746,8 +762,13 @@ function createSandboxEditOperations(params: SandboxToolParams) {
   } as const;
 }
 
+function expandTildeToOsHome(filePath: string): string {
+  const home = resolveOsHomeDir();
+  return home ? expandHomePrefix(filePath, { home }) : filePath;
+}
+
 async function writeHostFile(absolutePath: string, content: string) {
-  const resolved = path.resolve(absolutePath);
+  const resolved = path.resolve(expandTildeToOsHome(absolutePath));
   await fs.mkdir(path.dirname(resolved), { recursive: true });
   await fs.writeFile(resolved, content, "utf-8");
 }
@@ -759,7 +780,7 @@ function createHostWriteOperations(root: string, options?: { workspaceOnly?: boo
     // When workspaceOnly is false, allow writes anywhere on the host
     return {
       mkdir: async (dir: string) => {
-        const resolved = path.resolve(dir);
+        const resolved = path.resolve(expandTildeToOsHome(dir));
         await fs.mkdir(resolved, { recursive: true });
       },
       writeFile: writeHostFile,
@@ -793,12 +814,12 @@ function createHostEditOperations(root: string, options?: { workspaceOnly?: bool
     // When workspaceOnly is false, allow edits anywhere on the host
     return {
       readFile: async (absolutePath: string) => {
-        const resolved = path.resolve(absolutePath);
+        const resolved = path.resolve(expandTildeToOsHome(absolutePath));
         return await fs.readFile(resolved);
       },
       writeFile: writeHostFile,
       access: async (absolutePath: string) => {
-        const resolved = path.resolve(absolutePath);
+        const resolved = path.resolve(expandTildeToOsHome(absolutePath));
         await fs.access(resolved);
       },
     } as const;

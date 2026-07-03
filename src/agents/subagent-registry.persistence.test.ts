@@ -231,7 +231,7 @@ describe("subagent registry persistence", () => {
     expect(persisted?.startedAt).toBeLessThanOrEqual(endedAt);
   });
 
-  it("skips cleanup when cleanupHandled was persisted", async () => {
+  it("skips cleanup when cleanupCompletedAt was persisted", async () => {
     tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-"));
     process.env.OPENCLAW_STATE_DIR = tempStateDir;
 
@@ -249,7 +249,8 @@ describe("subagent registry persistence", () => {
           createdAt: 1,
           startedAt: 1,
           endedAt: 2,
-          cleanupHandled: true, // Already handled - should be skipped
+          cleanupHandled: true,
+          cleanupCompletedAt: 3,
         },
       },
     };
@@ -265,13 +266,108 @@ describe("subagent registry persistence", () => {
 
     await flushQueuedRegistryWork();
 
-    // announce should NOT be called since cleanupHandled was true
+    // announce should NOT be called since cleanup was already completed
     const calls = (announceSpy.mock.calls as unknown as Array<[unknown]>).map((call) => call[0]);
     const match = calls.find(
       (params) =>
         (params as { childSessionKey?: string }).childSessionKey === "agent:main:subagent:two",
     );
     expect(match).toBeFalsy();
+  });
+
+  it("retries cleanup when cleanupHandled was persisted without cleanupCompletedAt", async () => {
+    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-"));
+    process.env.OPENCLAW_STATE_DIR = tempStateDir;
+    const now = Date.now();
+
+    const registryPath = path.join(tempStateDir, "subagents", "runs.json");
+    const persisted = {
+      version: 2,
+      runs: {
+        "run-interrupted-cleanup": {
+          runId: "run-interrupted-cleanup",
+          childSessionKey: "agent:main:subagent:interrupted-cleanup",
+          requesterSessionKey: "agent:main:main",
+          requesterDisplayKey: "main",
+          task: "retry interrupted cleanup",
+          cleanup: "keep",
+          createdAt: now - 2_000,
+          startedAt: now - 1_000,
+          endedAt: now - 500,
+          cleanupHandled: true,
+        },
+      },
+    };
+    await fs.mkdir(path.dirname(registryPath), { recursive: true });
+    await fs.writeFile(registryPath, `${JSON.stringify(persisted)}\n`, "utf8");
+    await writeChildSessionEntry({
+      sessionKey: "agent:main:subagent:interrupted-cleanup",
+      sessionId: "sess-interrupted-cleanup",
+    });
+
+    await restartRegistryAndFlush();
+
+    await vi.waitFor(async () => {
+      expect(announceSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          childSessionKey: "agent:main:subagent:interrupted-cleanup",
+        }),
+      );
+      const after = await readPersistedRun<{ cleanupCompletedAt?: number }>(
+        registryPath,
+        "run-interrupted-cleanup",
+      );
+      expect(after?.cleanupCompletedAt).toBeDefined();
+    });
+  });
+
+  it("retries interrupted cleanup even when retry bookkeeping was already exhausted", async () => {
+    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-"));
+    process.env.OPENCLAW_STATE_DIR = tempStateDir;
+    const now = Date.now();
+
+    const registryPath = path.join(tempStateDir, "subagents", "runs.json");
+    const persisted = {
+      version: 2,
+      runs: {
+        "run-exhausted-interrupted-cleanup": {
+          runId: "run-exhausted-interrupted-cleanup",
+          childSessionKey: "agent:main:subagent:exhausted-interrupted-cleanup",
+          requesterSessionKey: "agent:main:main",
+          requesterDisplayKey: "main",
+          task: "retry exhausted interrupted cleanup",
+          cleanup: "keep",
+          createdAt: now - 10 * 60_000,
+          startedAt: now - 9 * 60_000,
+          endedAt: now - 8 * 60_000,
+          cleanupHandled: true,
+          announceRetryCount: 3,
+          lastAnnounceRetryAt: now - 7 * 60_000,
+        },
+      },
+    };
+    await fs.mkdir(path.dirname(registryPath), { recursive: true });
+    await fs.writeFile(registryPath, `${JSON.stringify(persisted)}\n`, "utf8");
+    await writeChildSessionEntry({
+      sessionKey: "agent:main:subagent:exhausted-interrupted-cleanup",
+      sessionId: "sess-exhausted-interrupted-cleanup",
+    });
+
+    await restartRegistryAndFlush();
+
+    await vi.waitFor(async () => {
+      expect(announceSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          childSessionKey: "agent:main:subagent:exhausted-interrupted-cleanup",
+        }),
+      );
+      const after = await readPersistedRun<{
+        cleanupCompletedAt?: number;
+        announceRetryCount?: number;
+      }>(registryPath, "run-exhausted-interrupted-cleanup");
+      expect(after?.cleanupCompletedAt).toBeDefined();
+      expect(after?.announceRetryCount).toBeUndefined();
+    });
   });
 
   it("maps legacy announce fields into cleanup state", async () => {

@@ -2268,16 +2268,26 @@ Provider auth follows standard order: `auth-profiles.json` → env vars → `mod
 
 ### `tools.agentToAgent`
 
+Controls generic cross-agent session access for `sessions_list`, `sessions_history`, `sessions_send`, and status lookups.
+
+Use this for direct cross-agent messaging between unrelated sessions. It does not need to list every worker role used by normal sub-agent orchestration: a requester can still message and re-task its own tracked child sessions through the sub-agent registry, even when the child uses a different `agentId`.
+
 ```json5
 {
   tools: {
     agentToAgent: {
-      enabled: false,
-      allow: ["home", "work"],
+      enabled: true,
+      allow: ["PM1", "PM2", "PM3", "PM4"],
     },
   },
 }
 ```
+
+Notes:
+
+- `enabled: false` blocks generic cross-agent session access.
+- `allow` matches agent ids or wildcard patterns. An empty allowlist or `"*"` allows any agent id.
+- Parent-to-child sub-agent control is scoped by ownership metadata and is not a reason to broaden this allowlist.
 
 ### `tools.sessions`
 

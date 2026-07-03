@@ -68,18 +68,45 @@ public struct OpenClawChatView: View {
                     .ignoresSafeArea()
             }
 
-            VStack(spacing: Layout.stackSpacing) {
-                self.messageList
-                    .padding(.horizontal, Layout.outerPaddingHorizontal)
-                OpenClawChatComposer(
-                    viewModel: self.viewModel,
-                    style: self.style,
-                    showsSessionSwitcher: self.showsSessionSwitcher)
-                    .padding(.horizontal, Layout.composerPaddingHorizontal)
+            if self.usesDesktopShell {
+                HStack(spacing: 0) {
+                    ChatDesktopSidebar(
+                        viewModel: self.viewModel,
+                        showSessions: self.$showSessions,
+                        showsSessionSwitcher: self.showsSessionSwitcher)
+
+                    VStack(spacing: 12) {
+                        self.messageList
+                            .padding(.horizontal, Layout.outerPaddingHorizontal)
+
+                        if self.viewModel.shouldShowRunActivity {
+                            ChatRunActivityPanel(viewModel: self.viewModel)
+                                .padding(.horizontal, Layout.outerPaddingHorizontal)
+                        }
+
+                        OpenClawChatComposer(
+                            viewModel: self.viewModel,
+                            style: self.style,
+                            showsSessionSwitcher: false)
+                            .padding(.horizontal, Layout.composerPaddingHorizontal)
+                    }
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                }
+            } else {
+                VStack(spacing: Layout.stackSpacing) {
+                    self.messageList
+                        .padding(.horizontal, Layout.outerPaddingHorizontal)
+                    OpenClawChatComposer(
+                        viewModel: self.viewModel,
+                        style: self.style,
+                        showsSessionSwitcher: self.showsSessionSwitcher)
+                        .padding(.horizontal, Layout.composerPaddingHorizontal)
+                }
+                .padding(.vertical, Layout.outerPaddingVertical)
+                .frame(maxWidth: .infinity)
+                .frame(maxHeight: .infinity, alignment: .top)
             }
-            .padding(.vertical, Layout.outerPaddingVertical)
-            .frame(maxWidth: .infinity)
-            .frame(maxHeight: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onAppear { self.viewModel.load() }
@@ -200,7 +227,7 @@ public struct OpenClawChatView: View {
                     alignment: msg.role.lowercased() == "user" ? .trailing : .leading)
         }
 
-        if self.viewModel.pendingRunCount > 0 {
+        if !self.usesDesktopShell && self.viewModel.pendingRunCount > 0 {
             HStack {
                 ChatTypingIndicatorBubble(style: self.style)
                     .equatable()
@@ -208,7 +235,7 @@ public struct OpenClawChatView: View {
             }
         }
 
-        if !self.viewModel.pendingToolCalls.isEmpty {
+        if !self.usesDesktopShell && !self.viewModel.pendingToolCalls.isEmpty {
             ChatPendingToolsBubble(toolCalls: self.viewModel.pendingToolCalls)
                 .equatable()
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -320,7 +347,7 @@ public struct OpenClawChatView: View {
 
     private var emptyStateTitle: String {
         #if os(macOS)
-        "Web Chat"
+        self.usesDesktopShell ? "New chat" : "Web Chat"
         #else
         "Chat"
         #endif
@@ -328,9 +355,19 @@ public struct OpenClawChatView: View {
 
     private var emptyStateMessage: String {
         #if os(macOS)
-        "Type a message below to start.\nReturn sends • Shift-Return adds a line break."
+        self.usesDesktopShell
+            ? "Ask OpenClaw to build, inspect, or change something."
+            : "Type a message below to start.\nReturn sends • Shift-Return adds a line break."
         #else
         "Type a message below to start."
+        #endif
+    }
+
+    private var usesDesktopShell: Bool {
+        #if os(macOS)
+        self.style == .standard
+        #else
+        false
         #endif
     }
 

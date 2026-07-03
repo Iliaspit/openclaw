@@ -473,7 +473,13 @@ export async function resolveReplyDirectives(params: {
       targetSessionEntry?.reasoningLevel !== null) ||
     hasAgentReasoningDefault;
   const thinkingActive = resolvedThinkLevelWithDefault !== "off";
-  if (!reasoningExplicitlySet && resolvedReasoningLevel === "off" && !thinkingActive) {
+  if (
+    !reasoningExplicitlySet &&
+    resolvedReasoningLevel === "off" &&
+    opts?.typingPolicy === "internal_webchat"
+  ) {
+    resolvedReasoningLevel = "stream";
+  } else if (!reasoningExplicitlySet && resolvedReasoningLevel === "off" && !thinkingActive) {
     resolvedReasoningLevel = await modelState.resolveDefaultReasoningLevel();
   }
 

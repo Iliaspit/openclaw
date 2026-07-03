@@ -1,7 +1,11 @@
 import type { ErrorObject } from "ajv";
 import { describe, expect, it } from "vitest";
 import { TALK_TEST_PROVIDER_ID } from "../../test-utils/talk-test-provider.js";
-import { formatValidationErrors, validateTalkConfigResult } from "./index.js";
+import {
+  formatValidationErrors,
+  validateQueueHealthResult,
+  validateTalkConfigResult,
+} from "./index.js";
 
 const makeError = (overrides: Partial<ErrorObject>): ErrorObject => ({
   keyword: "type",
@@ -109,6 +113,85 @@ describe("validateTalkConfigResult", () => {
             },
           },
         },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("validateQueueHealthResult", () => {
+  const queueHealthResult = {
+    ts: 123,
+    gatewayDraining: false,
+    totalQueued: 1,
+    totalActive: 1,
+    totalDepth: 2,
+    totalRuntimeIssues: 1,
+    runtimeIssues: [
+      {
+        runId: "run-planner-abandoned",
+        code: "agent_lifecycle_abandoned",
+        severity: "warning",
+        message: "Agent ended without a visible reply after replay-invalid work.",
+        observedAt: 100,
+        lastUpdatedAt: 120,
+        count: 1,
+        sessionKey: "main",
+        lane: "session:main",
+        livenessState: "abandoned",
+      },
+    ],
+    lanes: [
+      {
+        lane: "session:main",
+        health: "degraded",
+        queued: 1,
+        active: 1,
+        depth: 2,
+        maxConcurrent: 1,
+        isOverloaded: true,
+        draining: false,
+        oldestQueuedAt: 100,
+        oldestQueuedMs: 25,
+        oldestActiveStartedAt: 90,
+        oldestActiveMs: 35,
+        lastWaitMs: 20,
+        lastDequeuedAt: 95,
+        lastTaskDurationMs: null,
+        lastCompletedAt: null,
+        lastErrorAt: null,
+        lastClearedAt: null,
+        runtimeIssues: [
+          {
+            runId: "run-planner-abandoned",
+            code: "agent_lifecycle_abandoned",
+            severity: "warning",
+            message: "Agent ended without a visible reply after replay-invalid work.",
+            observedAt: 100,
+            lastUpdatedAt: 120,
+            count: 1,
+            sessionKey: "main",
+            lane: "session:main",
+            livenessState: "abandoned",
+          },
+        ],
+      },
+    ],
+  };
+
+  it("accepts additive queue health runtime and overload fields", () => {
+    expect(validateQueueHealthResult(queueHealthResult)).toBe(true);
+  });
+
+  it("rejects rich runtime issue payload fields", () => {
+    expect(
+      validateQueueHealthResult({
+        ...queueHealthResult,
+        runtimeIssues: [
+          {
+            ...queueHealthResult.runtimeIssues[0],
+            prompt: "do not expose transcript text here",
+          },
+        ],
       }),
     ).toBe(false);
   });

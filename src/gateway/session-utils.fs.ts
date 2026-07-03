@@ -27,6 +27,78 @@ type SessionTitleFieldsCacheEntry = SessionTitleFields & {
 
 const sessionTitleFieldsCache = new Map<string, SessionTitleFieldsCacheEntry>();
 const MAX_SESSION_TITLE_FIELDS_CACHE_ENTRIES = 5000;
+const SESSIONS_YIELD_CUSTOM_TYPE = "openclaw.sessions_yield";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function parseTranscriptTimestamp(value: unknown): number {
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  return Date.now();
+}
+
+function normalizeVisibleCustomMessageText(value: string): string | null {
+  const text = value.trim();
+  return text || null;
+}
+
+function extractVisibleCustomMessageContent(content: unknown): string | null {
+  if (typeof content === "string") {
+    return normalizeVisibleCustomMessageText(content);
+  }
+  if (!Array.isArray(content)) {
+    return null;
+  }
+  const parts = content
+    .map((part) => {
+      if (!isRecord(part) || typeof part.text !== "string") {
+        return null;
+      }
+      return part.type === "text" || part.type === "input_text" || part.type === "output_text"
+        ? part.text
+        : null;
+    })
+    .filter((part): part is string => typeof part === "string" && part.trim().length > 0);
+  return parts.length > 0 ? parts.join("\n").trim() : null;
+}
+
+function extractVisibleCustomMessageText(entry: Record<string, unknown>): string | null {
+  const customType = typeof entry.customType === "string" ? entry.customType : "";
+  if (customType === SESSIONS_YIELD_CUSTOM_TYPE && isRecord(entry.details)) {
+    const message = entry.details.message;
+    if (typeof message === "string") {
+      return normalizeVisibleCustomMessageText(message);
+    }
+  }
+  return extractVisibleCustomMessageContent(entry.content);
+}
+
+function shouldSurfaceCustomMessage(entry: Record<string, unknown>): boolean {
+  const customType = typeof entry.customType === "string" ? entry.customType : "";
+  return entry.display === true || customType === SESSIONS_YIELD_CUSTOM_TYPE;
+}
+
+function buildVisibleCustomTranscriptMessage(entry: Record<string, unknown>): unknown | null {
+  const text = extractVisibleCustomMessageText(entry);
+  if (!text) {
+    return null;
+  }
+  const customType = typeof entry.customType === "string" ? entry.customType : undefined;
+  return {
+    role: customType === SESSIONS_YIELD_CUSTOM_TYPE ? "assistant" : "system",
+    content: [{ type: "text", text }],
+    timestamp: parseTranscriptTimestamp(entry.timestamp),
+  };
+}
 
 function readSessionTitleFieldsCacheKey(
   filePath: string,
@@ -199,33 +271,45 @@ export function readRecentSessionMessages(
 }
 
 function parsedSessionEntryToMessage(parsed: unknown, seq: number): unknown | null {
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+  if (!isRecord(parsed)) {
     return null;
   }
-  const entry = parsed as Record<string, unknown>;
-  if (entry.message) {
-    return attachOpenClawTranscriptMeta(entry.message, {
-      ...(typeof entry.id === "string" ? { id: entry.id } : {}),
+
+  if (parsed.message) {
+    return attachOpenClawTranscriptMeta(parsed.message, {
+      ...(typeof parsed.id === "string" ? { id: parsed.id } : {}),
+      seq,
+    });
+  }
+
+  if (parsed.type === "custom_message" && shouldSurfaceCustomMessage(parsed)) {
+    const message = buildVisibleCustomTranscriptMessage(parsed);
+    if (!message) {
+      return null;
+    }
+    return attachOpenClawTranscriptMeta(message, {
+      ...(typeof parsed.id === "string" ? { id: parsed.id } : {}),
+      kind: "custom_message",
+      customType: typeof parsed.customType === "string" ? parsed.customType : undefined,
       seq,
     });
   }
 
   // Compaction entries are not "message" records, but they're useful context for debugging.
   // Emit a lightweight synthetic message that the Web UI can render as a divider.
-  if (entry.type === "compaction") {
-    const ts = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
-    const timestamp = Number.isFinite(ts) ? ts : Date.now();
+  if (parsed.type === "compaction") {
     return {
       role: "system",
       content: [{ type: "text", text: "Compaction" }],
-      timestamp,
+      timestamp: parseTranscriptTimestamp(parsed.timestamp),
       __openclaw: {
         kind: "compaction",
-        id: typeof entry.id === "string" ? entry.id : undefined,
+        id: typeof parsed.id === "string" ? parsed.id : undefined,
         seq,
       },
     };
   }
+
   return null;
 }
 

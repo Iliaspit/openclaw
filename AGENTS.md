@@ -1,8 +1,9 @@
 # Repository Guidelines
 
-- Repo: https://github.com/openclaw/openclaw
+- Repo: [https://github.com/openclaw/openclaw](https://github.com/openclaw/openclaw)
 - In chat replies, file references must be repo-root relative only (example: `src/telegram/index.ts:80`); never absolute paths or `~/...`.
 - Do not edit files covered by security-focused `CODEOWNERS` rules unless a listed owner explicitly asked for the change or is already reviewing it with you. Treat those paths as restricted surfaces, not drive-by cleanup.
+- Before investigating an issue or making a requested change, consult `INCIDENTS.md` when present for prior failure modes and fixes that may affect the approach. Append a concise entry when the work reveals or resolves an incident.
 
 ## Project Structure & Module Organization
 
@@ -44,7 +45,7 @@
   - Public docs: `docs/plugins/building-plugins.md`, `docs/plugins/architecture.md`, `docs/plugins/sdk-overview.md`, `docs/plugins/sdk-entrypoints.md`, `docs/plugins/sdk-runtime.md`, `docs/plugins/manifest.md`, `docs/plugins/sdk-channel-plugins.md`, `docs/plugins/sdk-provider-plugins.md`
   - Definition files: `src/plugin-sdk/plugin-entry.ts`, `src/plugin-sdk/core.ts`, `src/plugin-sdk/provider-entry.ts`, `src/plugin-sdk/channel-contract.ts`, `scripts/lib/plugin-sdk-entrypoints.json`, `package.json`
   - Invariant: core must stay extension-agnostic. Adding a bundled or third-party extension should not require unrelated core edits just to teach core that the extension exists.
-  - Rule: extensions must cross into core only through `openclaw/plugin-sdk/*`, manifest metadata, and documented runtime helpers. Do not import `src/**` from extension production code.
+  - Rule: extensions must cross into core only through `openclaw/plugin-sdk/*`, manifest metadata, and documented runtime helpers. Do not import `src/`** from extension production code.
   - Rule: core code and tests must not deep-import bundled plugin internals such as a plugin's `src/**` files or `onboard.js`. If core needs a bundled plugin helper, expose it through that plugin's `api.ts` and, when it is a real cross-package contract, through `src/plugin-sdk/<id>.ts`.
   - Rule: do not add hardcoded bundled extension/provider/channel/capability id lists, maps, or named special cases in core when a manifest, capability, registry, or plugin-owned contract can express the same behavior.
   - Rule: extension-owned compatibility behavior belongs to the owning extension. Core may orchestrate generic doctor/config flows, but extension-specific legacy repairs, detection rules, onboarding, auth detection, and provider defaults should live in plugin-owned contracts.
@@ -109,14 +110,32 @@
 - Config: use `openclaw config set ...`; ensure `gateway.mode=local` is set.
 - Discord: store raw token only (no `DISCORD_BOT_TOKEN=` prefix).
 - Restart: stop old gateway and run:
-  `pkill -9 -f openclaw-gateway || true; nohup openclaw gateway run --bind loopback --port 18789 --force > /tmp/openclaw-gateway.log 2>&1 &`
+`pkill -9 -f openclaw-gateway || true; nohup openclaw gateway run --bind loopback --port 18789 --force > /tmp/openclaw-gateway.log 2>&1 &`
 - Verify: `openclaw channels status --probe`, `ss -ltnp | rg 18789`, `tail -n 120 /tmp/openclaw-gateway.log`.
+
+## Docker Gateway Ops
+
+- Read `docs/install/docker.md` only for deep details; keep the common local runbook here so Docker setup does not need to be rediscovered each time.
+- First detect whether the active gateway is Docker-backed: `docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | rg 'openclaw|NAMES'`. If `openclaw-openclaw-gateway-1` is running from `openclaw:local`, source changes in this checkout are not live until the image is rebuilt and the gateway container is recreated.
+- `docker-compose.yml` defines `openclaw-gateway` and `openclaw-cli`. `OPENCLAW_IMAGE` defaults to `openclaw:local`; ports default to `18789` for Gateway and `18790` for Bridge.
+- Project `.env` is Docker infra: `OPENCLAW_IMAGE`, `OPENCLAW_CONFIG_DIR`, `OPENCLAW_WORKSPACE_DIR`, ports, bind mode, and gateway token. Host `~/.openclaw/.env` is provider/channel secrets. Host `~/.openclaw/openclaw.json` is behavior config. Do not put API keys or bot tokens in `docker-compose.yml` or `openclaw.json`.
+- Compose bind-mounts `${OPENCLAW_CONFIG_DIR}` to `/home/node/.openclaw`, `${OPENCLAW_WORKSPACE_DIR}` to `/home/node/.openclaw/workspace`, and `${OPENCLAW_CONFIG_DIR}/ssh` to `/home/node/.ssh`. Those survive container replacement; files installed only inside a running container do not.
+- If `docker-compose.extra.yml` exists, include it in compose commands (`-f docker-compose.yml -f docker-compose.extra.yml`). Forgetting the extra file can leave plugin sidecars or mounted workspaces missing while the gateway still looks healthy.
+- First-time Docker setup is `scripts/docker/setup.sh`: it builds or pulls the image, creates project `.env`, runs onboarding, pins `gateway.mode=local`, defaults runtime bind from `OPENCLAW_GATEWAY_BIND` (`lan` by default), and starts `openclaw-gateway`.
+- For source, system prompt, tool, or built-output changes with `OPENCLAW_IMAGE=openclaw:local`, rebuild and recreate the gateway. A plain restart is not enough because the container runs `node dist/index.js` from the already-built image.
+- For bind-mounted config/env changes under `~/.openclaw`, usually restart or recreate the container without rebuilding the image.
+- For registry images such as `ghcr.io/openclaw/openclaw:<tag>`, pull the services and recreate the gateway; do not build `openclaw:local` unless intentionally switching to the local-source flow.
+- Do not run `openclaw update` inside Docker. Use `clawdock-update`, or from the host run `git pull`, rebuild the image, then recreate the gateway.
+- Do not install persistent binaries or packages inside the running container. Bake OS packages with `OPENCLAW_DOCKER_APT_PACKAGES` or Dockerfile changes, then rebuild.
+- Useful checks: `curl -fsS http://127.0.0.1:18789/healthz`, `curl -fsS http://127.0.0.1:18789/readyz`, `docker compose logs -f openclaw-gateway`, and `docker compose exec openclaw-gateway node dist/index.js health --token "$OPENCLAW_GATEWAY_TOKEN"`.
+- ClawDock helpers wrap the same flow and automatically include `docker-compose.extra.yml` when present: `clawdock-start`, `clawdock-stop`, `clawdock-restart`, `clawdock-rebuild`, `clawdock-update`, `clawdock-logs`, `clawdock-health`, `clawdock-shell`, and `clawdock-cli <command>`.
 
 ## Build, Test, and Development Commands
 
 - Runtime baseline: Node **22+** (keep Node + Bun paths working).
 - Install deps: `pnpm install`
-- If deps are missing (for example `node_modules` missing, `vitest not found`, or `command not found`), run the repo’s package-manager install command (prefer lockfile/README-defined PM), then rerun the exact requested command once. Apply this to test/build/lint/typecheck/dev commands; if retry still fails, report the command and first actionable error.
+- If deps are missing (for example `node_modules` missing, `vitest not found`, `command not found`, or `Cannot find module @rollup/rollup-<platform>`), run the repo’s package-manager install command (prefer lockfile/README-defined PM), then rerun the exact requested command once. Apply this to test/build/lint/typecheck/dev commands; if retry still fails, report the command and first actionable error.
+- Treat Rollup native optional package failures as dependency-install failures, not test failures. They usually mean `node_modules` was not installed for the current OS/CPU/libc, was installed by the wrong package manager, or was not refreshed in the active worktree. For Yarn Berry `node-modules` worktrees, use a worktree-local Corepack cache such as `COREPACK_HOME="$PWD/.corepack" yarn install --immutable` before rerunning tests; do not repeatedly run raw `COREPACK_HOME=/tmp/corepack yarn vitest ...` against a stale install. If the same `node_modules` tree is intentionally used from both macOS and Linux, the owning repo should declare both platforms in Yarn `supportedArchitectures` so optional native packages are installed together instead of flipping between platforms.
 - Pre-commit hooks: `prek install`. The hook runs the repo verification flow, including `pnpm check`.
 - `FAST_COMMIT=1` skips the repo-wide `pnpm format` and `pnpm check` inside the pre-commit hook only. Use it when you intentionally want a faster commit path and are running equivalent targeted verification manually. It does not change CI and does not change what `pnpm check` itself does.
 - Also supported: `bun install` (keep `pnpm-lock.yaml` + Bun patching in sync when touching deps/patches).
@@ -181,7 +200,7 @@
 - Dynamic import verification: after refactors that touch lazy-loading/module boundaries, run `pnpm build` and check for `[INEFFECTIVE_DYNAMIC_IMPORT]` warnings before submitting.
 - Circular dependencies: keep both `pnpm check:import-cycles` and `pnpm check:madge-import-cycles` green; do not reintroduce runtime import cycles or madge-detected import loops.
 - Extension SDK self-import guardrail: inside an extension package, do not import that same extension via `openclaw/plugin-sdk/<extension>` from production files. Route internal imports through a local barrel such as `./api.ts` or `./runtime-api.ts`, and keep the `plugin-sdk/<extension>` path as the external contract only.
-- Extension package boundary guardrail: inside a bundled plugin package, do not use relative imports/exports that resolve outside that same package root. If shared code belongs in the plugin SDK, import `openclaw/plugin-sdk/<subpath>` instead of reaching into `src/plugin-sdk/**` or other repo paths via `../`.
+- Extension package boundary guardrail: inside a bundled plugin package, do not use relative imports/exports that resolve outside that same package root. If shared code belongs in the plugin SDK, import `openclaw/plugin-sdk/<subpath>` instead of reaching into `src/plugin-sdk/`** or other repo paths via `../`.
 - Extension API surface rule: `openclaw/plugin-sdk/<subpath>` is the only public cross-package contract for extension-facing SDK code. If an extension needs a new seam, add a public subpath first; do not reach into `src/plugin-sdk/**` by relative path.
 - Never share class behavior via prototype mutation (`applyPrototypeMixins`, `Object.defineProperty` on `.prototype`, or exporting `Class.prototype` for merges). Use explicit inheritance/composition (`A extends B extends C`) or helper composition so TypeScript can typecheck.
 - If this pattern is needed, stop and get explicit approval before shipping; default behavior is to split/refactor into an explicit class hierarchy and keep members strongly typed.
@@ -207,7 +226,7 @@
 - Write tests to clean up timers, env, globals, mocks, sockets, temp dirs, and module state so `--isolate=false` stays green.
 - Test performance guardrail: do not put `vi.resetModules()` plus `await import(...)` in `beforeEach`/per-test loops for heavy modules unless module state truly requires it. Prefer static imports or one-time `beforeAll` imports, then reset mocks/runtime state directly.
 - Test performance guardrail: if a test file uses stable `vi.mock(...)` hoists or other static module mocks, do not pair them with `vi.resetModules()` and a fresh `await import(...)` in every `beforeEach`. Import the heavy module once in `beforeAll`, then reset/prime mocks in `beforeEach` so Browser/Matrix-style hotspot tests do not pay the module graph cost per case.
-- Test performance guardrail: inside an extension package, prefer a thin local seam (`./api.ts`, `./runtime-api.ts`, or a narrower local `*.runtime-api.ts`) over direct `openclaw/plugin-sdk/*` imports for internal production code. Keep local seams curated and lightweight; only reach for direct `plugin-sdk/*` imports when you are crossing a real package boundary or when no suitable local seam exists yet.
+- Test performance guardrail: inside an extension package, prefer a thin local seam (`./api.ts`, `./runtime-api.ts`, or a narrower local `*.runtime-api.ts`) over direct `openclaw/plugin-sdk/`* imports for internal production code. Keep local seams curated and lightweight; only reach for direct `plugin-sdk/*` imports when you are crossing a real package boundary or when no suitable local seam exists yet.
 - Test performance guardrail: keep expensive runtime fallback work such as snapshotting, migration, installs, or bootstrap behind dedicated `*.runtime.ts` boundaries so tests can mock the seam instead of accidentally invoking real work.
 - Test performance guardrail: for import-only/runtime-wrapper tests, keep the wrapper lazy. Do not eagerly load heavy verification/bootstrap/runtime modules at module top level if the exported function can import them on demand.
 - Test performance guardrail: prefer explicit mock factories over `importOriginal()` for broad modules. Reserve `importOriginal()` for narrow modules where partial-real behavior is genuinely needed.
@@ -234,7 +253,6 @@
 - Use `$openclaw-pr-maintainer` at `.agents/skills/openclaw-pr-maintainer/SKILL.md` for maintainer PR triage, review, close, search, and landing workflows.
 - This includes auto-close labels, bug-fix evidence gates, GitHub comment/search footguns, and maintainer PR decision flow.
 - For the repo's end-to-end maintainer PR workflow, use `$openclaw-pr-maintainer` at `.agents/skills/openclaw-pr-maintainer/SKILL.md`.
-
 - `/landpr` lives in the global Codex prompts (`~/.codex/prompts/landpr.md`); when landing or merging any PR, always follow that `/landpr` process.
 - Create commits with `scripts/committer "<msg>" <file...>`; avoid manual `git add`/`git commit` so staging stays scoped.
 - Follow concise, action-oriented commit messages (e.g., `CLI: add verbose flag to send`).
@@ -299,7 +317,7 @@
 - **Multi-agent safety:** do **not** create/apply/drop `git stash` entries unless explicitly requested (this includes `git pull --rebase --autostash`). Assume other agents may be working; keep unrelated WIP untouched and avoid cross-cutting state changes.
 - **Multi-agent safety:** when the user says "push", you may `git pull --rebase` to integrate latest changes (never discard other agents' work). When the user says "commit", scope to your changes only. When the user says "commit all", commit everything in grouped chunks.
 - **Multi-agent safety:** prefer grouped `commit` / `pull --rebase` / `push` cycles for related work instead of many tiny syncs.
-- **Multi-agent safety:** do **not** create/remove/modify `git worktree` checkouts (or edit `.worktrees/*`) unless explicitly requested.
+- **Multi-agent safety:** do **not** create/remove/modify `git worktree` checkouts (or edit `.worktrees/`*) unless explicitly requested.
 - **Multi-agent safety:** do **not** switch branches / check out a different branch unless explicitly requested.
 - **Multi-agent safety:** running multiple agents is OK as long as each agent has its own session.
 - **Multi-agent safety:** when you see unrecognized files, keep going; focus on your changes and commit only those.

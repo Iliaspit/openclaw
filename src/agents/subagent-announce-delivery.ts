@@ -542,6 +542,7 @@ export async function deliverSubagentAnnouncement(params: {
 }): Promise<SubagentAnnounceDeliveryResult> {
   return await runSubagentAnnounceDispatch({
     expectsCompletionMessage: params.expectsCompletionMessage,
+    preferQueueFirst: params.requesterIsSubagent,
     signal: params.signal,
     queue: async () =>
       await maybeQueueSubagentAnnounce({

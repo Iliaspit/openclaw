@@ -32,6 +32,7 @@ const mockState = vi.hoisted(() => ({
   lastDispatchCtx: undefined as MsgContext | undefined,
   lastDispatchImages: undefined as Array<{ mimeType: string; data: string }> | undefined,
   lastDispatchImageOrder: undefined as string[] | undefined,
+  lastDispatchHasReasoningStream: false,
   modelCatalog: null as ModelCatalogEntry[] | null,
   emittedTranscriptUpdates: [] as Array<{
     sessionFile: string;
@@ -107,6 +108,7 @@ vi.mock("../../auto-reply/dispatch.js", () => ({
       };
       replyOptions?: {
         onAgentRunStart?: (runId: string) => void;
+        onReasoningStream?: (payload: { text?: string }) => void;
         images?: Array<{ mimeType: string; data: string }>;
         imageOrder?: string[];
       };
@@ -114,6 +116,8 @@ vi.mock("../../auto-reply/dispatch.js", () => ({
       mockState.lastDispatchCtx = params.ctx;
       mockState.lastDispatchImages = params.replyOptions?.images;
       mockState.lastDispatchImageOrder = params.replyOptions?.imageOrder;
+      mockState.lastDispatchHasReasoningStream =
+        typeof params.replyOptions?.onReasoningStream === "function";
       if (mockState.dispatchError) {
         throw mockState.dispatchError;
       }
@@ -409,6 +413,7 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     mockState.lastDispatchCtx = undefined;
     mockState.lastDispatchImages = undefined;
     mockState.lastDispatchImageOrder = undefined;
+    mockState.lastDispatchHasReasoningStream = false;
     mockState.modelCatalog = null;
     mockState.emittedTranscriptUpdates = [];
     mockState.savedMediaResults = [];
@@ -486,6 +491,13 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     const transcriptDir = path.dirname(mockState.transcriptPath);
     const audioPath = path.join(transcriptDir, "reply.mp3");
     fs.writeFileSync(audioPath, Buffer.from([0xff, 0xfb, 0x90, 0x00]));
+    mockState.config = {
+      agents: {
+        defaults: {
+          workspace: transcriptDir,
+        },
+      },
+    };
     mockState.triggerAgentRunStart = true;
     mockState.dispatchedReplies = [
       {
@@ -506,32 +518,34 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
       expectBroadcast: false,
     });
 
-    const assistantUpdate = mockState.emittedTranscriptUpdates.find(
-      (update) =>
-        typeof update.message === "object" &&
-        update.message !== null &&
-        (update.message as { role?: unknown }).role === "assistant" &&
-        Array.isArray((update.message as { content?: unknown }).content) &&
-        ((update.message as { content: Array<{ type?: string }> }).content.some(
-          (block) => block?.type === "audio",
-        ) ??
-          false),
-    );
-    expect(assistantUpdate).toMatchObject({
-      message: {
-        role: "assistant",
-        idempotencyKey: "idem-agent-audio:assistant-audio",
-        content: [
-          { type: "text", text: "Audio reply" },
-          {
-            type: "audio",
-            source: {
-              type: "base64",
-              media_type: "audio/mpeg",
+    await waitForAssertion(() => {
+      const assistantUpdate = mockState.emittedTranscriptUpdates.find(
+        (update) =>
+          typeof update.message === "object" &&
+          update.message !== null &&
+          (update.message as { role?: unknown }).role === "assistant" &&
+          Array.isArray((update.message as { content?: unknown }).content) &&
+          ((update.message as { content: Array<{ type?: string }> }).content.some(
+            (block) => block?.type === "audio",
+          ) ??
+            false),
+      );
+      expect(assistantUpdate).toMatchObject({
+        message: {
+          role: "assistant",
+          idempotencyKey: "idem-agent-audio:assistant-audio",
+          content: [
+            { type: "text", text: "Audio reply" },
+            {
+              type: "audio",
+              source: {
+                type: "base64",
+                media_type: "audio/mpeg",
+              },
             },
-          },
-        ],
-      },
+          ],
+        },
+      });
     });
   });
 
@@ -1247,6 +1261,24 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
         AccountId: undefined,
       }),
     );
+  });
+
+  it("chat.send enables reasoning streaming for internal webchat runs", async () => {
+    createTranscriptFixture("openclaw-chat-send-reasoning-stream-");
+    mockState.finalText = "ok";
+
+    const respond = vi.fn();
+    const context = createChatContext();
+
+    await runNonStreamingChatSend({
+      context,
+      respond,
+      idempotencyKey: "idem-reasoning-stream",
+      message: "show your work",
+      expectBroadcast: false,
+    });
+
+    expect(mockState.lastDispatchHasReasoningStream).toBe(true);
   });
 
   it("chat.send does not inherit external routes for webchat clients on channel-scoped sessions", async () => {

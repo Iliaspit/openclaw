@@ -1,10 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { listAgentIds, resolveAgentWorkspaceDir } from "../../agents/agent-scope.js";
+import { guardChildRouteForDelivery } from "../../agents/child-route-guard.js";
+import {
+  resolveChildRouteTarget,
+  type ChildRouteHealthContext,
+} from "../../agents/child-route-health.js";
+import { resolveChildRouteProviderContextFromSession } from "../../agents/child-route-provider-context.js";
 import type { AgentInternalEvent } from "../../agents/internal-events.js";
 import {
   normalizeSpawnedRunMetadata,
   resolveIngressWorkspaceOverrideForSpawnedRun,
 } from "../../agents/spawned-context.js";
+import { getLatestSubagentRunByChildSessionKey } from "../../agents/subagent-registry-read.js";
 import { buildBareSessionResetPrompt } from "../../auto-reply/reply/session-reset-prompt.js";
 import {
   buildSessionStartupContextPrelude,
@@ -85,6 +92,16 @@ import { normalizeRpcAttachmentsToChatAttachments } from "./attachment-normalize
 import type { GatewayRequestHandlerOptions, GatewayRequestHandlers } from "./types.js";
 
 const RESET_COMMAND_RE = /^\/(new|reset)(?:\s+([\s\S]*))?$/i;
+
+function resolveAgentRouteIntent(params: {
+  resetCommandMatch: RegExpMatchArray | null;
+  isTracked: boolean;
+}): ChildRouteHealthContext["routeIntent"] {
+  if (params.resetCommandMatch) {
+    return "repair_control";
+  }
+  return params.isTracked ? "followup_reuse" : "initial_spawn";
+}
 
 function resolveSenderIsOwnerFromClient(client: GatewayRequestHandlerOptions["client"]): boolean {
   const scopes = Array.isArray(client?.connect?.scopes) ? client.connect.scopes : [];
@@ -362,10 +379,97 @@ export const agentHandlers: GatewayRequestHandlers = {
       });
       return;
     }
-    const normalizedAttachments = normalizeRpcAttachmentsToChatAttachments(request.attachments);
     const requestedBestEffortDeliver =
       typeof request.bestEffortDeliver === "boolean" ? request.bestEffortDeliver : undefined;
+    const earlyRequestedSessionKeyRaw = normalizeOptionalString(request.sessionKey);
+    if (
+      earlyRequestedSessionKeyRaw &&
+      classifySessionKeyShape(earlyRequestedSessionKeyRaw) === "malformed_agent"
+    ) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid agent params: malformed session key "${earlyRequestedSessionKeyRaw}"`,
+        ),
+      );
+      return;
+    }
+    if (earlyRequestedSessionKeyRaw) {
+      const earlyEntry = loadSessionEntry(earlyRequestedSessionKeyRaw);
+      const directRegistryRecord = getLatestSubagentRunByChildSessionKey(earlyEntry.canonicalKey);
+      const routeTarget = resolveChildRouteTarget({
+        sessionKey: earlyEntry.canonicalKey,
+        entry: earlyEntry.entry,
+        registryRecord: directRegistryRecord,
+      });
+      if (routeTarget) {
+        const registryRecord =
+          directRegistryRecord ??
+          getLatestSubagentRunByChildSessionKey(routeTarget.healthSessionKey);
+        const messageText = (request.message ?? "").trim();
+        const resetCommand = messageText.match(RESET_COMMAND_RE);
+        const requesterSessionKey =
+          normalizeOptionalString(earlyEntry.entry?.spawnedBy) ??
+          normalizeOptionalString(earlyEntry.entry?.parentSessionKey) ??
+          normalizeOptionalString(inputProvenance?.sourceSessionKey);
+        const routeIntent = resolveAgentRouteIntent({
+          resetCommandMatch: resetCommand,
+          isTracked: Boolean(registryRecord ?? routeTarget.lineageSessionKey),
+        });
+        const routeContext: ChildRouteHealthContext = {
+          routeIntent,
+          targetMethod: "agent",
+          idempotencyKey: idem,
+          requesterSessionKey,
+          childTargetKind: routeTarget.childTargetKind,
+          registryRecord,
+          provider: resolveChildRouteProviderContextFromSession({
+            cfg,
+            sessionKey: earlyEntry.canonicalKey,
+            entry: earlyEntry.entry,
+            requesterSessionKey,
+          }),
+          sessionLineage: {
+            spawnedBy: earlyEntry.entry?.spawnedBy,
+            parentSessionKey: earlyEntry.entry?.parentSessionKey,
+            forkedFromParent: earlyEntry.entry?.forkedFromParent,
+          },
+          ...(routeIntent === "initial_spawn"
+            ? {
+                pendingSpawn: {
+                  requesterSessionKey,
+                  idempotencyKey: idem,
+                },
+              }
+            : {}),
+        };
+        const routeGuard = await guardChildRouteForDelivery({
+          childSessionKey: routeTarget.healthSessionKey,
+          context: routeContext,
+          payloadForHash: {
+            method: "agent",
+            message: messageText,
+            hasAttachments: Array.isArray(request.attachments) && request.attachments.length > 0,
+          },
+          consumePendingSpawn: routeContext.routeIntent === "initial_spawn",
+        });
+        if (!routeGuard.ok) {
+          respond(
+            false,
+            undefined,
+            errorShape(ErrorCodes.UNAVAILABLE, routeGuard.message, {
+              retryable: routeGuard.retryable,
+              details: routeGuard.details,
+            }),
+          );
+          return;
+        }
+      }
+    }
 
+    const normalizedAttachments = normalizeRpcAttachmentsToChatAttachments(request.attachments);
     let message = (request.message ?? "").trim();
     let images: Array<{ type: "image"; data: string; mimeType: string }> = [];
     let imageOrder: PromptImageOrderEntry[] = [];
@@ -533,6 +637,63 @@ export const agentHandlers: GatewayRequestHandlers = {
         message = buildBareSessionResetPrompt(cfg);
         skipTimestampInjection = true;
         shouldPrependStartupContext = shouldApplyStartupContext({ cfg, action: resetReason });
+      }
+
+      const postResetEntry = loadSessionEntry(requestedSessionKey);
+      const directRegistryRecord = getLatestSubagentRunByChildSessionKey(
+        postResetEntry.canonicalKey,
+      );
+      const routeTarget = resolveChildRouteTarget({
+        sessionKey: postResetEntry.canonicalKey,
+        entry: postResetEntry.entry,
+        registryRecord: directRegistryRecord,
+      });
+      if (routeTarget) {
+        const registryRecord =
+          directRegistryRecord ??
+          getLatestSubagentRunByChildSessionKey(routeTarget.healthSessionKey);
+        const requesterSessionKey =
+          normalizeOptionalString(postResetEntry.entry?.spawnedBy) ??
+          normalizeOptionalString(postResetEntry.entry?.parentSessionKey) ??
+          normalizeOptionalString(inputProvenance?.sourceSessionKey);
+        const routeGuard = await guardChildRouteForDelivery({
+          childSessionKey: routeTarget.healthSessionKey,
+          context: {
+            routeIntent: "followup_reuse",
+            targetMethod: "agent:post_reset",
+            idempotencyKey: idem,
+            requesterSessionKey,
+            childTargetKind: routeTarget.childTargetKind,
+            registryRecord,
+            provider: resolveChildRouteProviderContextFromSession({
+              cfg,
+              sessionKey: postResetEntry.canonicalKey,
+              entry: postResetEntry.entry,
+              requesterSessionKey,
+            }),
+            sessionLineage: {
+              spawnedBy: postResetEntry.entry?.spawnedBy,
+              parentSessionKey: postResetEntry.entry?.parentSessionKey,
+              forkedFromParent: postResetEntry.entry?.forkedFromParent,
+            },
+          },
+          payloadForHash: {
+            method: "agent:post_reset",
+            message,
+            hasAttachments: Array.isArray(request.attachments) && request.attachments.length > 0,
+          },
+        });
+        if (!routeGuard.ok) {
+          respond(
+            false,
+            undefined,
+            errorShape(ErrorCodes.UNAVAILABLE, routeGuard.message, {
+              retryable: routeGuard.retryable,
+              details: routeGuard.details,
+            }),
+          );
+          return;
+        }
       }
     }
 

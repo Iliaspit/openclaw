@@ -153,6 +153,12 @@ import {
 } from "./plugin-approvals.js";
 import { PushTestParamsSchema, PushTestResultSchema } from "./push.js";
 import {
+  QueueHealthParamsSchema,
+  QueueHealthResultSchema,
+  QueueLaneSnapshotSchema,
+  QueueRuntimeIssueSchema,
+} from "./queue.js";
+import {
   SecretsReloadParamsSchema,
   SecretsResolveAssignmentSchema,
   SecretsResolveParamsSchema,
@@ -233,6 +239,10 @@ export const ProtocolSchemas = {
   NodeInvokeRequestEvent: NodeInvokeRequestEventSchema,
   PushTestParams: PushTestParamsSchema,
   PushTestResult: PushTestResultSchema,
+  QueueHealthParams: QueueHealthParamsSchema,
+  QueueRuntimeIssue: QueueRuntimeIssueSchema,
+  QueueLaneSnapshot: QueueLaneSnapshotSchema,
+  QueueHealthResult: QueueHealthResultSchema,
   SecretsReloadParams: SecretsReloadParamsSchema,
   SecretsResolveParams: SecretsResolveParamsSchema,
   SecretsResolveAssignment: SecretsResolveAssignmentSchema,

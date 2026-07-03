@@ -628,17 +628,17 @@ OpenClaw with browser support.
 
 #### Docker Playwright install
 
-If your Gateway runs in Docker, avoid `npx playwright` (npm override conflicts).
-Use the bundled CLI instead:
+If your Gateway runs in Docker, avoid `npx playwright` in the running container
+(npm override conflicts and missing root privileges can leave Linux libraries
+behind). Bake browser support into the local image instead:
 
 ```bash
-docker compose run --rm openclaw-cli \
-  node /app/node_modules/playwright-core/cli.js install chromium
+docker build --build-arg OPENCLAW_INSTALL_BROWSER=1 -t openclaw:local -f Dockerfile .
 ```
 
-To persist browser downloads, set `PLAYWRIGHT_BROWSERS_PATH` (for example,
-`/home/node/.cache/ms-playwright`) and make sure `/home/node` is persisted via
-`OPENCLAW_HOME_VOLUME` or a bind mount. See [Docker](/install/docker).
+The Dockerfile uses the bundled `playwright-core` CLI with
+`install --with-deps chromium`, so Chromium and its Linux shared-library deps are
+installed together. See [Docker](/install/docker).
 
 ## How it works (internal)
 

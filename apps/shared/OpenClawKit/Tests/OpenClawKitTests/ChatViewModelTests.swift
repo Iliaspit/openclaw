@@ -186,6 +186,26 @@ private func emitToolStart(
                 ])))
 }
 
+private func emitAgentEvent(
+    transport: TestChatTransport,
+    runId: String,
+    sessionKey: String,
+    seq: Int,
+    stream: String,
+    data: [String: AnyCodable],
+    ts: Int? = nil)
+{
+    transport.emit(
+        .agent(
+            OpenClawAgentEventPayload(
+                runId: runId,
+                seq: seq,
+                stream: stream,
+                ts: ts ?? Int(Date().timeIntervalSince1970 * 1000),
+                data: data,
+                sessionKey: sessionKey)))
+}
+
 private func emitExternalFinal(
     transport: TestChatTransport,
     runId: String = "other-run",
@@ -729,6 +749,152 @@ extension TestChatTransportState {
 
         try await waitUntil("streaming cleared") { await MainActor.run { vm.streamingAssistantText == nil } }
         #expect(await MainActor.run { vm.pendingToolCalls.isEmpty })
+    }
+
+    @Test func thinkingAndChecklistEventsPopulateRunActivity() async throws {
+        let sessionId = "sess-main"
+        let history = historyPayload(sessionId: sessionId)
+        let (transport, vm) = await makeViewModel(historyResponses: [history])
+        try await loadAndWaitBootstrap(vm: vm, sessionId: sessionId)
+
+        emitAgentEvent(
+            transport: transport,
+            runId: "run-activity",
+            sessionKey: "main",
+            seq: 1,
+            stream: "thinking",
+            data: [
+                "text": AnyCodable("Inspect files\nPlan the change\nApply the patch\nVerify the result"),
+                "delta": AnyCodable("Verify the result"),
+            ])
+
+        try await waitUntil("thinking block appears") {
+            await MainActor.run { vm.isThinkingActive && !vm.thinkingBlocks.isEmpty }
+        }
+        #expect(await MainActor.run { vm.thinkingBlocks.first?.summary } == "Inspect files Plan the change Apply the patch Verify the result")
+
+        emitAgentEvent(
+            transport: transport,
+            runId: "run-activity",
+            sessionKey: "main",
+            seq: 2,
+            stream: "item",
+            data: [
+                "itemId": AnyCodable("item-1"),
+                "phase": AnyCodable("start"),
+                "kind": AnyCodable("analysis"),
+                "title": AnyCodable("Inspect source files"),
+                "status": AnyCodable("running"),
+                "progressText": AnyCodable("Reading the active chat surfaces"),
+            ])
+
+        try await waitUntil("checklist entry appears") {
+            await MainActor.run { vm.checklistEntries.first?.title == "Inspect source files" }
+        }
+        #expect(await MainActor.run { vm.checklistEntries.first?.state } == .running)
+
+        emitAgentEvent(
+            transport: transport,
+            runId: "run-activity",
+            sessionKey: "main",
+            seq: 3,
+            stream: "lifecycle",
+            data: [
+                "phase": AnyCodable("end"),
+                "livenessState": AnyCodable("working"),
+            ])
+
+        try await waitUntil("activity finalizes") {
+            await MainActor.run {
+                vm.isThinkingActive == false &&
+                    vm.checklistEntries.first?.state == .completed &&
+                    vm.thinkingBlocks.first?.isStreaming == false
+            }
+        }
+    }
+
+    @Test func subagentEventsPopulateSidebarAgents() async throws {
+        let now = Date().timeIntervalSince1970 * 1000
+        let history = historyPayload(sessionId: "sess-main")
+        let sessions = OpenClawChatSessionsListResponse(
+            ts: now,
+            path: nil,
+            count: 2,
+            defaults: nil,
+            sessions: [
+                OpenClawChatSessionEntry(
+                    key: "main",
+                    kind: nil,
+                    displayName: "Main",
+                    surface: nil,
+                    subject: nil,
+                    room: nil,
+                    space: nil,
+                    updatedAt: now,
+                    sessionId: nil,
+                    systemSent: nil,
+                    abortedLastRun: nil,
+                    thinkingLevel: nil,
+                    verboseLevel: nil,
+                    inputTokens: nil,
+                    outputTokens: nil,
+                    totalTokens: nil,
+                    modelProvider: nil,
+                    model: nil,
+                    contextTokens: nil,
+                    parentSessionKey: nil,
+                    childSessions: ["worker-1"],
+                    subagentRole: nil,
+                    label: nil,
+                    status: "running"),
+                OpenClawChatSessionEntry(
+                    key: "worker-1",
+                    kind: nil,
+                    displayName: "Implementor",
+                    surface: nil,
+                    subject: nil,
+                    room: nil,
+                    space: nil,
+                    updatedAt: now - 1,
+                    sessionId: nil,
+                    systemSent: nil,
+                    abortedLastRun: nil,
+                    thinkingLevel: nil,
+                    verboseLevel: nil,
+                    inputTokens: nil,
+                    outputTokens: nil,
+                    totalTokens: nil,
+                    modelProvider: nil,
+                    model: nil,
+                    contextTokens: nil,
+                    parentSessionKey: "main",
+                    childSessions: nil,
+                    subagentRole: "implementor",
+                    label: "Implementor",
+                    status: "running"),
+            ])
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [history],
+            sessionsResponses: [sessions])
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-main")
+
+        emitAgentEvent(
+            transport: transport,
+            runId: "subagent-run",
+            sessionKey: "worker-1",
+            seq: 1,
+            stream: "thinking",
+            data: [
+                "text": AnyCodable("Updating the workspace and wiring the controls"),
+                "delta": AnyCodable("wiring the controls"),
+            ])
+
+        try await waitUntil("sidebar subagent appears") {
+            await MainActor.run {
+                vm.activeSubagents.contains(where: { $0.sessionKey == "worker-1" && $0.isRunning })
+            }
+        }
+        #expect(await MainActor.run { vm.activeSubagents.first(where: { $0.sessionKey == "worker-1" })?.title } == "Implementor")
     }
 
     @Test func seqGapClearsPendingRunsAndAutoRefreshesHistory() async throws {

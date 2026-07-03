@@ -1,6 +1,19 @@
 import crypto from "node:crypto";
 import { promises as fs } from "node:fs";
+import {
+  normalizeElevatedLevel,
+  normalizeReasoningLevel,
+  normalizeThinkLevel,
+  normalizeTraceLevel,
+  normalizeUsageDisplay,
+  normalizeVerboseLevel,
+} from "../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import {
+  normalizeExecAsk,
+  normalizeExecSecurity,
+  normalizeExecTarget,
+} from "../infra/exec-approvals.js";
 import type { SubagentLifecycleHookRunner } from "../plugins/hooks.js";
 import { isValidAgentId, normalizeAgentId, parseAgentSessionKey } from "../routing/session-key.js";
 import {
@@ -8,6 +21,12 @@ import {
   normalizeOptionalString,
 } from "../shared/string-coerce.js";
 import type { BootstrapContextMode } from "./bootstrap-files.js";
+import {
+  markChildRoutePendingSpawnFailed,
+  registerChildRoutePendingSpawn,
+} from "./child-route-health.js";
+import { resolveChildRouteProviderContextForSpawn } from "./child-route-provider-context.js";
+import { guardFreshChildSpawnAuth } from "./child-route-spawn-preflight.js";
 import {
   mapToolContextToSpawnedRunMetadata,
   normalizeSpawnedRunMetadata,
@@ -71,6 +90,54 @@ type SubagentSpawnDeps = {
   updateSessionStore: typeof updateSessionStore;
 };
 
+type SubagentSessionRuntimeReplay = Partial<{
+  thinkingLevel: string;
+  fastMode: boolean;
+  verboseLevel: string;
+  traceLevel: string;
+  reasoningLevel: string;
+  elevatedLevel: string;
+  ttsAuto: string;
+  execHost: string;
+  execSecurity: string;
+  execAsk: string;
+  execNode: string;
+  responseUsage: "on" | "off" | "tokens" | "full";
+  authProfileOverride: string;
+  authProfileOverrideSource: "auto" | "user";
+}>;
+
+function buildPatchableSessionRuntime(
+  sessionRuntime?: SubagentSessionRuntimeReplay,
+): Record<string, unknown> {
+  if (!sessionRuntime) {
+    return {};
+  }
+  const thinkingLevel = normalizeThinkLevel(sessionRuntime.thinkingLevel);
+  const verboseLevel = normalizeVerboseLevel(sessionRuntime.verboseLevel);
+  const traceLevel = normalizeTraceLevel(sessionRuntime.traceLevel);
+  const reasoningLevel = normalizeReasoningLevel(sessionRuntime.reasoningLevel);
+  const elevatedLevel = normalizeElevatedLevel(sessionRuntime.elevatedLevel);
+  const execHost = normalizeExecTarget(sessionRuntime.execHost) ?? undefined;
+  const execSecurity = normalizeExecSecurity(sessionRuntime.execSecurity) ?? undefined;
+  const execAsk = normalizeExecAsk(sessionRuntime.execAsk) ?? undefined;
+  const execNode = normalizeOptionalString(sessionRuntime.execNode);
+  const responseUsage = normalizeUsageDisplay(sessionRuntime.responseUsage);
+  return {
+    ...(thinkingLevel ? { thinkingLevel } : {}),
+    ...(typeof sessionRuntime.fastMode === "boolean" ? { fastMode: sessionRuntime.fastMode } : {}),
+    ...(verboseLevel ? { verboseLevel } : {}),
+    ...(traceLevel ? { traceLevel } : {}),
+    ...(reasoningLevel ? { reasoningLevel } : {}),
+    ...(elevatedLevel ? { elevatedLevel } : {}),
+    ...(execHost ? { execHost } : {}),
+    ...(execSecurity ? { execSecurity } : {}),
+    ...(execAsk ? { execAsk } : {}),
+    ...(execNode ? { execNode } : {}),
+    ...(responseUsage ? { responseUsage } : {}),
+  };
+}
+
 const defaultSubagentSpawnDeps: SubagentSpawnDeps = {
   callGateway,
   getGlobalHookRunner,
@@ -93,6 +160,7 @@ export type SpawnSubagentParams = {
   sandbox?: SpawnSubagentSandboxMode;
   lightContext?: boolean;
   expectsCompletionMessage?: boolean;
+  sessionRuntime?: SubagentSessionRuntimeReplay;
   attachments?: Array<{
     name: string;
     content: string;
@@ -177,9 +245,12 @@ async function persistInitialChildSessionRuntimeModel(params: {
   cfg: OpenClawConfig;
   childSessionKey: string;
   resolvedModel?: string;
+  sessionRuntime?: SubagentSessionRuntimeReplay;
 }): Promise<string | undefined> {
   const { provider, model } = splitModelRef(params.resolvedModel);
-  if (!model) {
+  const authProfileOverride = normalizeOptionalString(params.sessionRuntime?.authProfileOverride);
+  const authProfileOverrideSource = params.sessionRuntime?.authProfileOverrideSource;
+  if (!model && !authProfileOverride) {
     return undefined;
   }
   try {
@@ -194,8 +265,12 @@ async function persistInitialChildSessionRuntimeModel(params: {
         candidates: target.storeKeys,
       });
       store[target.canonicalKey] = mergeSessionEntry(store[target.canonicalKey], {
-        model,
+        ...(model ? { model } : {}),
         ...(provider ? { modelProvider: provider } : {}),
+        ...(authProfileOverride ? { authProfileOverride } : {}),
+        ...(authProfileOverride && authProfileOverrideSource
+          ? { authProfileOverrideSource }
+          : {}),
       });
     });
     return undefined;
@@ -513,6 +588,27 @@ export async function spawnSubagentDirect(
     };
   }
   const { resolvedModel, thinkingOverride } = plan;
+  const spawnProviderContext = resolveChildRouteProviderContextForSpawn({
+    cfg,
+    sessionKey: childSessionKey,
+    requesterSessionKey: requesterInternalKey,
+    modelRef: resolvedModel,
+  });
+  const authProfileOverride = normalizeOptionalString(params.sessionRuntime?.authProfileOverride);
+  if (authProfileOverride) {
+    spawnProviderContext.authProfileKey = authProfileOverride;
+  }
+  const spawnAuthPreflight = await guardFreshChildSpawnAuth(spawnProviderContext, {
+    childSessionKey,
+    includeProviderDefaultCredentialBlockers: true,
+  });
+  if (!spawnAuthPreflight.ok) {
+    return {
+      status: "error",
+      error: spawnAuthPreflight.error,
+      childSessionKey,
+    };
+  }
   const patchChildSession = async (patch: Record<string, unknown>): Promise<string | undefined> => {
     try {
       await callSubagentGateway({
@@ -526,6 +622,31 @@ export async function spawnSubagentDirect(
     }
   };
 
+  const childIdem = crypto.randomUUID();
+  const pendingSpawn = await registerChildRoutePendingSpawn({
+    childSessionKey,
+    requesterSessionKey: requesterInternalKey,
+    childTargetKind: "subagent",
+    idempotencyKey: childIdem,
+    runId: childIdem,
+    targetAgentId,
+  });
+  if (!pendingSpawn.ok) {
+    return {
+      status: "error",
+      error: `failed to persist child route pending-spawn state: ${pendingSpawn.error}`,
+      childSessionKey,
+    };
+  }
+  const markPendingSpawnFailed = async () => {
+    await markChildRoutePendingSpawnFailed({
+      childSessionKey,
+      requesterSessionKey: requesterInternalKey,
+      idempotencyKey: childIdem,
+      pendingSpawnId: pendingSpawn.pendingSpawnId,
+    });
+  };
+
   const initialChildSessionPatch: Record<string, unknown> = {
     spawnDepth: childDepth,
     subagentRole: childCapabilities.role === "main" ? null : childCapabilities.role,
@@ -535,19 +656,27 @@ export async function spawnSubagentDirect(
 
   const initialPatchError = await patchChildSession(initialChildSessionPatch);
   if (initialPatchError) {
+    await markPendingSpawnFailed();
+    await cleanupFailedSpawnBeforeAgentStart({
+      childSessionKey,
+      emitLifecycleHooks: false,
+      deleteTranscript: true,
+    });
     return {
       status: "error",
       error: initialPatchError,
       childSessionKey,
     };
   }
-  if (resolvedModel) {
+  if (resolvedModel || authProfileOverride) {
     const runtimeModelPersistError = await persistInitialChildSessionRuntimeModel({
       cfg,
       childSessionKey,
       resolvedModel,
+      sessionRuntime: params.sessionRuntime,
     });
     if (runtimeModelPersistError) {
+      await markPendingSpawnFailed();
       try {
         await callSubagentGateway({
           method: "sessions.delete",
@@ -581,6 +710,7 @@ export async function spawnSubagentDirect(
       },
     });
     if (bindResult.status === "error") {
+      await markPendingSpawnFailed();
       try {
         await callSubagentGateway({
           method: "sessions.delete",
@@ -629,6 +759,7 @@ export async function spawnSubagentDirect(
     mountPathHint,
   });
   if (materializedAttachments && materializedAttachments.status !== "ok") {
+    await markPendingSpawnFailed();
     await cleanupProvisionalSession(childSessionKey, {
       emitLifecycleHooks: threadBindingReady,
       deleteTranscript: true,
@@ -672,17 +803,19 @@ export async function spawnSubagentDirect(
     workspaceDir: resolveSpawnedWorkspaceInheritance({
       config: cfg,
       targetAgentId,
-      // For cross-agent spawns, ignore the caller's inherited workspace;
-      // let targetAgentId resolve the correct workspace instead.
+      requesterSessionKey: requesterInternalKey,
       explicitWorkspaceDir:
-        targetAgentId !== requesterAgentId ? undefined : toolSpawnMetadata.workspaceDir,
+        targetAgentId === requesterAgentId ? toolSpawnMetadata.workspaceDir : undefined,
     }),
   });
+  const patchableSessionRuntime = buildPatchableSessionRuntime(params.sessionRuntime);
   const spawnLineagePatchError = await patchChildSession({
     spawnedBy: spawnedByKey,
+    ...patchableSessionRuntime,
     ...(spawnedMetadata.workspaceDir ? { spawnedWorkspaceDir: spawnedMetadata.workspaceDir } : {}),
   });
   if (spawnLineagePatchError) {
+    await markPendingSpawnFailed();
     await cleanupFailedSpawnBeforeAgentStart({
       childSessionKey,
       attachmentAbsDir,
@@ -696,7 +829,6 @@ export async function spawnSubagentDirect(
     };
   }
 
-  const childIdem = crypto.randomUUID();
   let childRunId: string = childIdem;
   try {
     const {
@@ -735,6 +867,7 @@ export async function spawnSubagentDirect(
       childRunId = runId;
     }
   } catch (err) {
+    await markPendingSpawnFailed();
     if (attachmentAbsDir) {
       try {
         await fs.rm(attachmentAbsDir, { recursive: true, force: true });
@@ -817,6 +950,7 @@ export async function spawnSubagentDirect(
       retainAttachmentsOnKeep: retainOnSessionKeep,
     });
   } catch (err) {
+    await markPendingSpawnFailed();
     if (attachmentAbsDir) {
       try {
         await fs.rm(attachmentAbsDir, { recursive: true, force: true });

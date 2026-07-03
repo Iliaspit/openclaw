@@ -1,4 +1,5 @@
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
+import { isSubagentRunNewer } from "./subagent-registry-ordering.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
 function resolveControllerSessionKey(entry: SubagentRunRecord): string {
@@ -82,7 +83,7 @@ function findLatestRunForChildSession(
     if (entry.childSessionKey !== key) {
       continue;
     }
-    if (!latest || entry.createdAt > latest.createdAt) {
+    if (!latest || isSubagentRunNewer(entry, latest)) {
       latest = entry;
     }
   }
@@ -111,6 +112,9 @@ export function shouldIgnorePostCompletionAnnounceForSessionFromRuns(
   childSessionKey: string,
 ): boolean {
   const latest = findLatestRunForChildSession(runs, childSessionKey);
+  if (shouldSuppressPostCompletionAnnounce(latest)) {
+    return true;
+  }
   return Boolean(
     latest &&
     latest.spawnMode !== "session" &&
@@ -118,6 +122,25 @@ export function shouldIgnorePostCompletionAnnounceForSessionFromRuns(
     typeof latest.cleanupCompletedAt === "number" &&
     latest.cleanupCompletedAt >= latest.endedAt,
   );
+}
+
+function shouldSuppressPostCompletionAnnounce(entry: SubagentRunRecord | undefined): boolean {
+  return (
+    entry?.suppressAnnounceReason === "fresh-reroute" ||
+    entry?.suppressAnnounceReason === "steer-restart" ||
+    entry?.suppressAnnounceReason === "killed"
+  );
+}
+
+export function shouldIgnorePostCompletionAnnounceForRunFromRuns(
+  runs: Map<string, SubagentRunRecord>,
+  runId: string,
+): boolean {
+  const key = runId.trim();
+  if (!key) {
+    return false;
+  }
+  return shouldSuppressPostCompletionAnnounce(runs.get(key));
 }
 
 export function countActiveRunsForSessionFromRuns(
@@ -145,7 +168,7 @@ export function countActiveRunsForSessionFromRuns(
       continue;
     }
     const existing = latestByChildSessionKey.get(entry.childSessionKey);
-    if (!existing || entry.createdAt > existing.createdAt) {
+    if (!existing || isSubagentRunNewer(entry, existing)) {
       latestByChildSessionKey.set(entry.childSessionKey, entry);
     }
   }
@@ -186,7 +209,7 @@ function forEachDescendantRun(
       }
       const childKey = entry.childSessionKey.trim();
       const existing = latestByChildSessionKey.get(childKey);
-      if (!existing || entry.createdAt > existing[1].createdAt) {
+      if (!existing || isSubagentRunNewer(entry, existing[1])) {
         latestByChildSessionKey.set(childKey, [runId, entry]);
       }
     }

@@ -87,6 +87,25 @@ describe("runSubagentAnnounceDispatch", () => {
     ]);
   });
 
+  it("can prefer queue-first ordering for completion mode", async () => {
+    const queue = vi.fn(async () => "steered" as const);
+    const direct = vi.fn(async () => ({ delivered: true, path: "direct" as const }));
+
+    const result = await runSubagentAnnounceDispatch({
+      expectsCompletionMessage: true,
+      preferQueueFirst: true,
+      queue,
+      direct,
+    });
+
+    expect(queue).toHaveBeenCalledTimes(1);
+    expect(direct).not.toHaveBeenCalled();
+    expect(result.path).toBe("steered");
+    expect(result.phases).toEqual([
+      { phase: "queue-primary", delivered: true, path: "steered", error: undefined },
+    ]);
+  });
+
   it("falls back to queue when completion direct send fails", async () => {
     const queue = vi.fn(async () => "steered" as const);
     const direct = vi.fn(async () => ({

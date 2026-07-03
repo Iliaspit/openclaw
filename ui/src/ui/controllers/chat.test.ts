@@ -621,6 +621,48 @@ describe("loadChatHistory", () => {
 
     expect(state.chatMessages).toEqual(messages);
   });
+
+  it("defers history fetch while a chat run is active", async () => {
+    const request = vi.fn();
+    const state = createState({
+      client: { request } as unknown as ChatState["client"],
+      connected: true,
+      chatRunId: "run-1",
+    });
+
+    await loadChatHistory(state);
+
+    expect(request).not.toHaveBeenCalled();
+    expect(state.pendingSessionMessageReloadSessionKey).toBe("main");
+    expect(state.chatLoading).toBe(false);
+  });
+
+  it("does not apply chat.history result if a run starts before the response arrives", async () => {
+    const deferred = createDeferred<{ messages?: unknown[]; thinkingLevel?: string }>();
+    const request = vi.fn().mockReturnValue(deferred.promise);
+    const state = createState({
+      client: { request } as unknown as ChatState["client"],
+      connected: true,
+      chatRunId: null,
+      chatMessages: [
+        { role: "user", content: [{ type: "text", text: "optimistic" }], timestamp: 1 },
+      ],
+    });
+
+    const load = loadChatHistory(state);
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    expect(state.chatLoading).toBe(true);
+
+    state.chatRunId = "run-2";
+    deferred.resolve({ messages: [{ role: "assistant", content: [{ type: "text", text: "only" }] }] });
+    await load;
+
+    expect(state.chatMessages).toEqual([
+      { role: "user", content: [{ type: "text", text: "optimistic" }], timestamp: 1 },
+    ]);
+    expect(state.pendingSessionMessageReloadSessionKey).toBe("main");
+    expect(state.chatLoading).toBe(false);
+  });
 });
 
 describe("sendChatMessage", () => {

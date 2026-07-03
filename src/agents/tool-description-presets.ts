@@ -14,7 +14,8 @@ export const UPDATE_PLAN_TOOL_DISPLAY_SUMMARY = "Track a short structured work p
 export function describeSessionsListTool(): string {
   return [
     "List visible sessions with optional filters for kind, recent activity, and last messages.",
-    "Use this to discover a target session before calling sessions_history or sessions_send.",
+    "Use this to discover a target session before calling sessions_history or sessions_send, or for debugging/intervention.",
+    "For sub-agent closeout after known child completions arrive, prefer tracked completion events and targeted sessions_history over broad session listings.",
   ].join(" ");
 }
 
@@ -30,6 +31,7 @@ export function describeSessionsSendTool(): string {
     "Send a message into another visible session by sessionKey or label.",
     "Use this for direct cross-session messaging; waits for the target run and returns the updated assistant reply when available.",
     "For spawned child-session orchestration with push-based completion, use `subagents(action=steer|kill|list)` or `sessions_spawn` instead of pairing `sessions_send` with `sessions_yield`.",
+    "Fire-and-forget delivery to stale/untracked subagent sessions is rejected because it cannot produce a tracked child completion event.",
   ].join(" ");
 }
 

@@ -1290,6 +1290,77 @@ describe("steerControlledSubagentRun", () => {
     });
   });
 
+  it("rejects steering a fresh-reroute-superseded old generation after it completes", async () => {
+    const childSessionKey = "agent:main:subagent:fresh-reroute-steer-worker";
+    addSubagentRunForTests({
+      runId: "run-fresh-reroute-old",
+      childSessionKey,
+      controllerSessionKey: "agent:main:main",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "fresh reroute steer task",
+      cleanup: "keep",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+      endedAt: Date.now() - 1_000,
+      outcome: { status: "ok" },
+      suppressAnnounceReason: "fresh-reroute",
+    });
+    addSubagentRunForTests({
+      runId: "run-fresh-reroute-new",
+      childSessionKey: "agent:main:subagent:fresh-reroute-steer-worker-fresh",
+      controllerSessionKey: "agent:main:main",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "fresh reroute steer task",
+      cleanup: "keep",
+      createdAt: Date.now() - 500,
+      startedAt: Date.now() - 500,
+    });
+
+    __testing.setDepsForTest({
+      callGateway: async () => {
+        throw new Error("gateway should not be called");
+      },
+    });
+
+    const result = await steerControlledSubagentRun({
+      cfg: {} as OpenClawConfig,
+      controller: {
+        controllerSessionKey: "agent:main:main",
+        callerSessionKey: "agent:main:main",
+        callerIsSubagent: false,
+        controlScope: "children",
+      },
+      entry: {
+        runId: "run-fresh-reroute-old",
+        childSessionKey,
+        requesterSessionKey: "agent:main:main",
+        requesterDisplayKey: "main",
+        controllerSessionKey: "agent:main:main",
+        task: "fresh reroute steer task",
+        cleanup: "keep",
+        createdAt: Date.now() - 5_000,
+        startedAt: Date.now() - 4_000,
+        endedAt: Date.now() - 1_000,
+        outcome: { status: "ok" },
+        suppressAnnounceReason: "fresh-reroute",
+      },
+      message: "updated direction",
+    });
+
+    expect(result).toEqual({
+      status: "error",
+      runId: "run-fresh-reroute-old",
+      sessionKey: childSessionKey,
+      error: "fresh reroute steer task was superseded by a fresh child generation.",
+    });
+    expect(getSubagentRunByChildSessionKey(childSessionKey)).toMatchObject({
+      runId: "run-fresh-reroute-old",
+      suppressAnnounceReason: "fresh-reroute",
+    });
+  });
+
   it("restarts a finished current run by remapping tracking to the new run", async () => {
     const childSessionKey = "agent:main:subagent:finished-steer-worker";
     let requestedTimeout: number | undefined;

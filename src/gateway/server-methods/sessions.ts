@@ -4,16 +4,34 @@ import path from "node:path";
 import { CURRENT_SESSION_VERSION, SessionManager } from "@mariozechner/pi-coding-agent";
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import {
+  guardChildRouteForDelivery,
+  type ChildRouteGuardResult,
+} from "../../agents/child-route-guard.js";
+import { type ChildRouteHealthCode } from "../../agents/child-route-health-contract.js";
+import {
+  assessChildRouteHealth,
+  recordChildRouteHealthEvent,
+  resolveChildRouteTarget,
+  type ChildRouteHealthContext,
+  type ChildRouteProviderContext,
+  type ChildRouteRegistryRecord,
+  type ChildRouteSessionLineage,
+  type ChildRouteTarget,
+} from "../../agents/child-route-health.js";
+import { resolveChildRouteProviderContextFromSession } from "../../agents/child-route-provider-context.js";
+import {
   abortEmbeddedPiRun,
   isEmbeddedPiRunActive,
   waitForEmbeddedPiRunEnd,
 } from "../../agents/pi-embedded-runner/runs.js";
 import { compactEmbeddedPiSession } from "../../agents/pi-embedded.js";
+import { getLatestSubagentRunByChildSessionKey } from "../../agents/subagent-registry-read.js";
 import { clearSessionQueues } from "../../auto-reply/reply/queue/cleanup.js";
 import { normalizeReasoningLevel, normalizeThinkLevel } from "../../auto-reply/thinking.js";
 import { loadConfig } from "../../config/config.js";
 import {
   loadSessionStore,
+  resolveAgentMainSessionKey,
   resolveMainSessionKey,
   resolveSessionFilePath,
   resolveSessionFilePathOptions,
@@ -116,6 +134,19 @@ function resolveGatewaySessionTargetFromKey(key: string) {
   return { cfg, target, storePath: target.storePath };
 }
 
+function isTopLevelAgentMainSessionKey(params: {
+  cfg: Parameters<typeof resolveAgentMainSessionKey>[0]["cfg"];
+  canonicalKey: string;
+}): boolean {
+  const parsed = parseAgentSessionKey(params.canonicalKey);
+  if (!parsed) {
+    return false;
+  }
+  return (
+    params.canonicalKey === resolveAgentMainSessionKey({ cfg: params.cfg, agentId: parsed.agentId })
+  );
+}
+
 function resolveOptionalInitialSessionMessage(params: {
   task?: unknown;
   message?: unknown;
@@ -125,6 +156,223 @@ function resolveOptionalInitialSessionMessage(params: {
   }
   if (typeof params.message === "string" && params.message.trim()) {
     return params.message;
+  }
+  return undefined;
+}
+
+type ResolvedSessionChildRoute = {
+  routeTarget: ChildRouteTarget;
+  registryRecord?: ChildRouteRegistryRecord | null;
+};
+
+type ChildRouteGuardFailure = Extract<ChildRouteGuardResult, { ok: false }>;
+
+function resolveSessionChildRoute(params: {
+  sessionKey: string;
+  entry?: ChildRouteSessionLineage | null;
+}): ResolvedSessionChildRoute | undefined {
+  const directRegistryRecord = getLatestSubagentRunByChildSessionKey(params.sessionKey);
+  const routeTarget = resolveChildRouteTarget({
+    sessionKey: params.sessionKey,
+    entry: params.entry,
+    registryRecord: directRegistryRecord,
+  });
+  if (!routeTarget) {
+    return undefined;
+  }
+  const registryRecord =
+    directRegistryRecord ?? getLatestSubagentRunByChildSessionKey(routeTarget.healthSessionKey);
+  return { routeTarget, registryRecord };
+}
+
+function trustedSessionLineageForDelivery(
+  entry: ChildRouteSessionLineage | null | undefined,
+  registryRecord: ChildRouteRegistryRecord | null | undefined,
+): ChildRouteHealthContext["sessionLineage"] {
+  if (!entry || !registryRecord) {
+    return undefined;
+  }
+  return {
+    spawnedBy: entry.spawnedBy,
+    parentSessionKey: entry.parentSessionKey,
+    forkedFromParent: entry.forkedFromParent,
+  };
+}
+
+function respondWithChildRouteGuardFailure(
+  respond: RespondFn,
+  routeGuard: ChildRouteGuardFailure,
+): void {
+  respond(
+    false,
+    undefined,
+    errorShape(ErrorCodes.UNAVAILABLE, routeGuard.message, {
+      retryable: routeGuard.retryable,
+      details: routeGuard.details,
+    }),
+  );
+}
+
+async function guardChildRouteSessionDelivery(params: {
+  sessionKey: string;
+  entry?: ChildRouteSessionLineage | null;
+  method: string;
+  routeIntent: ChildRouteHealthContext["routeIntent"];
+  idempotencyKey?: string;
+  requesterSessionKey?: string;
+  provider?: ChildRouteProviderContext;
+  payloadForHash?: unknown;
+  respond: RespondFn;
+}): Promise<boolean> {
+  const route = resolveSessionChildRoute({
+    sessionKey: params.sessionKey,
+    entry: params.entry,
+  });
+  if (!route) {
+    return true;
+  }
+  const routeGuard = await guardChildRouteForDelivery({
+    childSessionKey: route.routeTarget.healthSessionKey,
+    context: {
+      routeIntent: params.routeIntent,
+      targetMethod: params.method,
+      idempotencyKey: params.idempotencyKey,
+      requesterSessionKey: params.requesterSessionKey,
+      childTargetKind: route.routeTarget.childTargetKind,
+      registryRecord: route.registryRecord,
+      sessionLineage: trustedSessionLineageForDelivery(params.entry, route.registryRecord),
+      provider: params.provider,
+    },
+    payloadForHash: params.payloadForHash,
+  });
+  if (!routeGuard.ok) {
+    respondWithChildRouteGuardFailure(params.respond, routeGuard);
+    return false;
+  }
+  return true;
+}
+
+async function recordChildRouteContextOverflowRepair(params: {
+  childSessionKey: string;
+  runId?: string;
+  status?: "active" | "cleared";
+  reason: string;
+}) {
+  const recorded = await recordChildRouteHealthEvent({
+    code: "context_overflow",
+    status: params.status ?? "cleared",
+    source: "repair_control",
+    childSessionKey: params.childSessionKey,
+    runId: params.runId,
+    reason: params.reason,
+  });
+  if (recorded.ok) {
+    return undefined;
+  }
+  return errorShape(ErrorCodes.UNAVAILABLE, "failed to record child route repair transition", {
+    retryable: true,
+    details: {
+      kind: "child_route_health_unavailable",
+      childSessionKey: params.childSessionKey,
+      errorKind: "child_route_health_unavailable",
+      retryable: true,
+      plannerInstruction:
+        "Retry after route-health storage is available; do not deliver follow-up work to the child.",
+    },
+  });
+}
+
+const CHILD_LOCAL_REPAIR_CODES = new Set<ChildRouteHealthCode>([
+  "child_conversation_expired",
+  "context_overflow",
+  "agent_lifecycle_blocked",
+  "agent_lifecycle_abandoned",
+  "agent_lifecycle_error",
+  "edit_failure_threshold",
+]);
+
+function compactionCheckpointRestoresRiskyTranscript(reason: unknown): boolean {
+  return reason === "overflow-retry" || reason === "timeout-retry";
+}
+
+async function childRouteRepairBlockerCodes(params: {
+  route: ResolvedSessionChildRoute | undefined;
+  entry: ChildRouteSessionLineage;
+  targetMethod: string;
+  includeContextOverflowRisk?: boolean;
+}): Promise<
+  { ok: true; codes: ChildRouteHealthCode[] } | { ok: false; error: ReturnType<typeof errorShape> }
+> {
+  if (!params.route) {
+    return { ok: true, codes: [] };
+  }
+  const repairLineage = {
+    spawnedBy: params.entry.spawnedBy,
+    parentSessionKey: params.entry.parentSessionKey ?? params.route.routeTarget.healthSessionKey,
+    forkedFromParent: params.entry.forkedFromParent,
+  };
+  const assessment = await assessChildRouteHealth(params.route.routeTarget.healthSessionKey, {
+    routeIntent: "followup_reuse",
+    targetMethod: params.targetMethod,
+    childTargetKind: params.route.routeTarget.childTargetKind,
+    registryRecord: params.route.registryRecord,
+    sessionLineage: repairLineage,
+  });
+  if (assessment.status === "unavailable") {
+    return {
+      ok: false,
+      error: errorShape(ErrorCodes.UNAVAILABLE, "Child route health is unavailable.", {
+        retryable: assessment.retryable,
+        details: {
+          kind: "child_route_health_unavailable",
+          childSessionKey: params.route.routeTarget.healthSessionKey,
+          errorKind: assessment.errorKind,
+          retryable: assessment.retryable,
+          plannerInstruction: assessment.plannerInstruction,
+        },
+      }),
+    };
+  }
+  const codes =
+    assessment.status === "unhealthy"
+      ? assessment.codes.filter((code) => CHILD_LOCAL_REPAIR_CODES.has(code))
+      : [];
+  if (params.includeContextOverflowRisk && !codes.includes("context_overflow")) {
+    codes.push("context_overflow");
+  }
+  return { ok: true, codes: Array.from(new Set(codes)).toSorted() };
+}
+
+async function recordChildRouteRepairBlockers(params: {
+  route: ResolvedSessionChildRoute | undefined;
+  codes: ChildRouteHealthCode[];
+  reason: string;
+}) {
+  if (!params.route || params.codes.length === 0) {
+    return undefined;
+  }
+  for (const code of params.codes) {
+    const recorded = await recordChildRouteHealthEvent({
+      code,
+      status: "active",
+      source: "repair_control",
+      childSessionKey: params.route.routeTarget.healthSessionKey,
+      runId: params.route.registryRecord?.runId,
+      reason: params.reason,
+    });
+    if (!recorded.ok) {
+      return errorShape(ErrorCodes.UNAVAILABLE, "failed to record child route repair transition", {
+        retryable: true,
+        details: {
+          kind: "child_route_health_unavailable",
+          childSessionKey: params.route.routeTarget.healthSessionKey,
+          errorKind: "child_route_health_unavailable",
+          retryable: true,
+          plannerInstruction:
+            "Retry after route-health storage is available; do not deliver follow-up work to the child.",
+        },
+      });
+    }
   }
   return undefined;
 }
@@ -452,13 +700,43 @@ async function handleSessionSend(params: {
   if (!key) {
     return;
   }
-  const { entry, canonicalKey, storePath } = loadSessionEntry(key);
+  const { cfg, entry, canonicalKey, storePath } = loadSessionEntry(key);
   if (!entry?.sessionId) {
     params.respond(
       false,
       undefined,
       errorShape(ErrorCodes.INVALID_REQUEST, `session not found: ${key}`),
     );
+    return;
+  }
+  const rawIdempotencyKey = (p as { idempotencyKey?: string }).idempotencyKey;
+  const idempotencyKey =
+    typeof rawIdempotencyKey === "string" && rawIdempotencyKey.trim()
+      ? rawIdempotencyKey.trim()
+      : randomUUID();
+  const routeAllowed = await guardChildRouteSessionDelivery({
+    sessionKey: canonicalKey,
+    entry,
+    method: params.method,
+    routeIntent: "followup_reuse",
+    idempotencyKey,
+    requesterSessionKey:
+      normalizeOptionalString(entry.spawnedBy) ?? normalizeOptionalString(entry.parentSessionKey),
+    provider: resolveChildRouteProviderContextFromSession({
+      cfg,
+      sessionKey: canonicalKey,
+      entry,
+      requesterSessionKey:
+        normalizeOptionalString(entry.spawnedBy) ?? normalizeOptionalString(entry.parentSessionKey),
+    }),
+    payloadForHash: {
+      method: params.method,
+      message: normalizeOptionalString((p as { message?: string }).message) ?? "",
+      hasAttachments: Array.isArray((p as { attachments?: unknown }).attachments),
+    },
+    respond: params.respond,
+  });
+  if (!routeAllowed) {
     return;
   }
 
@@ -485,11 +763,6 @@ async function handleSessionSend(params: {
   let sendPayload: unknown;
   let sendCached = false;
   let startedRunId: string | undefined;
-  const rawIdempotencyKey = (p as { idempotencyKey?: string }).idempotencyKey;
-  const idempotencyKey =
-    typeof rawIdempotencyKey === "string" && rawIdempotencyKey.trim()
-      ? rawIdempotencyKey.trim()
-      : randomUUID();
   await chatHandlers["chat.send"]({
     req: params.req,
     params: {
@@ -821,6 +1094,36 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       : buildDashboardSessionKey(agentId);
     const target = resolveGatewaySessionStoreTarget({ cfg, key });
     const targetAgentId = resolveAgentIdFromSessionKey(target.canonicalKey);
+    const initialMessage = resolveOptionalInitialSessionMessage(p);
+    if (initialMessage) {
+      const proposedEntry: ChildRouteSessionLineage = {
+        parentSessionKey: canonicalParentSessionKey,
+      };
+      const routeAllowed = await guardChildRouteSessionDelivery({
+        sessionKey: target.canonicalKey,
+        entry: proposedEntry,
+        method: "sessions.create",
+        routeIntent:
+          resolveChildRouteTarget({
+            sessionKey: target.canonicalKey,
+            entry: proposedEntry,
+          })?.healthSessionKey === target.canonicalKey
+            ? "initial_spawn"
+            : "followup_reuse",
+        idempotencyKey: randomUUID(),
+        requesterSessionKey: canonicalParentSessionKey,
+        payloadForHash: {
+          method: "sessions.create",
+          key: target.canonicalKey,
+          hasInitialMessage: true,
+          message: initialMessage,
+        },
+        respond,
+      });
+      if (!routeAllowed) {
+        return;
+      }
+    }
     const created = await updateSessionStore(target.storePath, async (store) => {
       const patched = await applySessionsPatchToStore({
         cfg,
@@ -887,7 +1190,6 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       });
     }
 
-    const initialMessage = resolveOptionalInitialSessionMessage(p);
     let runPayload: Record<string, unknown> | undefined;
     let runError: unknown;
     let runMeta: Record<string, unknown> | undefined;
@@ -1000,6 +1302,29 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       );
       return;
     }
+    const sourceRoute = resolveSessionChildRoute({
+      sessionKey: canonicalKey,
+      entry,
+    });
+    const repairBlockers = await childRouteRepairBlockerCodes({
+      route: sourceRoute,
+      entry,
+      targetMethod: "sessions.compaction.branch",
+      includeContextOverflowRisk: compactionCheckpointRestoresRiskyTranscript(checkpoint.reason),
+    });
+    if (!repairBlockers.ok) {
+      respond(false, undefined, repairBlockers.error);
+      return;
+    }
+    const repairRecordError = await recordChildRouteRepairBlockers({
+      route: sourceRoute,
+      codes: repairBlockers.codes,
+      reason: "Checkpoint branch inherited child-local route blockers from its source transcript.",
+    });
+    if (repairRecordError) {
+      respond(false, undefined, repairRecordError);
+      return;
+    }
 
     const snapshotSession = SessionManager.open(
       checkpoint.preCompaction.sessionFile,
@@ -1026,7 +1351,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       nextSessionId: branchedSession.getSessionId(),
       nextSessionFile: branchedSessionFile,
       label,
-      parentSessionKey: canonicalKey,
+      parentSessionKey: sourceRoute?.routeTarget.healthSessionKey ?? canonicalKey,
       totalTokens: checkpoint.tokensBefore,
     });
 
@@ -1142,6 +1467,30 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         undefined,
         errorShape(ErrorCodes.UNAVAILABLE, "failed to restore checkpoint transcript"),
       );
+      return;
+    }
+    const sourceRoute = resolveSessionChildRoute({
+      sessionKey: canonicalKey,
+      entry,
+    });
+    const repairBlockers = await childRouteRepairBlockerCodes({
+      route: sourceRoute,
+      entry,
+      targetMethod: "sessions.compaction.restore",
+      includeContextOverflowRisk: compactionCheckpointRestoresRiskyTranscript(checkpoint.reason),
+    });
+    if (!repairBlockers.ok) {
+      respond(false, undefined, repairBlockers.error);
+      return;
+    }
+    const repairRecordError = await recordChildRouteRepairBlockers({
+      route: sourceRoute,
+      codes: repairBlockers.codes,
+      reason:
+        "Checkpoint restore kept child-local route blockers for the restored source transcript.",
+    });
+    if (repairRecordError) {
+      respond(false, undefined, repairRecordError);
       return;
     }
     const nextEntry = cloneCheckpointSessionEntry({
@@ -1370,6 +1719,17 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       );
       return;
     }
+    if (isTopLevelAgentMainSessionKey({ cfg, canonicalKey: target.canonicalKey })) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `Cannot delete top-level agent session (${target.canonicalKey}). Delete child sessions instead.`,
+        ),
+      );
+      return;
+    }
 
     const deleteTranscript = typeof p.deleteTranscript === "boolean" ? p.deleteTranscript : true;
     const {
@@ -1486,6 +1846,10 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     });
     const entry = compactTarget.entry;
     const sessionId = entry?.sessionId;
+    const compactRoute = resolveSessionChildRoute({
+      sessionKey: target.canonicalKey,
+      entry,
+    });
     if (!sessionId) {
       respond(
         true,
@@ -1580,6 +1944,29 @@ export const sessionsHandlers: GatewayRequestHandlers = {
             delete entryToUpdate.totalTokensFresh;
           }
         });
+        if (compactRoute) {
+          const repairRecordError = await recordChildRouteContextOverflowRepair({
+            childSessionKey: compactRoute.routeTarget.healthSessionKey,
+            runId: compactRoute.registryRecord?.runId,
+            reason: "Manual session compaction completed successfully.",
+          });
+          if (repairRecordError) {
+            respond(false, undefined, repairRecordError);
+            return;
+          }
+        }
+      }
+      if (!result.ok && compactRoute) {
+        const repairRecordError = await recordChildRouteContextOverflowRepair({
+          childSessionKey: compactRoute.routeTarget.healthSessionKey,
+          runId: compactRoute.registryRecord?.runId,
+          status: "active",
+          reason: "Manual session compaction failed; context-overflow risk remains active.",
+        });
+        if (repairRecordError) {
+          respond(false, undefined, repairRecordError);
+          return;
+        }
       }
 
       respond(
@@ -1635,6 +2022,17 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       delete entryToUpdate.totalTokensFresh;
       entryToUpdate.updatedAt = Date.now();
     });
+    if (compactRoute) {
+      const repairRecordError = await recordChildRouteContextOverflowRepair({
+        childSessionKey: compactRoute.routeTarget.healthSessionKey,
+        runId: compactRoute.registryRecord?.runId,
+        reason: "Manual line-count session compaction completed successfully.",
+      });
+      if (repairRecordError) {
+        respond(false, undefined, repairRecordError);
+        return;
+      }
+    }
 
     respond(
       true,

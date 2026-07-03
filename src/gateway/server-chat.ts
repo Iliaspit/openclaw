@@ -467,6 +467,7 @@ export type AgentEventHandlerOptions = {
   clearAgentRunContext: (runId: string) => void;
   toolEventRecipients: ToolEventRecipientRegistry;
   sessionEventSubscribers: SessionEventSubscriberRegistry;
+  selectOrchestrationConnIds?: (connIds?: ReadonlySet<string>) => ReadonlySet<string>;
   lifecycleErrorRetryGraceMs?: number;
   isChatSendRunActive?: (runId: string) => boolean;
 };
@@ -481,6 +482,7 @@ export function createAgentEventHandler({
   clearAgentRunContext,
   toolEventRecipients,
   sessionEventSubscribers,
+  selectOrchestrationConnIds = () => new Set<string>(),
   lifecycleErrorRetryGraceMs = AGENT_LIFECYCLE_ERROR_RETRY_GRACE_MS,
   isChatSendRunActive = () => false,
 }: AgentEventHandlerOptions) {
@@ -648,10 +650,10 @@ export function createAgentEventHandler({
 
     if (sessionKey) {
       void persistGatewaySessionLifecycleEvent({ sessionKey, event: evt }).catch(() => undefined);
-      const sessionEventConnIds = sessionEventSubscribers.getAll();
-      if (sessionEventConnIds.size > 0) {
+      const orchestrationConnIds = selectOrchestrationConnIds(sessionEventSubscribers.getAll());
+      if (orchestrationConnIds.size > 0) {
         broadcastToConnIds(
-          "sessions.changed",
+          "session.activity",
           {
             sessionKey,
             phase: lifecyclePhase,
@@ -659,7 +661,7 @@ export function createAgentEventHandler({
             ts: evt.ts,
             ...buildSessionEventSnapshot(sessionKey, evt),
           },
-          sessionEventConnIds,
+          orchestrationConnIds,
           { dropIfSlow: true },
         );
       }
@@ -914,17 +916,24 @@ export function createAgentEventHandler({
           })()
         : agentPayload;
     if (last > 0 && evt.seq !== last + 1) {
-      broadcast("agent", {
-        runId: eventRunId,
-        stream: "error",
-        ts: Date.now(),
-        sessionKey,
-        data: {
-          reason: "seq gap",
-          expected: last + 1,
-          received: evt.seq,
-        },
-      });
+      const orchestrationConnIds = selectOrchestrationConnIds();
+      if (orchestrationConnIds.size > 0) {
+        broadcastToConnIds(
+          "agent",
+          {
+            runId: eventRunId,
+            stream: "error",
+            ts: Date.now(),
+            sessionKey,
+            data: {
+              reason: "seq gap",
+              expected: last + 1,
+              received: evt.seq,
+            },
+          },
+          orchestrationConnIds,
+        );
+      }
     }
     agentRunSeq.set(evt.runId, evt.seq);
     if (isToolEvent) {
@@ -952,12 +961,14 @@ export function createAgentEventHandler({
       // tool recipients. Mirror tool lifecycle onto a session-scoped event so
       // they can render live pending tool cards without polling history.
       if (sessionKey) {
-        const sessionSubscribers = sessionEventSubscribers.getAll();
-        if (sessionSubscribers.size > 0) {
+        const orchestrationSessionSubscribers = selectOrchestrationConnIds(
+          sessionEventSubscribers.getAll(),
+        );
+        if (orchestrationSessionSubscribers.size > 0) {
           broadcastToConnIds(
             "session.tool",
             { ...toolPayload, ...buildSessionEventSnapshot(sessionKey) },
-            sessionSubscribers,
+            orchestrationSessionSubscribers,
             { dropIfSlow: true },
           );
         }
@@ -967,7 +978,10 @@ export function createAgentEventHandler({
       if (itemPhase === "start" && isControlUiVisible && sessionKey && !isAborted) {
         flushBufferedChatDeltaIfNeeded(sessionKey, clientRunId, evt.runId, evt.seq);
       }
-      broadcast("agent", agentPayload);
+      const orchestrationConnIds = selectOrchestrationConnIds();
+      if (orchestrationConnIds.size > 0) {
+        broadcastToConnIds("agent", agentPayload, orchestrationConnIds);
+      }
     }
 
     if (isControlUiVisible && sessionKey) {
@@ -1003,10 +1017,10 @@ export function createAgentEventHandler({
 
     if (sessionKey && lifecyclePhase === "start") {
       void persistGatewaySessionLifecycleEvent({ sessionKey, event: evt }).catch(() => undefined);
-      const sessionEventConnIds = sessionEventSubscribers.getAll();
-      if (sessionEventConnIds.size > 0) {
+      const orchestrationConnIds = selectOrchestrationConnIds(sessionEventSubscribers.getAll());
+      if (orchestrationConnIds.size > 0) {
         broadcastToConnIds(
-          "sessions.changed",
+          "session.activity",
           {
             sessionKey,
             phase: lifecyclePhase,
@@ -1014,7 +1028,7 @@ export function createAgentEventHandler({
             ts: evt.ts,
             ...buildSessionEventSnapshot(sessionKey, evt),
           },
-          sessionEventConnIds,
+          orchestrationConnIds,
           { dropIfSlow: true },
         );
       }

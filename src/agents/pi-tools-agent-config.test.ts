@@ -266,6 +266,52 @@ describe("Agent-specific tool filtering", () => {
     );
   });
 
+  it("exposes catalog only to agents that also-allow it", () => {
+    const cfg: OpenClawConfig = {
+      tools: {
+        profile: "coding",
+        catalog: {
+          enabled: true,
+        },
+      },
+      agents: {
+        list: [
+          {
+            id: "planner-helper",
+            workspace: "~/openclaw",
+            tools: {
+              profile: "coding",
+              alsoAllow: ["catalog"],
+            },
+          },
+          {
+            id: "implementer",
+            workspace: "~/openclaw",
+            tools: {
+              profile: "coding",
+            },
+          },
+        ],
+      },
+    };
+
+    const plannerHelperTools = createOpenClawCodingTools({
+      config: cfg,
+      sessionKey: "agent:planner-helper:main",
+      workspaceDir: "/tmp/test-planner-helper",
+      agentDir: "/tmp/agent-planner-helper",
+    });
+    const implementerTools = createOpenClawCodingTools({
+      config: cfg,
+      sessionKey: "agent:implementer:main",
+      workspaceDir: "/tmp/test-implementer",
+      agentDir: "/tmp/agent-implementer",
+    });
+
+    expect(plannerHelperTools.map((tool) => tool.name)).toContain("catalog");
+    expect(implementerTools.map((tool) => tool.name)).not.toContain("catalog");
+  });
+
   it("should apply provider-specific tool policy", () => {
     const cfg: OpenClawConfig = {
       tools: {

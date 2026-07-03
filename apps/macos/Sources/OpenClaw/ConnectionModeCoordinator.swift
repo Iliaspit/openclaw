@@ -64,7 +64,6 @@ final class ConnectionModeCoordinator {
                 if let error = await NodeServiceManager.start() {
                     NodesStore.shared.lastError = "Node service start failed: \(error)"
                 }
-                _ = try await GatewayEndpointStore.shared.ensureRemoteControlTunnel()
                 let settings = CommandResolver.connectionSettings()
                 try await ControlChannel.shared.configure(mode: .remote(
                     target: settings.target,

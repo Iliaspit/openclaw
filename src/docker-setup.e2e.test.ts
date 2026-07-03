@@ -220,6 +220,7 @@ describe("scripts/docker/setup.sh", () => {
     expect(result.status).toBe(0);
     const envFile = await readFile(join(activeSandbox.rootDir, ".env"), "utf8");
     expect(envFile).toContain("OPENCLAW_DOCKER_APT_PACKAGES=ffmpeg build-essential");
+    expect(envFile).toContain("OPENCLAW_INSTALL_BROWSER=1");
     expect(envFile).toContain("OPENCLAW_EXTRA_MOUNTS=");
     expect(envFile).toContain("OPENCLAW_HOME_VOLUME=openclaw-home"); // pragma: allowlist secret
     const extraCompose = await readFile(
@@ -231,6 +232,7 @@ describe("scripts/docker/setup.sh", () => {
     expect(extraCompose).toContain("openclaw-home:");
     const log = await readDockerLog(activeSandbox);
     expect(log).toContain("--build-arg OPENCLAW_DOCKER_APT_PACKAGES=ffmpeg build-essential");
+    expect(log).toContain("--build-arg OPENCLAW_INSTALL_BROWSER=1");
     expect(log).toContain(
       "run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js onboard --mode local --no-install-daemon",
     );
@@ -238,6 +240,23 @@ describe("scripts/docker/setup.sh", () => {
       'run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js config set --batch-json [{"path":"gateway.mode","value":"local"},{"path":"gateway.bind","value":"lan"},{"path":"gateway.controlUi.allowedOrigins","value":["http://localhost:18789","http://127.0.0.1:18789"]}]',
     );
     expect(log).not.toContain("run --rm openclaw-cli onboard --mode local --no-install-daemon");
+  });
+
+  it("allows local Docker setup to opt out of the browser install layer", async () => {
+    const activeSandbox = requireSandbox(sandbox);
+    await resetDockerLog(activeSandbox);
+
+    const result = runDockerSetup(activeSandbox, {
+      OPENCLAW_INSTALL_BROWSER: "0",
+    });
+
+    expect(result.status).toBe(0);
+    const envFile = await readFile(join(activeSandbox.rootDir, ".env"), "utf8");
+    expect(envFile).toContain("OPENCLAW_INSTALL_BROWSER=");
+
+    const log = await readDockerLog(activeSandbox);
+    expect(log).toContain("--build-arg OPENCLAW_INSTALL_BROWSER=");
+    expect(log).not.toContain("--build-arg OPENCLAW_INSTALL_BROWSER=1");
   });
 
   it("avoids shared-network openclaw-cli before the gateway is started", async () => {

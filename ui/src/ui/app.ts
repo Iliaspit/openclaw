@@ -200,6 +200,9 @@ export class OpenClawApp extends LitElement {
 
   @state() nodesLoading = false;
   @state() nodes: Array<Record<string, unknown>> = [];
+  @state() queueHealthLoading = false;
+  @state() queueHealthError: string | null = null;
+  @state() queueHealthResult: import("./types.js").QueueHealthResult | null = null;
   @state() devicesLoading = false;
   @state() devicesError: string | null = null;
   @state() devicesList: DevicePairingList | null = null;
@@ -504,6 +507,7 @@ export class OpenClawApp extends LitElement {
   private chatUserNearBottom = true;
   @state() chatNewMessagesBelow = false;
   private nodesPollInterval: number | null = null;
+  private queueHealthPollInterval: number | null = null;
   private logsPollInterval: number | null = null;
   private debugPollInterval: number | null = null;
   private logsScrollFrame: number | null = null;

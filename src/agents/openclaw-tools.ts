@@ -8,12 +8,14 @@ import { resolveOpenClawPluginToolsForOptions } from "./openclaw-plugin-tools.js
 import { applyNodesToolWorkspaceGuard } from "./openclaw-tools.nodes-workspace-guard.js";
 import {
   collectPresentOpenClawTools,
+  isCatalogToolEnabledForOpenClawTools,
   isUpdatePlanToolEnabledForOpenClawTools,
 } from "./openclaw-tools.registration.js";
 import type { SandboxFsBridge } from "./sandbox/fs-bridge.js";
 import type { SpawnedToolContext } from "./spawned-context.js";
 import type { ToolFsPolicy } from "./tool-fs-policy.js";
 import { createAgentsListTool } from "./tools/agents-list-tool.js";
+import { createCatalogTool } from "./tools/catalog-tool.js";
 import { createCanvasTool } from "./tools/canvas-tool.js";
 import type { AnyAgentTool } from "./tools/common.js";
 import { createCronTool } from "./tools/cron-tool.js";
@@ -183,6 +185,9 @@ export function createOpenClawTools(
         fsPolicy: options?.fsPolicy,
       })
     : null;
+  const catalogTool = isCatalogToolEnabledForOpenClawTools({ config: resolvedConfig })
+    ? createCatalogTool({ workspaceDir })
+    : null;
   const webSearchTool = createWebSearchTool({
     config: options?.config,
     sandboxed: options?.sandboxed,
@@ -300,7 +305,7 @@ export function createOpenClawTools(
       config: resolvedConfig,
       sandboxed: options?.sandboxed,
     }),
-    ...collectPresentOpenClawTools([webSearchTool, webFetchTool, imageTool, pdfTool]),
+    ...collectPresentOpenClawTools([catalogTool, webSearchTool, webFetchTool, imageTool, pdfTool]),
   ];
 
   if (options?.disablePluginTools) {

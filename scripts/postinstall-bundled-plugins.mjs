@@ -333,6 +333,9 @@ function runtimeDepNeedsInstall(params) {
   if (!params.existsSync(packageJsonPath)) {
     return true;
   }
+  if (params.omitOptional) {
+    return false;
+  }
 
   try {
     const packageJson = params.readJson(packageJsonPath);
@@ -348,11 +351,22 @@ function runtimeDepNeedsInstall(params) {
   }
 }
 
-function collectRuntimeDeps(packageJson) {
+function collectRuntimeDeps(packageJson, params = {}) {
   return {
     ...packageJson.dependencies,
-    ...packageJson.optionalDependencies,
+    ...(params.omitOptional ? {} : packageJson.optionalDependencies),
   };
+}
+
+function envOmitsOptionalDependencies(env = {}) {
+  const omitValues = `${env.npm_config_omit ?? ""},${env.NPM_CONFIG_OMIT ?? ""}`
+    .split(/[\s,]+/u)
+    .filter(Boolean);
+  if (omitValues.includes("optional")) {
+    return true;
+  }
+  const optionalConfig = env.npm_config_optional ?? env.NPM_CONFIG_OPTIONAL;
+  return typeof optionalConfig === "string" && optionalConfig.toLowerCase() === "false";
 }
 
 export function discoverBundledPluginRuntimeDeps(params = {}) {
@@ -387,7 +401,9 @@ export function discoverBundledPluginRuntimeDeps(params = {}) {
     }
     try {
       const packageJson = readJsonFile(packageJsonPath);
-      for (const [name, version] of Object.entries(collectRuntimeDeps(packageJson))) {
+      for (const [name, version] of Object.entries(
+        collectRuntimeDeps(packageJson, { omitOptional: params.omitOptional }),
+      )) {
         const existing = deps.get(name);
         if (existing) {
           if (existing.version !== version) {
@@ -627,6 +643,7 @@ export function runBundledPluginPostinstall(params = {}) {
   const spawn = params.spawnSync ?? spawnSync;
   const pathExists = params.existsSync ?? existsSync;
   const log = params.log ?? console;
+  const omitOptional = params.omitOptional ?? envOmitsOptionalDependencies(env);
   if (env?.[DISABLE_POSTINSTALL_ENV]?.trim()) {
     return;
   }
@@ -670,7 +687,7 @@ export function runBundledPluginPostinstall(params = {}) {
   }
   const runtimeDeps =
     params.runtimeDeps ??
-    discoverBundledPluginRuntimeDeps({ extensionsDir, existsSync: pathExists });
+    discoverBundledPluginRuntimeDeps({ extensionsDir, existsSync: pathExists, omitOptional });
   const missingSpecs = runtimeDeps
     .filter((dep) =>
       runtimeDepNeedsInstall({
@@ -678,6 +695,7 @@ export function runBundledPluginPostinstall(params = {}) {
         existsSync: pathExists,
         packageRoot,
         arch: params.arch,
+        omitOptional,
         platform: params.platform,
         readJson: params.readJson ?? readJson,
       }),
@@ -708,6 +726,7 @@ export function runBundledPluginPostinstall(params = {}) {
         npmArgs: [
           "install",
           "--omit=dev",
+          ...(omitOptional ? ["--omit=optional"] : []),
           "--no-save",
           "--package-lock=false",
           "--legacy-peer-deps",

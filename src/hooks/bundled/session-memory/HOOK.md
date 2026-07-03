@@ -25,7 +25,9 @@ When you run `/new` or `/reset` to start a fresh session:
 1. **Finds the previous session** - Uses the pre-reset session entry to locate the correct transcript
 2. **Extracts conversation** - Reads the last N user/assistant messages from the session (default: 15, configurable)
 3. **Generates descriptive slug** - Uses LLM to create a meaningful filename slug based on conversation content
-4. **Saves to memory** - Creates a new file at `<workspace>/memory/YYYY-MM-DD-slug.md`
+4. **Saves to archive** - Creates a new file at:
+   - `<workspace>/memory/YYYY-MM-DD-slug.md` by default, or
+   - the configured `archiveDir` when provided
 
 ## Output Format
 
@@ -58,9 +60,10 @@ The hook uses your configured LLM provider to generate slugs, so it works with a
 
 The hook supports optional configuration:
 
-| Option     | Type   | Default | Description                                                     |
-| ---------- | ------ | ------- | --------------------------------------------------------------- |
-| `messages` | number | 15      | Number of user/assistant messages to include in the memory file |
+| Option       | Type   | Default  | Description                                                     |
+| ------------ | ------ | -------- | --------------------------------------------------------------- |
+| `messages`   | number | 15       | Number of user/assistant messages to include in the memory file |
+| `archiveDir` | string | unset    | Relative or absolute directory for slugged session-memory notes |
 
 Example configuration:
 
@@ -71,7 +74,8 @@ Example configuration:
       "entries": {
         "session-memory": {
           "enabled": true,
-          "messages": 25
+          "messages": 25,
+          "archiveDir": ".openclaw/session-memory-archive"
         }
       }
     }
@@ -84,6 +88,8 @@ The hook automatically:
 - Uses your workspace directory (`~/.openclaw/workspace` by default)
 - Uses your configured LLM for slug generation
 - Falls back to timestamp slugs if LLM is unavailable
+- Writes to `archiveDir` when configured; relative paths resolve from the
+  workspace root
 
 ## Disabling
 

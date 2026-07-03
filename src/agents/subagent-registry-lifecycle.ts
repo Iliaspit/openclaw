@@ -9,13 +9,18 @@ import {
   setDetachedTaskDeliveryStatusByRunId,
 } from "../tasks/task-executor.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.js";
+import type { ChildRouteHealthCode } from "./child-route-health-contract.js";
+import {
+  recordChildRouteHealthEvent,
+  type ChildRouteHealthEventStatus,
+} from "./child-route-health.js";
 import {
   captureSubagentCompletionReply,
   runSubagentAnnounceFlow,
   type SubagentRunOutcome,
 } from "./subagent-announce.js";
 import {
-  SUBAGENT_ENDED_REASON_COMPLETE,
+  SUBAGENT_ENDED_REASON_KILLED,
   type SubagentLifecycleEndedReason,
 } from "./subagent-lifecycle-events.js";
 import {
@@ -35,6 +40,10 @@ import {
   safeRemoveAttachmentsDir,
 } from "./subagent-registry-helpers.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
+import {
+  applySubagentResultReceiptToRun,
+  persistSubagentResultReceiptForRunSync,
+} from "./subagent-result-receipts.js";
 
 export function createSubagentRegistryLifecycleController(params: {
   runs: Map<string, SubagentRunRecord>;
@@ -112,6 +121,64 @@ export function createSubagentRegistryLifecycleController(params: {
     return name ? { name, message } : { message };
   };
 
+  const resolveTerminalRouteHealthEvent = (args: {
+    outcome: SubagentRunOutcome;
+    reason: SubagentLifecycleEndedReason;
+  }): { code: ChildRouteHealthCode; status: ChildRouteHealthEventStatus; reason: string } => {
+    if (args.outcome.status === "ok") {
+      return {
+        code: "agent_lifecycle_error",
+        status: "success",
+        reason: "Sub-agent run completed successfully.",
+      };
+    }
+    if (args.outcome.status === "timeout" || args.reason === SUBAGENT_ENDED_REASON_KILLED) {
+      return {
+        code: "agent_lifecycle_abandoned",
+        status: "active",
+        reason: "Sub-agent run ended without a usable completion.",
+      };
+    }
+    return {
+      code: "agent_lifecycle_error",
+      status: "active",
+      reason: "Sub-agent run ended with an error.",
+    };
+  };
+
+  const recordTerminalRouteHealth = async (args: {
+    entry: SubagentRunRecord;
+    outcome: SubagentRunOutcome;
+    reason: SubagentLifecycleEndedReason;
+    endedAt: number;
+  }) => {
+    if (args.entry.suppressAnnounceReason === "fresh-reroute" && args.outcome.status === "ok") {
+      return;
+    }
+    const event = resolveTerminalRouteHealthEvent({
+      outcome: args.outcome,
+      reason: args.reason,
+    });
+    const recorded = await recordChildRouteHealthEvent({
+      code: event.code,
+      status: event.status,
+      source: "subagent_terminal",
+      childSessionKey: args.entry.childSessionKey,
+      runId: args.entry.runId,
+      requesterSessionKey: args.entry.requesterSessionKey,
+      observedAt: args.endedAt,
+      reason: event.reason,
+    });
+    if (!recorded.ok) {
+      params.warn("failed to record subagent route-health terminal state", {
+        error: recorded.error,
+        runId: maskRunId(args.entry.runId),
+        childSessionKey: maskSessionKey(args.entry.childSessionKey),
+        outcomeStatus: args.outcome.status,
+      });
+    }
+  };
+
   const safeSetSubagentTaskDeliveryStatus = (args: {
     runId: string;
     childSessionKey: string;
@@ -176,6 +243,18 @@ export function createSubagentRegistryLifecycleController(params: {
 
   const freezeRunResultAtCompletion = async (entry: SubagentRunRecord): Promise<boolean> => {
     if (entry.frozenResultText !== undefined) {
+      const persisted = persistSubagentResultReceiptForRunSync(entry);
+      if (!persisted.ok) {
+        params.warn("failed to persist subagent result receipt", {
+          error: persisted.error,
+          runId: maskRunId(entry.runId),
+          childSessionKey: maskSessionKey(entry.childSessionKey),
+        });
+        if (entry.cleanup === "delete") {
+          entry.cleanup = "keep";
+          return true;
+        }
+      }
       return false;
     }
     try {
@@ -187,6 +266,17 @@ export function createSubagentRegistryLifecycleController(params: {
       entry.frozenResultText = null;
     }
     entry.frozenResultCapturedAt = Date.now();
+    const persisted = persistSubagentResultReceiptForRunSync(entry);
+    if (!persisted.ok) {
+      params.warn("failed to persist subagent result receipt", {
+        error: persisted.error,
+        runId: maskRunId(entry.runId),
+        childSessionKey: maskSessionKey(entry.childSessionKey),
+      });
+      if (entry.cleanup === "delete") {
+        entry.cleanup = "keep";
+      }
+    }
     return true;
   };
 
@@ -235,12 +325,26 @@ export function createSubagentRegistryLifecycleController(params: {
     const capturedAt = Date.now();
     let changed = false;
     for (const entry of candidates) {
-      if (entry.frozenResultText === nextFrozen) {
-        continue;
+      if (entry.frozenResultText !== nextFrozen) {
+        entry.frozenResultText = nextFrozen;
+        entry.frozenResultCapturedAt = capturedAt;
+        changed = true;
       }
-      entry.frozenResultText = nextFrozen;
-      entry.frozenResultCapturedAt = capturedAt;
-      changed = true;
+      const persisted = persistSubagentResultReceiptForRunSync(entry);
+      if (!persisted.ok) {
+        params.warn("failed to persist refreshed subagent result receipt", {
+          error: persisted.error,
+          runId: maskRunId(entry.runId),
+          childSessionKey: maskSessionKey(entry.childSessionKey),
+        });
+        if (entry.cleanup === "delete") {
+          entry.cleanup = "keep";
+          changed = true;
+        }
+      }
+      if (applySubagentResultReceiptToRun(entry)) {
+        changed = true;
+      }
     }
     if (changed) {
       params.persist();
@@ -527,6 +631,7 @@ export function createSubagentRegistryLifecycleController(params: {
         childSessionKey: entry.childSessionKey,
         childRunId: entry.runId,
         requesterSessionKey: entry.requesterSessionKey,
+        requesterGeneration: entry.requesterGeneration,
         requesterOrigin,
         requesterDisplayKey: entry.requesterDisplayKey,
         task: entry.task,
@@ -570,19 +675,39 @@ export function createSubagentRegistryLifecycleController(params: {
       return;
     }
 
-    let mutated = false;
     if (
-      completeParams.reason === SUBAGENT_ENDED_REASON_COMPLETE &&
       entry.suppressAnnounceReason === "killed" &&
+      entry.endedReason === SUBAGENT_ENDED_REASON_KILLED &&
       (entry.cleanupHandled || typeof entry.cleanupCompletedAt === "number")
     ) {
-      entry.suppressAnnounceReason = undefined;
-      entry.cleanupHandled = false;
-      entry.cleanupCompletedAt = undefined;
-      entry.completionAnnouncedAt = undefined;
-      mutated = true;
+      let killedMutated = false;
+      if (entry.frozenResultText === undefined) {
+        entry.frozenResultText = null;
+        entry.frozenResultCapturedAt = entry.endedAt ?? Date.now();
+        killedMutated = true;
+      }
+      const persisted = persistSubagentResultReceiptForRunSync(entry);
+      if (!persisted.ok) {
+        params.warn("failed to persist killed subagent result receipt", {
+          error: persisted.error,
+          runId: maskRunId(entry.runId),
+          childSessionKey: maskSessionKey(entry.childSessionKey),
+        });
+        if (entry.cleanup === "delete") {
+          entry.cleanup = "keep";
+          killedMutated = true;
+        }
+      }
+      if (applySubagentResultReceiptToRun(entry)) {
+        killedMutated = true;
+      }
+      if (killedMutated) {
+        params.persist();
+      }
+      return;
     }
 
+    let mutated = false;
     const endedAt =
       typeof completeParams.endedAt === "number" ? completeParams.endedAt : Date.now();
     if (entry.endedAt !== endedAt) {
@@ -597,6 +722,13 @@ export function createSubagentRegistryLifecycleController(params: {
       entry.endedReason = completeParams.reason;
       mutated = true;
     }
+
+    await recordTerminalRouteHealth({
+      entry,
+      outcome: completeParams.outcome,
+      reason: completeParams.reason,
+      endedAt,
+    });
 
     if (await freezeRunResultAtCompletion(entry)) {
       mutated = true;

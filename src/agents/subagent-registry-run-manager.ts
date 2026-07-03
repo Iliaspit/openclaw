@@ -5,6 +5,7 @@ import { createSubsystemLogger } from "../logging/subsystem.js";
 import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import { createRunningTaskRun, reassignTaskRunByRunId } from "../tasks/task-executor.js";
 import { type DeliveryContext, normalizeDeliveryContext } from "../utils/delivery-context.js";
+import { recordChildRouteHealthEvent } from "./child-route-health.js";
 import { waitForAgentRun } from "./run-wait.js";
 import type { ensureRuntimePluginsLoaded as ensureRuntimePluginsLoadedFn } from "./runtime-plugins.js";
 import type { SubagentRunOutcome } from "./subagent-announce-output.js";
@@ -23,7 +24,12 @@ import {
   resolveArchiveAfterMs,
   safeRemoveAttachmentsDir,
 } from "./subagent-registry-helpers.js";
+import { getLatestSubagentRunByChildSessionKey } from "./subagent-registry-read.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
+import {
+  applySubagentResultReceiptToRun,
+  persistSubagentResultReceiptForRunSync,
+} from "./subagent-result-receipts.js";
 
 const log = createSubsystemLogger("agents/subagent-registry");
 
@@ -175,6 +181,26 @@ export function createSubagentRunManager(params: {
     return true;
   };
 
+  const recordKilledRouteHealth = async (entry: SubagentRunRecord, observedAt: number) => {
+    const recorded = await recordChildRouteHealthEvent({
+      code: "agent_lifecycle_abandoned",
+      status: "active",
+      source: "repair_control",
+      childSessionKey: entry.childSessionKey,
+      runId: entry.runId,
+      requesterSessionKey: entry.requesterSessionKey,
+      observedAt,
+      reason: "Sub-agent run was killed before completion.",
+    });
+    if (!recorded.ok) {
+      log.warn("Failed to record killed subagent route-health state", {
+        runId: entry.runId,
+        childSessionKey: entry.childSessionKey,
+        error: recorded.error,
+      });
+    }
+  };
+
   const replaceSubagentRunAfterSteer = (replaceParams: {
     previousRunId: string;
     nextRunId: string;
@@ -194,17 +220,42 @@ export function createSubagentRunManager(params: {
     if (!source) {
       return false;
     }
+    const latestForChild = getLatestSubagentRunByChildSessionKey(source.childSessionKey);
+    if (latestForChild && latestForChild.runId !== previousRunId) {
+      return false;
+    }
+    for (const candidate of params.runs.values()) {
+      if (candidate.childSessionKey !== source.childSessionKey) {
+        continue;
+      }
+      if (candidate.runId === previousRunId) {
+        continue;
+      }
+      if (candidate.createdAt >= source.createdAt) {
+        return false;
+      }
+    }
 
+    const preserveFrozenResultFallback = replaceParams.preserveFrozenResultFallback === true;
     if (previousRunId !== nextRunId) {
       params.clearPendingLifecycleError(previousRunId);
-      if (shouldDeleteAttachments(source)) {
+      if (preserveFrozenResultFallback && previous) {
+        if (previous.frozenResultText !== undefined) {
+          applySubagentResultReceiptToRun(previous);
+        }
+        previous.cleanup = "keep";
+        previous.wakeOnDescendantSettle = undefined;
+        previous.suppressAnnounceReason = undefined;
+      } else if (shouldDeleteAttachments(source)) {
         void safeRemoveAttachmentsDir(source);
       }
-      params.runs.delete(previousRunId);
+      if (!preserveFrozenResultFallback || !previous) {
+        params.runs.delete(previousRunId);
+      }
       params.resumedRuns.delete(previousRunId);
     }
 
-    const now = Date.now();
+    const now = Math.max(Date.now(), source.createdAt + 1);
     const cfg = params.loadConfig();
     const archiveAfterMs = resolveArchiveAfterMs(cfg);
     const spawnMode = source.spawnMode === "session" ? "session" : "run";
@@ -216,7 +267,6 @@ export function createSubagentRunManager(params: {
           : undefined;
     const runTimeoutSeconds = replaceParams.runTimeoutSeconds ?? source.runTimeoutSeconds ?? 0;
     const waitTimeoutMs = params.resolveSubagentWaitTimeoutMs(cfg, runTimeoutSeconds);
-    const preserveFrozenResultFallback = replaceParams.preserveFrozenResultFallback === true;
     const task = replaceParams.task?.trim();
     const sessionStartedAt = getSubagentSessionStartedAt(source) ?? now;
     const accumulatedRuntimeMs =
@@ -240,6 +290,10 @@ export function createSubagentRunManager(params: {
       outcome: undefined,
       frozenResultText: undefined,
       frozenResultCapturedAt: undefined,
+      resultReceiptId: undefined,
+      resultReceiptSha256: undefined,
+      resultReceiptBytes: undefined,
+      resultReceiptCapturedAt: undefined,
       fallbackFrozenResultText: preserveFrozenResultFallback ? source.frozenResultText : undefined,
       fallbackFrozenResultCapturedAt: preserveFrozenResultFallback
         ? source.frozenResultCapturedAt
@@ -325,11 +379,14 @@ export function createSubagentRunManager(params: {
     const runTimeoutSeconds = registerParams.runTimeoutSeconds ?? 0;
     const waitTimeoutMs = params.resolveSubagentWaitTimeoutMs(cfg, runTimeoutSeconds);
     const requesterOrigin = normalizeDeliveryContext(registerParams.requesterOrigin);
+    const requesterGeneration =
+      getLatestSubagentRunByChildSessionKey(requesterSessionKey)?.runId ?? undefined;
     const entry: SubagentRunRecord = {
       runId,
       childSessionKey,
       controllerSessionKey,
       requesterSessionKey,
+      requesterGeneration,
       requesterOrigin,
       requesterDisplayKey: registerParams.requesterDisplayKey,
       task: registerParams.task,
@@ -442,12 +499,22 @@ export function createSubagentRunManager(params: {
       entry.endedAt = now;
       entry.outcome = { status: "error", error: reason };
       entry.endedReason = SUBAGENT_ENDED_REASON_KILLED;
+      if (entry.frozenResultText === undefined) {
+        entry.frozenResultText = null;
+        entry.frozenResultCapturedAt = now;
+      }
+      const persistedReceipt = persistSubagentResultReceiptForRunSync(entry);
+      if (!persistedReceipt.ok && entry.cleanup === "delete") {
+        entry.cleanup = "keep";
+      }
+      applySubagentResultReceiptToRun(entry);
       entry.cleanupHandled = true;
       entry.cleanupCompletedAt = now;
       entry.suppressAnnounceReason = "killed";
       if (!entriesByChildSessionKey.has(entry.childSessionKey)) {
         entriesByChildSessionKey.set(entry.childSessionKey, entry);
       }
+      void recordKilledRouteHealth(entry, now);
       updated += 1;
     }
     if (updated > 0) {

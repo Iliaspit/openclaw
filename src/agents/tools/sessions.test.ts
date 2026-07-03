@@ -653,9 +653,10 @@ describe("sessions_send gating", () => {
       timeoutSeconds: 0,
     });
 
-    expect(callGatewayMock).toHaveBeenCalledTimes(1);
-    expect(callGatewayMock.mock.calls[0]?.[0]).toMatchObject({ method: "sessions.list" });
     expect(result.details).toMatchObject({ status: "forbidden" });
+    expect(
+      callGatewayMock.mock.calls.some(([call]) => (call as { method?: string }).method === "agent"),
+    ).toBe(false);
   });
 
   it("does not reuse a stale assistant reply when no new reply appears", async () => {

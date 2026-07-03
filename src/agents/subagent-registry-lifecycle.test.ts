@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { SUBAGENT_ENDED_REASON_COMPLETE } from "./subagent-lifecycle-events.js";
+import {
+  SUBAGENT_ENDED_REASON_COMPLETE,
+  SUBAGENT_ENDED_REASON_ERROR,
+} from "./subagent-lifecycle-events.js";
 import { createSubagentRegistryLifecycleController } from "./subagent-registry-lifecycle.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
@@ -27,6 +30,10 @@ const browserLifecycleCleanupMocks = vi.hoisted(() => ({
   cleanupBrowserSessionsForLifecycleEnd: vi.fn(async () => {}),
 }));
 
+const routeHealthMocks = vi.hoisted(() => ({
+  recordChildRouteHealthEvent: vi.fn(async () => ({ ok: true, eventId: "event-1" })),
+}));
+
 vi.mock("../tasks/task-executor.js", () => ({
   completeTaskRunByRunId: taskExecutorMocks.completeTaskRunByRunId,
   failTaskRunByRunId: taskExecutorMocks.failTaskRunByRunId,
@@ -40,6 +47,10 @@ vi.mock("../sessions/session-lifecycle-events.js", () => ({
 vi.mock("../browser-lifecycle-cleanup.js", () => ({
   cleanupBrowserSessionsForLifecycleEnd:
     browserLifecycleCleanupMocks.cleanupBrowserSessionsForLifecycleEnd,
+}));
+
+vi.mock("./child-route-health.js", () => ({
+  recordChildRouteHealthEvent: routeHealthMocks.recordChildRouteHealthEvent,
 }));
 
 vi.mock("../runtime.js", () => ({
@@ -125,6 +136,109 @@ describe("subagent registry lifecycle hardening", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     browserLifecycleCleanupMocks.cleanupBrowserSessionsForLifecycleEnd.mockClear();
+    routeHealthMocks.recordChildRouteHealthEvent.mockResolvedValue({
+      ok: true,
+      eventId: "event-1",
+    });
+  });
+
+  it("records a route-health success marker for completed child runs", async () => {
+    const entry = createRunEntry();
+    const controller = createLifecycleController({ entry });
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: false,
+    });
+
+    expect(routeHealthMocks.recordChildRouteHealthEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: "agent_lifecycle_error",
+        status: "success",
+        source: "subagent_terminal",
+        childSessionKey: entry.childSessionKey,
+        runId: entry.runId,
+        requesterSessionKey: entry.requesterSessionKey,
+        observedAt: 4_000,
+      }),
+    );
+  });
+
+  it("does not clear route-health blockers when a fresh-reroute old generation completes late", async () => {
+    const entry = createRunEntry({
+      suppressAnnounceReason: "fresh-reroute",
+    });
+    const controller = createLifecycleController({ entry });
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: false,
+    });
+
+    expect(routeHealthMocks.recordChildRouteHealthEvent).not.toHaveBeenCalled();
+  });
+
+  it("suppresses announce cleanup when a fresh-reroute old generation completes late", async () => {
+    const entry = createRunEntry({
+      suppressAnnounceReason: "fresh-reroute",
+    });
+    const runSubagentAnnounceFlow = vi.fn(async () => true);
+    const emitSubagentEndedHookForRun = vi.fn(async () => {});
+    const controller = createLifecycleController({
+      entry,
+      suppressAnnounceForSteerRestart: (candidate) =>
+        candidate?.suppressAnnounceReason === "steer-restart" ||
+        candidate?.suppressAnnounceReason === "fresh-reroute",
+      shouldEmitEndedHookForRun: () => true,
+      emitSubagentEndedHookForRun,
+      runSubagentAnnounceFlow,
+    });
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: true,
+    });
+
+    expect(runSubagentAnnounceFlow).not.toHaveBeenCalled();
+    expect(emitSubagentEndedHookForRun).not.toHaveBeenCalled();
+    expect(
+      browserLifecycleCleanupMocks.cleanupBrowserSessionsForLifecycleEnd,
+    ).not.toHaveBeenCalled();
+    expect(lifecycleEventMocks.emitSessionLifecycleEvent).not.toHaveBeenCalled();
+  });
+
+  it("records a route-health lifecycle blocker for failed child runs", async () => {
+    const entry = createRunEntry();
+    const controller = createLifecycleController({ entry });
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "error", error: "model failed" },
+      reason: SUBAGENT_ENDED_REASON_ERROR,
+      triggerCleanup: false,
+    });
+
+    expect(routeHealthMocks.recordChildRouteHealthEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: "agent_lifecycle_error",
+        status: "active",
+        source: "subagent_terminal",
+        childSessionKey: entry.childSessionKey,
+        runId: entry.runId,
+        requesterSessionKey: entry.requesterSessionKey,
+        observedAt: 4_000,
+      }),
+    );
   });
 
   it("does not reject completion when task finalization throws", async () => {

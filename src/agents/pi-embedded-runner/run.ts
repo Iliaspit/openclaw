@@ -8,6 +8,10 @@ import { sleepWithAbort } from "../../infra/backoff.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { enqueueCommandInLane } from "../../process/command-queue.js";
+import type {
+  CommandQueueEnqueueFn,
+  CommandQueuePriority,
+} from "../../process/command-queue.types.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import { sanitizeForLog } from "../../terminal/ansi.js";
 import { isMarkdownCapableMessageChannel } from "../../utils/message-channel.js";
@@ -24,6 +28,7 @@ import {
   markAuthProfileGood,
   markAuthProfileUsed,
 } from "../auth-profiles.js";
+import { recordSessionExpiredRouteHealth } from "../child-route-health.js";
 import {
   resolveSessionKeyForRequest,
   resolveStoredSessionKeyForSessionId,
@@ -114,6 +119,7 @@ import { handleRetryLimitExhaustion } from "./run/retry-limit.js";
 import { resolveEffectiveRuntimeModel, resolveHookModelSelection } from "./run/setup.js";
 import { mergeAttemptToolMediaPayloads } from "./run/tool-media-payloads.js";
 import {
+  resolveLiveToolResultMaxChars,
   sessionLikelyHasOversizedToolResults,
   truncateOversizedToolResultsInSession,
 } from "./tool-result-truncation.js";
@@ -129,6 +135,71 @@ import { createUsageAccumulator, mergeUsageIntoAccumulator } from "./usage-accum
 type ApiKeyInfo = ResolvedProviderAuth;
 
 const MAX_SAME_MODEL_IDLE_TIMEOUT_RETRIES = 1;
+
+async function maybeRecordSessionExpiredRouteHealth(params: {
+  reason: FailoverReason | null;
+  message?: string;
+  statusCode?: number;
+  childSessionKey?: string;
+  spawnedBy?: string | null;
+  parentSessionKey?: string | null;
+  runId?: string;
+  requesterSessionKey?: string;
+  providerId?: string;
+  modelId?: string;
+  authProfileKey?: string;
+  credentialSource?: string;
+  credentialBucket?: string;
+  fallbackCredentialSelected?: boolean;
+}) {
+  if (params.reason !== "session_expired") {
+    return;
+  }
+  const providerId = normalizeOptionalString(params.providerId);
+  const modelId = normalizeOptionalString(params.modelId);
+  const authProfileKey = normalizeOptionalString(params.authProfileKey);
+  const credentialSource = normalizeOptionalString(params.credentialSource);
+  const credentialBucket = normalizeOptionalString(params.credentialBucket);
+  const requesterSessionKey = normalizeOptionalString(params.requesterSessionKey);
+  const recorded = await recordSessionExpiredRouteHealth({
+    message: params.message,
+    statusCode: params.statusCode,
+    childSessionKey: params.childSessionKey,
+    sessionLineage: {
+      spawnedBy: normalizeOptionalString(params.spawnedBy),
+      parentSessionKey: normalizeOptionalString(params.parentSessionKey),
+    },
+    runId: params.runId,
+    requesterSessionKey,
+    provider: {
+      ...(providerId ? { providerId } : {}),
+      ...(modelId ? { modelId } : {}),
+      ...(authProfileKey ? { authProfileKey } : {}),
+      ...(credentialSource ? { credentialSource } : {}),
+      ...(credentialBucket ? { credentialBucket } : {}),
+      ...(requesterSessionKey ? { requesterSessionKey } : {}),
+      ...(params.fallbackCredentialSelected === true ? { fallbackCredentialSelected: true } : {}),
+    },
+  });
+  if (!recorded.recorded && recorded.error) {
+    log.warn(
+      `[route-health] failed to record session_expired health event for run=${redactRunIdentifier(params.runId)} session=${redactRunIdentifier(params.childSessionKey)}: ${recorded.error}`,
+    );
+  }
+}
+
+function resolveRouteHealthCredentialContext(auth: ApiKeyInfo | null): {
+  credentialSource?: string;
+  credentialBucket?: string;
+} {
+  if (!auth) {
+    return {};
+  }
+  return {
+    credentialSource: auth.source,
+    credentialBucket: auth.mode,
+  };
+}
 
 function buildTraceToolSummary(params: {
   toolMetas: Array<{ toolName: string; meta?: string }>;
@@ -151,6 +222,24 @@ function buildTraceToolSummary(params: {
     calls: params.toolMetas.length,
     tools,
     failures: params.hadFailure ? 1 : 0,
+  };
+}
+
+function resolveRunQueuePriority(params: RunEmbeddedPiAgentParams): CommandQueuePriority {
+  const provenanceKind = params.inputProvenance?.kind;
+  if (provenanceKind === "inter_session" || provenanceKind === "internal_system") {
+    return "normal";
+  }
+  return "high";
+}
+
+function withDefaultRunQueuePriority(
+  priority: CommandQueuePriority,
+  opts?: Parameters<CommandQueueEnqueueFn>[1],
+): Parameters<CommandQueueEnqueueFn>[1] {
+  return {
+    ...opts,
+    priority: opts?.priority ?? priority,
   };
 }
 
@@ -210,10 +299,15 @@ export async function runEmbeddedPiAgent(
   }
   const sessionLane = resolveSessionLane(params.sessionKey?.trim() || params.sessionId);
   const globalLane = resolveGlobalLane(params.lane);
-  const enqueueGlobal =
+  const queuePriority = resolveRunQueuePriority(params);
+  const baseEnqueueGlobal =
     params.enqueue ?? ((task, opts) => enqueueCommandInLane(globalLane, task, opts));
-  const enqueueSession =
+  const baseEnqueueSession =
     params.enqueue ?? ((task, opts) => enqueueCommandInLane(sessionLane, task, opts));
+  const enqueueGlobal: CommandQueueEnqueueFn = (task, opts) =>
+    baseEnqueueGlobal(task, withDefaultRunQueuePriority(queuePriority, opts));
+  const enqueueSession: CommandQueueEnqueueFn = (task, opts) =>
+    baseEnqueueSession(task, withDefaultRunQueuePriority(queuePriority, opts));
   const channelHint = params.messageChannel ?? params.messageProvider;
   const resolvedToolResultFormat =
     params.toolResultFormat ??
@@ -1100,6 +1194,11 @@ export async function runEmbeddedPiAgent(
                   const truncResult = await truncateOversizedToolResultsInSession({
                     sessionFile: params.sessionFile,
                     contextWindowTokens: ctxInfo.tokens,
+                    maxCharsOverride: resolveLiveToolResultMaxChars({
+                      contextWindowTokens: ctxInfo.tokens,
+                      cfg: params.config,
+                      agentId: sessionAgentId,
+                    }),
                     sessionId: params.sessionId,
                     sessionKey: params.sessionKey,
                   });
@@ -1125,10 +1224,16 @@ export async function runEmbeddedPiAgent(
             }
             if (!toolResultTruncationAttempted) {
               const contextWindowTokens = ctxInfo.tokens;
+              const toolResultMaxChars = resolveLiveToolResultMaxChars({
+                contextWindowTokens,
+                cfg: params.config,
+                agentId: sessionAgentId,
+              });
               const hasOversized = attempt.messagesSnapshot
                 ? sessionLikelyHasOversizedToolResults({
                     messages: attempt.messagesSnapshot,
                     contextWindowTokens,
+                    maxCharsOverride: toolResultMaxChars,
                   })
                 : false;
 
@@ -1141,6 +1246,7 @@ export async function runEmbeddedPiAgent(
                 const truncResult = await truncateOversizedToolResultsInSession({
                   sessionFile: params.sessionFile,
                   contextWindowTokens,
+                  maxCharsOverride: toolResultMaxChars,
                   sessionId: params.sessionId,
                   sessionKey: params.sessionKey,
                 });
@@ -1297,6 +1403,22 @@ export async function runEmbeddedPiAgent(
               promptErrorDetails.reason ?? classifyFailoverReason(errorText, { provider });
             const promptProfileFailureReason =
               resolveAuthProfileFailureReason(promptFailoverReason);
+            const failedPromptProfileId = lastProfileId;
+            const failedPromptCredentialContext = resolveRouteHealthCredentialContext(apiKeyInfo);
+            await maybeRecordSessionExpiredRouteHealth({
+              reason: promptFailoverReason,
+              message: errorText,
+              statusCode: promptErrorDetails.status,
+              childSessionKey: resolvedSessionKey,
+              spawnedBy: params.spawnedBy,
+              parentSessionKey: params.parentSessionKey,
+              runId: params.runId,
+              requesterSessionKey: resolvedSessionKey,
+              providerId: activeErrorContext.provider,
+              modelId: activeErrorContext.model,
+              authProfileKey: failedPromptProfileId,
+              ...failedPromptCredentialContext,
+            });
             await maybeMarkAuthProfileFailure({
               profileId: lastProfileId,
               reason: promptProfileFailureReason,
@@ -1304,8 +1426,6 @@ export async function runEmbeddedPiAgent(
             });
             const promptFailoverFailure =
               promptFailoverReason !== null || isFailoverErrorMessage(errorText, { provider });
-            // Capture the failing profile before auth-profile rotation mutates `lastProfileId`.
-            const failedPromptProfileId = lastProfileId;
             const logPromptFailoverDecision = createFailoverDecisionLogger({
               stage: "prompt",
               runId: params.runId,
@@ -1448,6 +1568,20 @@ export async function runEmbeddedPiAgent(
           );
           // Capture the failing profile before auth-profile rotation mutates `lastProfileId`.
           const failedAssistantProfileId = lastProfileId;
+          const failedAssistantCredentialContext = resolveRouteHealthCredentialContext(apiKeyInfo);
+          await maybeRecordSessionExpiredRouteHealth({
+            reason: assistantFailoverReason,
+            message: assistantForFailover?.errorMessage,
+            childSessionKey: resolvedSessionKey,
+            spawnedBy: params.spawnedBy,
+            parentSessionKey: params.parentSessionKey,
+            runId: params.runId,
+            requesterSessionKey: resolvedSessionKey,
+            providerId: activeErrorContext.provider,
+            modelId: activeErrorContext.model,
+            authProfileKey: failedAssistantProfileId,
+            ...failedAssistantCredentialContext,
+          });
           const logAssistantFailoverDecision = createFailoverDecisionLogger({
             stage: "assistant",
             runId: params.runId,

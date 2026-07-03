@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  INTERNAL_RUNTIME_CONTEXT_BEGIN,
+  INTERNAL_RUNTIME_CONTEXT_END,
+} from "../../../../src/agents/internal-runtime-context.js";
+import {
   extractText,
   extractTextCached,
   extractThinking,
@@ -76,6 +80,31 @@ describe("extractTextCached", () => {
     };
     expect(extractText(message)).toBeNull();
     expect(extractTextCached(message)).toBeNull();
+  });
+
+  it("strips assistant internal runtime context blocks", () => {
+    const message = {
+      role: "assistant",
+      content: [
+        {
+          type: "text",
+          text: [
+            "Visible intro.",
+            INTERNAL_RUNTIME_CONTEXT_BEGIN,
+            "OpenClaw runtime context (internal):",
+            "This context is runtime-generated, not user-authored. Keep internal details private.",
+            "",
+            "[Internal task completion event]",
+            "secret orchestration data",
+            INTERNAL_RUNTIME_CONTEXT_END,
+            "Visible outro.",
+          ].join("\n"),
+        },
+      ],
+    };
+
+    expect(extractText(message)).toBe("Visible intro.\n\nVisible outro.");
+    expect(extractTextCached(message)).toBe("Visible intro.\n\nVisible outro.");
   });
 });
 

@@ -326,10 +326,19 @@ implemented in `src/gateway/server-methods/*.ts`.
   session.
 - `agent.wait` waits for a run to finish and returns the terminal snapshot when
   available.
+- `queue.health` returns the command-queue snapshot used by operator UIs. Each
+  lane includes raw scheduler counts, timings, `isOverloaded` when a lane is at
+  capacity with queued backlog, and a derived `health` value. It also includes
+  bounded `runtimeIssues` summaries for recent agent lifecycle failures such as
+  context overflow, so an idle scheduler can still show that an agent is
+  blocked. Runtime issues carry closed codes, session/lane ids, and a truncated
+  message summary; they do not include prompt text or tool payloads.
 
 #### Session control
 
-- `sessions.list` returns the current session index.
+- `sessions.list` returns the current session index. Subagent rows may include
+  additive display metadata such as `subagentLabel` and `subagentOrdinal` so UIs
+  can show stable friendly labels without changing session keys.
 - `sessions.subscribe` and `sessions.unsubscribe` toggle session change event
   subscriptions for the current WS client.
 - `sessions.messages.subscribe` and `sessions.messages.unsubscribe` toggle

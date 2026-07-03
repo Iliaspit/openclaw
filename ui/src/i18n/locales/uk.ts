@@ -635,6 +635,8 @@ export const uk: TranslationMap = {
     hideCronSessions: "Сховати сеанси Cron",
     showCronSessions: "Показати сеанси Cron",
     showCronSessionsHidden: "Показати сеанси Cron ({count} приховано)",
+    sessionSelectTopLevel: "Top-level agents",
+    sessionSelectOther: "Spawned and other sessions",
     onboardingDisabled: "Вимкнено під час налаштування",
   },
   languages: {

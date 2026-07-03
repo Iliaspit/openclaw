@@ -12,4 +12,6 @@ if [[ "${OPENCLAW_SKIP_DOCKER_BUILD:-}" == "1" ]]; then
 fi
 
 echo "==> Build live-test image: $LIVE_IMAGE_NAME (target=build)"
-run_logged live-build docker build --target build -t "$LIVE_IMAGE_NAME" -f "$ROOT_DIR/Dockerfile" "$ROOT_DIR"
+run_logged live-build docker build --target build \
+  --build-arg "OPENCLAW_INSTALL_BROWSER=${OPENCLAW_INSTALL_BROWSER:-}" \
+  -t "$LIVE_IMAGE_NAME" -f "$ROOT_DIR/Dockerfile" "$ROOT_DIR"

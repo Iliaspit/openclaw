@@ -84,6 +84,7 @@ export function createTranscriptUpdateBroadcastHandler(params: {
   broadcastToConnIds: GatewayBroadcastToConnIdsFn;
   sessionEventSubscribers: SessionEventSubscribers;
   sessionMessageSubscribers: SessionMessageSubscribers;
+  selectOrchestrationConnIds: (connIds?: ReadonlySet<string>) => ReadonlySet<string>;
 }) {
   return (update: SessionTranscriptUpdate): void => {
     const sessionKey = update.sessionKey ?? resolveSessionKeyForTranscriptFile(update.sessionFile);
@@ -125,12 +126,14 @@ export function createTranscriptUpdateBroadcastHandler(params: {
       { dropIfSlow: true },
     );
 
-    const sessionEventConnIds = params.sessionEventSubscribers.getAll();
-    if (sessionEventConnIds.size === 0) {
+    const orchestrationConnIds = params.selectOrchestrationConnIds(
+      params.sessionEventSubscribers.getAll(),
+    );
+    if (orchestrationConnIds.size === 0) {
       return;
     }
     params.broadcastToConnIds(
-      "sessions.changed",
+      "session.activity",
       {
         sessionKey,
         phase: "message",
@@ -139,7 +142,7 @@ export function createTranscriptUpdateBroadcastHandler(params: {
         ...(typeof messageSeq === "number" ? { messageSeq } : {}),
         ...sessionSnapshot,
       },
-      sessionEventConnIds,
+      orchestrationConnIds,
       { dropIfSlow: true },
     );
   };

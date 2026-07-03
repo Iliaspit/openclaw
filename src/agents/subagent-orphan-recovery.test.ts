@@ -188,6 +188,24 @@ describe("subagent-orphan-recovery", () => {
     expect(gateway.callGateway).toHaveBeenCalledOnce();
   });
 
+  it("skips fresh-reroute old generations without resuming orphaned sessions", async () => {
+    const result = await recoverOrphanedSubagentSessions({
+      getActiveRuns: () =>
+        createActiveRuns(
+          createTestRunRecord({
+            suppressAnnounceReason: "fresh-reroute",
+          }),
+        ),
+    });
+
+    expect(result.recovered).toBe(0);
+    expect(result.failed).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(sessions.loadSessionStore).not.toHaveBeenCalled();
+    expect(gateway.callGateway).not.toHaveBeenCalled();
+    expect(subagentRegistrySteerRuntime.replaceSubagentRunAfterSteer).not.toHaveBeenCalled();
+  });
+
   it("handles multiple orphaned sessions", async () => {
     vi.mocked(sessions.loadSessionStore).mockReturnValue({
       "agent:main:subagent:session-a": {

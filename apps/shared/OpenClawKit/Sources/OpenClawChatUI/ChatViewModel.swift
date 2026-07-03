@@ -12,6 +12,23 @@ import UIKit
 
 private let chatUILogger = Logger(subsystem: "ai.openclaw", category: "OpenClawChatUI")
 
+private struct OpenClawThinkingBuffer {
+    let sessionKey: String
+    let startedAt: Double
+    var updatedAt: Double
+    var text: String
+}
+
+private struct OpenClawObservedSessionActivity {
+    let sessionKey: String
+    var parentSessionKey: String?
+    var title: String
+    var subtitle: String?
+    var status: String
+    var isRunning: Bool
+    var updatedAt: Double
+}
+
 @MainActor
 @Observable
 public final class OpenClawChatViewModel {
@@ -35,6 +52,10 @@ public final class OpenClawChatViewModel {
     public private(set) var streamingAssistantText: String?
     public private(set) var pendingToolCalls: [OpenClawChatPendingToolCall] = []
     public private(set) var sessions: [OpenClawChatSessionEntry] = []
+    public private(set) var thinkingBlocks: [OpenClawChatThinkingBlock] = []
+    public private(set) var checklistEntries: [OpenClawChatChecklistEntry] = []
+    public private(set) var activeSubagents: [OpenClawChatSidebarAgent] = []
+    public private(set) var isThinkingActive = false
     private let transport: any OpenClawChatTransport
     private var sessionDefaults: OpenClawChatSessionsDefaults?
     private let prefersExplicitThinkingLevel: Bool
@@ -70,6 +91,12 @@ public final class OpenClawChatViewModel {
                 .sorted { ($0.startedAt ?? 0) < ($1.startedAt ?? 0) }
         }
     }
+    private var planEntryIDsBySessionKey: [String: [String]] = [:]
+    private var checklistEntriesById: [String: OpenClawChatChecklistEntry] = [:]
+    private var activeThinkingBySessionKey: [String: OpenClawThinkingBuffer] = [:]
+    private var completedThinkingBlocks: [OpenClawChatThinkingBlock] = []
+    private var observedSessionActivityByKey: [String: OpenClawObservedSessionActivity] = [:]
+    private var runSessionKeysByRunId: [String: String] = [:]
 
     private var lastHealthPollAt: Date?
 
@@ -135,6 +162,10 @@ public final class OpenClawChatViewModel {
 
     public func selectModel(_ selectionID: String) {
         Task { await self.performSelectModel(selectionID) }
+    }
+
+    public func newChat() {
+        Task { await self.performReset() }
     }
 
     public var sessionChoices: [OpenClawChatSessionEntry] {
@@ -214,6 +245,13 @@ public final class OpenClawChatViewModel {
         return !self.isSending && self.pendingRunCount == 0 && (!trimmed.isEmpty || !self.attachments.isEmpty)
     }
 
+    public var shouldShowRunActivity: Bool {
+        self.pendingRunCount > 0 ||
+            self.isThinkingActive ||
+            !self.thinkingBlocks.isEmpty ||
+            !self.checklistEntries.isEmpty
+    }
+
     // MARK: - Internals
 
     private func bootstrap() async {
@@ -221,8 +259,7 @@ public final class OpenClawChatViewModel {
         self.errorText = nil
         self.healthOK = false
         self.clearPendingRuns(reason: nil)
-        self.pendingToolCallsById = [:]
-        self.streamingAssistantText = nil
+        self.clearRunActivity()
         self.sessionId = nil
         defer { self.isLoading = false }
         do {
@@ -498,10 +535,9 @@ public final class OpenClawChatViewModel {
         let runId = UUID().uuidString
         let messageText = trimmed.isEmpty && !self.attachments.isEmpty ? "See attached." : trimmed
         let thinkingLevel = self.thinkingLevel
+        self.clearRunActivity()
         self.pendingRuns.insert(runId)
         self.armPendingRunTimeout(runId: runId)
-        self.pendingToolCallsById = [:]
-        self.streamingAssistantText = nil
 
         // Optimistically append user message to UI.
         var userContent: [OpenClawChatMessageContent] = [
@@ -593,6 +629,7 @@ public final class OpenClawChatViewModel {
             self.sessions = res.sessions
             self.sessionDefaults = res.defaults
             self.syncSelectedModel()
+            self.rebuildSidebarAgents()
         } catch {
             // Best-effort.
         }
@@ -907,7 +944,12 @@ public final class OpenClawChatViewModel {
                 totalTokens: current.totalTokens,
                 modelProvider: modelProvider,
                 model: modelID,
-                contextTokens: current.contextTokens)
+                contextTokens: current.contextTokens,
+                parentSessionKey: current.parentSessionKey,
+                childSessions: current.childSessions,
+                subagentRole: current.subagentRole,
+                label: current.label,
+                status: current.status)
         } else {
             let placeholder = self.placeholderSession(key: sessionKey)
             self.sessions.append(
@@ -930,7 +972,12 @@ public final class OpenClawChatViewModel {
                     totalTokens: placeholder.totalTokens,
                     modelProvider: modelProvider,
                     model: modelID,
-                    contextTokens: placeholder.contextTokens))
+                    contextTokens: placeholder.contextTokens,
+                    parentSessionKey: placeholder.parentSessionKey,
+                    childSessions: placeholder.childSessions,
+                    subagentRole: placeholder.subagentRole,
+                    label: placeholder.label,
+                    status: placeholder.status))
         }
         if syncSelection {
             self.syncSelectedModel()
@@ -949,6 +996,8 @@ public final class OpenClawChatViewModel {
             self.handleAgentEvent(agent)
         case .seqGap:
             self.errorText = nil
+            self.finalizeAllThinkingBlocks()
+            self.markVisibleChecklistEntriesTerminal(failed: false)
             self.clearPendingRuns(reason: nil)
             Task {
                 await self.refreshHistoryAfterRun()
@@ -958,24 +1007,28 @@ public final class OpenClawChatViewModel {
     }
 
     private func handleChatEvent(_ chat: OpenClawChatEventPayload) {
-        let isOurRun = chat.runId.flatMap { self.pendingRuns.contains($0) } ?? false
-
-        // Gateway may publish canonical session keys (for example "agent:main:main")
-        // even when this view currently uses an alias key (for example "main").
-        // Never drop events for our own pending run on key mismatch, or the UI can stay
-        // stuck at "thinking" until the user reopens and forces a history reload.
-        if let sessionKey = chat.sessionKey,
-           !Self.matchesCurrentSessionKey(incoming: sessionKey, current: self.sessionKey),
-           !isOurRun
+        if let runId = chat.runId,
+           let sessionKey = chat.sessionKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !sessionKey.isEmpty
         {
+            self.runSessionKeysByRunId[runId] = sessionKey
+        }
+
+        let isOurRun = chat.runId.flatMap { self.pendingRuns.contains($0) } ?? false
+        let eventSessionKey = self.resolveEventSessionKey(explicit: chat.sessionKey, runId: chat.runId)
+        let isRelevantTreeEvent = eventSessionKey.map { self.isSessionInCurrentTree($0) } ?? isOurRun
+        if !isRelevantTreeEvent && !isOurRun {
             return
         }
+
         if !isOurRun {
             // Keep multiple clients in sync: if another client finishes a run for our session, refresh history.
             switch chat.state {
             case "final", "aborted", "error":
-                self.streamingAssistantText = nil
-                self.pendingToolCallsById = [:]
+                self.finalizeStreamState(
+                    sessionKey: eventSessionKey,
+                    failed: chat.state == "error",
+                    subtitle: chat.errorMessage)
                 Task { await self.refreshHistoryAfterRun() }
             default:
                 break
@@ -993,52 +1046,94 @@ public final class OpenClawChatViewModel {
             } else if self.pendingRuns.count <= 1 {
                 self.clearPendingRuns(reason: nil)
             }
-            self.pendingToolCallsById = [:]
-            self.streamingAssistantText = nil
+            self.finalizeStreamState(
+                sessionKey: eventSessionKey,
+                failed: chat.state == "error",
+                subtitle: chat.errorMessage)
             Task { await self.refreshHistoryAfterRun() }
         default:
             break
         }
     }
 
-    private static func matchesCurrentSessionKey(incoming: String, current: String) -> Bool {
-        let incomingNormalized = incoming.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let currentNormalized = current.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if incomingNormalized == currentNormalized {
-            return true
-        }
-        // Common alias pair in operator clients: UI uses "main" while gateway emits canonical.
-        if (incomingNormalized == "agent:main:main" && currentNormalized == "main") ||
-            (incomingNormalized == "main" && currentNormalized == "agent:main:main")
-        {
-            return true
-        }
-        return false
-    }
-
     private func handleAgentEvent(_ evt: OpenClawAgentEventPayload) {
-        if let sessionId, evt.runId != sessionId {
+        let eventSessionKey = self.resolveEventSessionKey(explicit: evt.sessionKey, runId: evt.runId)
+        if let eventSessionKey {
+            self.runSessionKeysByRunId[evt.runId] = eventSessionKey
+        }
+
+        let isRelevantTreeEvent = eventSessionKey.map { self.isSessionInCurrentTree($0) } ??
+            self.pendingRuns.contains(evt.runId) ||
+            (self.sessionId == evt.runId)
+        guard isRelevantTreeEvent else {
             return
         }
+
+        let sessionKey = eventSessionKey ?? self.sessionKey
+        let isPrimarySessionEvent = self.isPrimarySessionKey(sessionKey)
+        let updatedAt = evt.ts.map(Double.init) ?? Date().timeIntervalSince1970 * 1000
 
         switch evt.stream {
         case "assistant":
             if let text = evt.data["text"]?.value as? String {
-                self.streamingAssistantText = text
+                self.finalizeThinkingBlock(sessionKey: sessionKey)
+                if isPrimarySessionEvent {
+                    self.streamingAssistantText = text
+                } else {
+                    self.updateObservedSessionActivity(
+                        sessionKey: sessionKey,
+                        subtitle: Self.collapsedPreview(from: text),
+                        status: "Responding",
+                        isRunning: true,
+                        updatedAt: updatedAt)
+                }
             }
+        case "thinking":
+            self.updateThinkingBlock(
+                sessionKey: sessionKey,
+                fullText: evt.data["text"]?.value as? String,
+                delta: evt.data["delta"]?.value as? String,
+                updatedAt: updatedAt)
+        case "lifecycle":
+            self.handleLifecycleEvent(evt, sessionKey: sessionKey, updatedAt: updatedAt)
+        case "item":
+            self.handleItemEvent(evt, sessionKey: sessionKey, updatedAt: updatedAt)
+        case "plan":
+            self.handlePlanEvent(evt, sessionKey: sessionKey, updatedAt: updatedAt)
+        case "approval":
+            self.handleApprovalEvent(evt, sessionKey: sessionKey, updatedAt: updatedAt)
+        case "command_output":
+            self.handleCommandOutputEvent(evt, sessionKey: sessionKey, updatedAt: updatedAt)
+        case "patch":
+            self.handlePatchEvent(evt, sessionKey: sessionKey, updatedAt: updatedAt)
+        case "error":
+            self.finalizeStreamState(
+                sessionKey: sessionKey,
+                failed: true,
+                subtitle: evt.data["reason"]?.value as? String)
+            self.errorText = evt.data["reason"]?.value as? String
         case "tool":
             guard let phase = evt.data["phase"]?.value as? String else { return }
             guard let name = evt.data["name"]?.value as? String else { return }
             guard let toolCallId = evt.data["toolCallId"]?.value as? String else { return }
+            if phase == "start" || phase == "update" {
+                self.finalizeThinkingBlock(sessionKey: sessionKey)
+                self.updateObservedSessionActivity(
+                    sessionKey: sessionKey,
+                    subtitle: name.replacingOccurrences(of: "_", with: " "),
+                    status: "Working",
+                    isRunning: true,
+                    updatedAt: updatedAt)
+            }
             if phase == "start" {
                 let args = evt.data["args"]
                 self.pendingToolCallsById[toolCallId] = OpenClawChatPendingToolCall(
                     toolCallId: toolCallId,
                     name: name,
                     args: args,
-                    startedAt: evt.ts.map(Double.init) ?? Date().timeIntervalSince1970 * 1000,
+                    startedAt: updatedAt,
                     isError: nil)
-            } else if phase == "result" {
+            } else if phase == "result" || phase == "error" {
                 self.pendingToolCallsById[toolCallId] = nil
             }
         default:
@@ -1058,8 +1153,801 @@ public final class OpenClawChatViewModel {
             {
                 self.thinkingLevel = level
             }
+            await self.fetchSessions(limit: 50)
         } catch {
             chatUILogger.error("refresh history failed \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func clearRunActivity() {
+        self.pendingToolCallsById.removeAll()
+        self.streamingAssistantText = nil
+        self.planEntryIDsBySessionKey.removeAll()
+        self.checklistEntriesById.removeAll()
+        self.activeThinkingBySessionKey.removeAll()
+        self.completedThinkingBlocks.removeAll()
+        self.observedSessionActivityByKey.removeAll()
+        self.runSessionKeysByRunId.removeAll()
+        self.thinkingBlocks = []
+        self.checklistEntries = []
+        self.activeSubagents = []
+        self.isThinkingActive = false
+    }
+
+    private func resolveEventSessionKey(explicit: String?, runId: String?) -> String? {
+        if let explicit = Self.normalizedSessionKey(explicit) {
+            return explicit
+        }
+        if let runId, let mapped = Self.normalizedSessionKey(self.runSessionKeysByRunId[runId]) {
+            return mapped
+        }
+        if let runId, self.pendingRuns.contains(runId) {
+            return Self.normalizedSessionKey(self.sessionKey)
+        }
+        if let sessionId, let runId, sessionId == runId {
+            return Self.normalizedSessionKey(self.sessionKey)
+        }
+        return nil
+    }
+
+    private func isPrimarySessionKey(_ sessionKey: String?) -> Bool {
+        let incoming = Self.sessionKeyAliases(sessionKey)
+        let current = Self.sessionKeyAliases(self.sessionKey)
+        return !incoming.isEmpty && !current.isEmpty && !incoming.isDisjoint(with: current)
+    }
+
+    private func currentSessionTreeKeys() -> Set<String> {
+        var keys = Self.sessionKeyAliases(self.sessionKey)
+        var changed = true
+        while changed {
+            changed = false
+            for session in self.sessions {
+                let sessionAliases = Self.sessionKeyAliases(session.key)
+                guard !sessionAliases.isEmpty else { continue }
+
+                let parentAliases = Self.sessionKeyAliases(session.parentSessionKey)
+                if !parentAliases.isEmpty,
+                   !keys.isDisjoint(with: parentAliases),
+                   keys.isDisjoint(with: sessionAliases)
+                {
+                    keys.formUnion(sessionAliases)
+                    changed = true
+                }
+
+                if !keys.isDisjoint(with: sessionAliases) {
+                    for childSessionKey in session.childSessions ?? [] {
+                        let childAliases = Self.sessionKeyAliases(childSessionKey)
+                        if !childAliases.isEmpty, keys.isDisjoint(with: childAliases) {
+                            keys.formUnion(childAliases)
+                            changed = true
+                        }
+                    }
+                }
+            }
+
+            for activity in self.observedSessionActivityByKey.values {
+                let parentAliases = Self.sessionKeyAliases(activity.parentSessionKey)
+                let sessionAliases = Self.sessionKeyAliases(activity.sessionKey)
+                if !parentAliases.isEmpty,
+                   !sessionAliases.isEmpty,
+                   !keys.isDisjoint(with: parentAliases),
+                   keys.isDisjoint(with: sessionAliases)
+                {
+                    keys.formUnion(sessionAliases)
+                    changed = true
+                }
+            }
+        }
+        return keys
+    }
+
+    private func isSessionInCurrentTree(_ sessionKey: String?) -> Bool {
+        let aliases = Self.sessionKeyAliases(sessionKey)
+        guard !aliases.isEmpty else { return false }
+        if !self.currentSessionTreeKeys().isDisjoint(with: aliases) {
+            return true
+        }
+        if self.pendingRunCount > 0 {
+            return true
+        }
+        return false
+    }
+
+    private func updateThinkingBlock(
+        sessionKey: String,
+        fullText: String?,
+        delta: String?,
+        updatedAt: Double)
+    {
+        let normalizedSessionKey = Self.normalizedSessionKey(sessionKey) ?? self.sessionKey
+        let previous = self.activeThinkingBySessionKey[normalizedSessionKey]
+        let nextText: String
+        if let fullText, !fullText.isEmpty {
+            nextText = fullText
+        } else if let delta, !delta.isEmpty {
+            nextText = (previous?.text ?? "") + delta
+        } else {
+            nextText = previous?.text ?? ""
+        }
+        guard !nextText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        self.activeThinkingBySessionKey[normalizedSessionKey] = OpenClawThinkingBuffer(
+            sessionKey: normalizedSessionKey,
+            startedAt: previous?.startedAt ?? updatedAt,
+            updatedAt: updatedAt,
+            text: nextText)
+        self.updateObservedSessionActivity(
+            sessionKey: normalizedSessionKey,
+            subtitle: Self.collapsedPreview(from: nextText),
+            status: "Thinking",
+            isRunning: true,
+            updatedAt: updatedAt)
+        self.rebuildThinkingBlocks()
+        self.rebuildSidebarAgents()
+    }
+
+    private func finalizeThinkingBlock(sessionKey: String?) {
+        guard let normalizedSessionKey = Self.normalizedSessionKey(sessionKey),
+              let buffer = self.activeThinkingBySessionKey.removeValue(forKey: normalizedSessionKey)
+        else {
+            self.isThinkingActive = !self.activeThinkingBySessionKey.isEmpty
+            return
+        }
+
+        let trimmedText = buffer.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else {
+            self.rebuildThinkingBlocks()
+            return
+        }
+
+        let block = OpenClawChatThinkingBlock(
+            id: "thinking-\(normalizedSessionKey)-\(Int(buffer.startedAt))-\(Int(buffer.updatedAt))",
+            sessionKey: normalizedSessionKey,
+            title: self.thinkingTitle(for: normalizedSessionKey),
+            summary: Self.collapsedPreview(from: trimmedText),
+            text: trimmedText,
+            isStreaming: false,
+            updatedAt: buffer.updatedAt)
+        self.completedThinkingBlocks.removeAll { $0.id == block.id }
+        self.completedThinkingBlocks.append(block)
+        self.completedThinkingBlocks.sort { lhs, rhs in
+            if lhs.updatedAt == rhs.updatedAt {
+                return lhs.id > rhs.id
+            }
+            return lhs.updatedAt > rhs.updatedAt
+        }
+        self.rebuildThinkingBlocks()
+    }
+
+    private func finalizeAllThinkingBlocks() {
+        let keys = Array(self.activeThinkingBySessionKey.keys)
+        for sessionKey in keys {
+            self.finalizeThinkingBlock(sessionKey: sessionKey)
+        }
+        self.rebuildThinkingBlocks()
+    }
+
+    private func rebuildThinkingBlocks() {
+        let activeBlocks = self.activeThinkingBySessionKey.values
+            .filter { self.isSessionInCurrentTree($0.sessionKey) }
+            .map { buffer in
+                OpenClawChatThinkingBlock(
+                    id: "thinking-\(buffer.sessionKey)-active",
+                    sessionKey: buffer.sessionKey,
+                    title: self.thinkingTitle(for: buffer.sessionKey),
+                    summary: Self.collapsedPreview(from: buffer.text),
+                    text: buffer.text,
+                    isStreaming: true,
+                    updatedAt: buffer.updatedAt)
+            }
+        let completedBlocks = self.completedThinkingBlocks.filter { self.isSessionInCurrentTree($0.sessionKey) }
+        self.thinkingBlocks = (activeBlocks + completedBlocks).sorted { lhs, rhs in
+            if lhs.updatedAt == rhs.updatedAt {
+                return lhs.id > rhs.id
+            }
+            if lhs.isStreaming != rhs.isStreaming {
+                return lhs.isStreaming && !rhs.isStreaming
+            }
+            return lhs.updatedAt > rhs.updatedAt
+        }
+        self.isThinkingActive = !activeBlocks.isEmpty
+    }
+
+    private func handleLifecycleEvent(
+        _ evt: OpenClawAgentEventPayload,
+        sessionKey: String,
+        updatedAt: Double)
+    {
+        let phase = evt.data["phase"]?.value as? String
+        let livenessState = evt.data["livenessState"]?.value as? String
+        let error = (evt.data["error"]?.value as? String) ?? (evt.data["reasonSummary"]?.value as? String)
+        let parentSessionKey = evt.data["parentSessionKey"]?.value as? String
+
+        switch phase {
+        case "fallback":
+            self.updateObservedSessionActivity(
+                sessionKey: sessionKey,
+                parentSessionKey: parentSessionKey,
+                subtitle: error,
+                status: "Fallback",
+                isRunning: true,
+                updatedAt: updatedAt)
+        case "fallback_cleared":
+            self.updateObservedSessionActivity(
+                sessionKey: sessionKey,
+                parentSessionKey: parentSessionKey,
+                subtitle: nil,
+                status: "Running",
+                isRunning: true,
+                updatedAt: updatedAt)
+        case "error":
+            self.finalizeStreamState(sessionKey: sessionKey, failed: true, subtitle: error)
+            if self.isPrimarySessionKey(sessionKey) {
+                self.errorText = error
+            }
+        case "end":
+            let failed = livenessState == "blocked" || livenessState == "abandoned"
+            let status = failed ? "Blocked" : (livenessState == "paused" ? "Paused" : "Done")
+            self.finalizeStreamState(sessionKey: sessionKey, failed: failed, subtitle: error)
+            self.updateObservedSessionActivity(
+                sessionKey: sessionKey,
+                parentSessionKey: parentSessionKey,
+                subtitle: error,
+                status: status,
+                isRunning: false,
+                updatedAt: updatedAt)
+        default:
+            self.updateObservedSessionActivity(
+                sessionKey: sessionKey,
+                parentSessionKey: parentSessionKey,
+                subtitle: error,
+                status: livenessState == "paused" ? "Paused" : "Running",
+                isRunning: livenessState != "paused",
+                updatedAt: updatedAt)
+        }
+    }
+
+    private func handlePlanEvent(
+        _ evt: OpenClawAgentEventPayload,
+        sessionKey: String,
+        updatedAt: Double)
+    {
+        guard let title = evt.data["title"]?.value as? String else { return }
+        let explanation = evt.data["explanation"]?.value as? String
+        let normalizedSessionKey = Self.normalizedSessionKey(sessionKey) ?? self.sessionKey
+        let steps = Self.stringArrayValue(evt.data["steps"])
+        let previousEntryIDs = self.planEntryIDsBySessionKey[normalizedSessionKey] ?? []
+        var existingStateByTitle: [String: OpenClawChatChecklistEntry.State] = [:]
+        for entryID in previousEntryIDs {
+            if let entry = self.checklistEntriesById[entryID] {
+                existingStateByTitle[entry.title] = entry.state
+            }
+        }
+
+        var nextEntryIDs: [String] = []
+        if steps.isEmpty {
+            let entryID = "plan-\(normalizedSessionKey)-0"
+            self.upsertChecklistEntry(
+                id: entryID,
+                sessionKey: normalizedSessionKey,
+                title: title,
+                detail: explanation,
+                state: .running,
+                updatedAt: updatedAt)
+            nextEntryIDs = [entryID]
+        } else {
+            for (index, step) in steps.enumerated() {
+                let entryID = "plan-\(normalizedSessionKey)-\(index)"
+                let state = existingStateByTitle[step] ?? (index == 0 ? .running : .pending)
+                self.upsertChecklistEntry(
+                    id: entryID,
+                    sessionKey: normalizedSessionKey,
+                    title: step,
+                    detail: index == 0 ? explanation : nil,
+                    state: state,
+                    updatedAt: updatedAt)
+                nextEntryIDs.append(entryID)
+            }
+        }
+
+        for entryID in previousEntryIDs where !nextEntryIDs.contains(entryID) {
+            self.checklistEntriesById.removeValue(forKey: entryID)
+        }
+        self.planEntryIDsBySessionKey[normalizedSessionKey] = nextEntryIDs
+        self.updateObservedSessionActivity(
+            sessionKey: normalizedSessionKey,
+            subtitle: explanation ?? steps.first ?? title,
+            status: "Planning",
+            isRunning: true,
+            updatedAt: updatedAt)
+        self.rebuildChecklistEntries()
+        self.rebuildSidebarAgents()
+    }
+
+    private func handleItemEvent(
+        _ evt: OpenClawAgentEventPayload,
+        sessionKey: String,
+        updatedAt: Double)
+    {
+        guard let itemID = evt.data["itemId"]?.value as? String,
+              let title = evt.data["title"]?.value as? String,
+              let status = evt.data["status"]?.value as? String
+        else {
+            return
+        }
+        let phase = evt.data["phase"]?.value as? String
+        let detail =
+            (evt.data["progressText"]?.value as? String) ??
+            (evt.data["summary"]?.value as? String) ??
+            (evt.data["meta"]?.value as? String) ??
+            (evt.data["error"]?.value as? String)
+        let state = Self.checklistState(fromItemStatus: status)
+        let entryID = "item-\(Self.normalizedSessionKey(sessionKey) ?? self.sessionKey)-\(itemID)"
+        self.upsertChecklistEntry(
+            id: entryID,
+            sessionKey: sessionKey,
+            title: title,
+            detail: detail,
+            state: state,
+            updatedAt: updatedAt)
+        self.updateObservedSessionActivity(
+            sessionKey: sessionKey,
+            subtitle: detail ?? title,
+            status: state == .completed ? "Done" : "Working",
+            isRunning: phase != "end" && state != .completed && state != .failed && state != .blocked,
+            updatedAt: updatedAt)
+        if state == .completed || state == .failed || state == .blocked {
+            self.finalizeThinkingBlock(sessionKey: sessionKey)
+        }
+        self.rebuildChecklistEntries()
+        self.rebuildSidebarAgents()
+    }
+
+    private func handleApprovalEvent(
+        _ evt: OpenClawAgentEventPayload,
+        sessionKey: String,
+        updatedAt: Double)
+    {
+        guard let title = evt.data["title"]?.value as? String,
+              let status = evt.data["status"]?.value as? String
+        else {
+            return
+        }
+        let approvalID =
+            (evt.data["approvalId"]?.value as? String) ??
+            (evt.data["itemId"]?.value as? String) ??
+            title
+        let detail =
+            (evt.data["message"]?.value as? String) ??
+            (evt.data["reason"]?.value as? String) ??
+            (evt.data["command"]?.value as? String) ??
+            (evt.data["host"]?.value as? String)
+        let state = Self.checklistState(fromApprovalStatus: status)
+        self.upsertChecklistEntry(
+            id: "approval-\(Self.normalizedSessionKey(sessionKey) ?? self.sessionKey)-\(approvalID)",
+            sessionKey: sessionKey,
+            title: title,
+            detail: detail,
+            state: state,
+            updatedAt: updatedAt)
+        self.updateObservedSessionActivity(
+            sessionKey: sessionKey,
+            subtitle: detail ?? title,
+            status: state == .completed ? "Approved" : "Awaiting approval",
+            isRunning: state == .pending,
+            updatedAt: updatedAt)
+        self.rebuildChecklistEntries()
+        self.rebuildSidebarAgents()
+    }
+
+    private func handleCommandOutputEvent(
+        _ evt: OpenClawAgentEventPayload,
+        sessionKey: String,
+        updatedAt: Double)
+    {
+        guard let itemID = evt.data["itemId"]?.value as? String,
+              let title = evt.data["title"]?.value as? String,
+              let phase = evt.data["phase"]?.value as? String
+        else {
+            return
+        }
+        let exitCode = Self.intValue(evt.data["exitCode"])
+        let outputPreview = (evt.data["output"]?.value as? String).flatMap { Self.collapsedPreview(from: $0) }
+        let state = Self.checklistState(
+            fromCommandStatus: evt.data["status"]?.value as? String,
+            phase: phase,
+            exitCode: exitCode)
+        self.upsertChecklistEntry(
+            id: "item-\(Self.normalizedSessionKey(sessionKey) ?? self.sessionKey)-\(itemID)",
+            sessionKey: sessionKey,
+            title: title,
+            detail: outputPreview,
+            state: state,
+            updatedAt: updatedAt)
+        self.updateObservedSessionActivity(
+            sessionKey: sessionKey,
+            subtitle: outputPreview ?? title,
+            status: state == .completed ? "Done" : "Running command",
+            isRunning: state == .running,
+            updatedAt: updatedAt)
+        self.rebuildChecklistEntries()
+        self.rebuildSidebarAgents()
+    }
+
+    private func handlePatchEvent(
+        _ evt: OpenClawAgentEventPayload,
+        sessionKey: String,
+        updatedAt: Double)
+    {
+        guard let itemID = evt.data["itemId"]?.value as? String,
+              let title = evt.data["title"]?.value as? String
+        else {
+            return
+        }
+        let detail = evt.data["summary"]?.value as? String
+        self.upsertChecklistEntry(
+            id: "item-\(Self.normalizedSessionKey(sessionKey) ?? self.sessionKey)-\(itemID)",
+            sessionKey: sessionKey,
+            title: title,
+            detail: detail,
+            state: .completed,
+            updatedAt: updatedAt)
+        self.updateObservedSessionActivity(
+            sessionKey: sessionKey,
+            subtitle: detail ?? title,
+            status: "Patched",
+            isRunning: false,
+            updatedAt: updatedAt)
+        self.rebuildChecklistEntries()
+        self.rebuildSidebarAgents()
+    }
+
+    private func finalizeStreamState(sessionKey: String?, failed: Bool, subtitle: String?) {
+        let updatedAt = Date().timeIntervalSince1970 * 1000
+        var targetSessionKeys = Set<String>()
+        if let sessionKey = Self.normalizedSessionKey(sessionKey) {
+            targetSessionKeys.insert(sessionKey)
+        } else {
+            targetSessionKeys.formUnion(self.activeThinkingBySessionKey.keys)
+        }
+        if targetSessionKeys.isEmpty, let currentSessionKey = Self.normalizedSessionKey(self.sessionKey) {
+            targetSessionKeys.insert(currentSessionKey)
+        }
+
+        for targetSessionKey in targetSessionKeys {
+            self.finalizeThinkingBlock(sessionKey: targetSessionKey)
+            self.markChecklistEntriesTerminal(for: targetSessionKey, failed: failed)
+            self.updateObservedSessionActivity(
+                sessionKey: targetSessionKey,
+                subtitle: subtitle,
+                status: failed ? "Failed" : "Done",
+                isRunning: false,
+                updatedAt: updatedAt)
+        }
+
+        if sessionKey == nil || self.isPrimarySessionKey(sessionKey) {
+            self.pendingToolCallsById.removeAll()
+            self.streamingAssistantText = nil
+        }
+        self.rebuildChecklistEntries()
+        self.rebuildSidebarAgents()
+    }
+
+    private func markChecklistEntriesTerminal(for sessionKey: String, failed: Bool) {
+        let aliases = Self.sessionKeyAliases(sessionKey)
+        guard !aliases.isEmpty else { return }
+        let updatedAt = Date().timeIntervalSince1970 * 1000
+        for (entryID, entry) in self.checklistEntriesById {
+            let entryAliases = Self.sessionKeyAliases(entry.sessionKey)
+            guard !entryAliases.isEmpty, !aliases.isDisjoint(with: entryAliases) else { continue }
+            switch entry.state {
+            case .pending, .running:
+                self.checklistEntriesById[entryID] = OpenClawChatChecklistEntry(
+                    id: entry.id,
+                    sessionKey: entry.sessionKey,
+                    sessionTitle: entry.sessionTitle,
+                    title: entry.title,
+                    detail: entry.detail,
+                    state: failed ? .failed : .completed,
+                    updatedAt: updatedAt)
+            case .completed, .blocked, .failed:
+                continue
+            }
+        }
+    }
+
+    private func markVisibleChecklistEntriesTerminal(failed: Bool) {
+        let treeAliases = self.currentSessionTreeKeys()
+        let updatedAt = Date().timeIntervalSince1970 * 1000
+        for (entryID, entry) in self.checklistEntriesById {
+            let entryAliases = Self.sessionKeyAliases(entry.sessionKey)
+            guard !entryAliases.isEmpty, !treeAliases.isDisjoint(with: entryAliases) else { continue }
+            switch entry.state {
+            case .pending, .running:
+                self.checklistEntriesById[entryID] = OpenClawChatChecklistEntry(
+                    id: entry.id,
+                    sessionKey: entry.sessionKey,
+                    sessionTitle: entry.sessionTitle,
+                    title: entry.title,
+                    detail: entry.detail,
+                    state: failed ? .failed : .completed,
+                    updatedAt: updatedAt)
+            case .completed, .blocked, .failed:
+                continue
+            }
+        }
+        self.rebuildChecklistEntries()
+    }
+
+    private func rebuildChecklistEntries() {
+        self.checklistEntries = self.checklistEntriesById.values
+            .filter { self.isSessionInCurrentTree($0.sessionKey) }
+            .sorted { lhs, rhs in
+                let lhsRank = Self.checklistSortRank(lhs.state)
+                let rhsRank = Self.checklistSortRank(rhs.state)
+                if lhsRank == rhsRank {
+                    if lhs.updatedAt == rhs.updatedAt {
+                        return lhs.id > rhs.id
+                    }
+                    return lhs.updatedAt > rhs.updatedAt
+                }
+                return lhsRank < rhsRank
+            }
+    }
+
+    private func rebuildSidebarAgents() {
+        var bySessionKey: [String: OpenClawChatSidebarAgent] = [:]
+
+        for session in self.sessions where !self.isPrimarySessionKey(session.key) && self.isSessionInCurrentTree(session.key) {
+            let normalizedSessionKey = Self.normalizedSessionKey(session.key) ?? session.key
+            let observed = self.observedSessionActivityByKey[normalizedSessionKey]
+            let title = session.label ?? session.displayName ?? session.subject ?? observed?.title ?? Self.humanizedSessionKey(normalizedSessionKey)
+            let subtitle = observed?.subtitle ?? session.subagentRole ?? session.model
+            let status = observed?.status ?? session.status ?? "Idle"
+            let updatedAt = observed?.updatedAt ?? session.updatedAt ?? 0
+            let isRunning = observed?.isRunning ?? (session.status == "running")
+            bySessionKey[normalizedSessionKey] = OpenClawChatSidebarAgent(
+                sessionKey: normalizedSessionKey,
+                title: title,
+                subtitle: subtitle,
+                status: status,
+                isRunning: isRunning,
+                updatedAt: updatedAt)
+        }
+
+        for activity in self.observedSessionActivityByKey.values
+            where !self.isPrimarySessionKey(activity.sessionKey) && self.isSessionInCurrentTree(activity.sessionKey)
+        {
+            bySessionKey[activity.sessionKey] = OpenClawChatSidebarAgent(
+                sessionKey: activity.sessionKey,
+                title: activity.title,
+                subtitle: activity.subtitle,
+                status: activity.status,
+                isRunning: activity.isRunning,
+                updatedAt: activity.updatedAt)
+        }
+
+        self.activeSubagents = bySessionKey.values.sorted { lhs, rhs in
+            if lhs.isRunning != rhs.isRunning {
+                return lhs.isRunning && !rhs.isRunning
+            }
+            if lhs.updatedAt == rhs.updatedAt {
+                return lhs.title < rhs.title
+            }
+            return lhs.updatedAt > rhs.updatedAt
+        }
+    }
+
+    private func updateObservedSessionActivity(
+        sessionKey: String,
+        parentSessionKey: String? = nil,
+        title: String? = nil,
+        subtitle: String? = nil,
+        status: String? = nil,
+        isRunning: Bool? = nil,
+        updatedAt: Double)
+    {
+        let normalizedSessionKey = Self.normalizedSessionKey(sessionKey) ?? self.sessionKey
+        let current = self.observedSessionActivityByKey[normalizedSessionKey]
+        self.observedSessionActivityByKey[normalizedSessionKey] = OpenClawObservedSessionActivity(
+            sessionKey: normalizedSessionKey,
+            parentSessionKey: Self.normalizedSessionKey(parentSessionKey) ?? current?.parentSessionKey ?? self.sessionParentSessionKey(for: normalizedSessionKey),
+            title: title ?? current?.title ?? self.sessionSidebarTitle(normalizedSessionKey),
+            subtitle: subtitle ?? current?.subtitle,
+            status: status ?? current?.status ?? "Running",
+            isRunning: isRunning ?? current?.isRunning ?? true,
+            updatedAt: updatedAt)
+    }
+
+    private func sessionParentSessionKey(for sessionKey: String) -> String? {
+        guard let session = self.sessions.first(where: {
+            !Self.sessionKeyAliases($0.key).isDisjoint(with: Self.sessionKeyAliases(sessionKey))
+        }) else {
+            return nil
+        }
+        return Self.normalizedSessionKey(session.parentSessionKey)
+    }
+
+    private func thinkingTitle(for sessionKey: String) -> String {
+        if self.isPrimarySessionKey(sessionKey) {
+            return "Thinking"
+        }
+        return "\(self.sessionSidebarTitle(sessionKey)) Thinking"
+    }
+
+    private func sessionSidebarTitle(_ sessionKey: String) -> String {
+        if let session = self.sessions.first(where: {
+            !Self.sessionKeyAliases($0.key).isDisjoint(with: Self.sessionKeyAliases(sessionKey))
+        }) {
+            if let label = Self.normalizedSessionKey(session.label) {
+                return label
+            }
+            if let displayName = Self.normalizedSessionKey(session.displayName) {
+                return displayName
+            }
+            if let subject = Self.normalizedSessionKey(session.subject) {
+                return subject
+            }
+            if let role = Self.normalizedSessionKey(session.subagentRole) {
+                return role.replacingOccurrences(of: "_", with: " ").capitalized
+            }
+        }
+        if let observed = self.observedSessionActivityByKey[Self.normalizedSessionKey(sessionKey) ?? sessionKey] {
+            return observed.title
+        }
+        return Self.humanizedSessionKey(sessionKey)
+    }
+
+    private func upsertChecklistEntry(
+        id: String,
+        sessionKey: String,
+        title: String,
+        detail: String?,
+        state: OpenClawChatChecklistEntry.State,
+        updatedAt: Double)
+    {
+        let normalizedSessionKey = Self.normalizedSessionKey(sessionKey) ?? self.sessionKey
+        self.checklistEntriesById[id] = OpenClawChatChecklistEntry(
+            id: id,
+            sessionKey: normalizedSessionKey,
+            sessionTitle: self.isPrimarySessionKey(normalizedSessionKey) ? nil : self.sessionSidebarTitle(normalizedSessionKey),
+            title: title,
+            detail: detail,
+            state: state,
+            updatedAt: updatedAt)
+    }
+
+    private static func normalizedSessionKey(_ raw: String?) -> String? {
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    private static func sessionKeyAliases(_ raw: String?) -> Set<String> {
+        guard let normalized = Self.normalizedSessionKey(raw) else { return [] }
+        if normalized == "main" {
+            return [normalized, "agent:main:main"]
+        }
+        if normalized == "agent:main:main" {
+            return [normalized, "main"]
+        }
+        return [normalized]
+    }
+
+    private static func humanizedSessionKey(_ sessionKey: String) -> String {
+        guard let normalized = Self.normalizedSessionKey(sessionKey) else { return "Agent" }
+        if normalized == "main" || normalized == "agent:main:main" {
+            return "Planner"
+        }
+        let rawComponent = normalized.split(separator: ":").last.map(String.init) ?? normalized
+        let spaced = rawComponent
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+        let words = spaced.split(separator: " ").map { word in
+            word.prefix(1).uppercased() + word.dropFirst().lowercased()
+        }
+        return words.isEmpty ? "Agent" : words.joined(separator: " ")
+    }
+
+    private static func stringArrayValue(_ payload: AnyCodable?) -> [String] {
+        guard let payload else { return [] }
+        return (try? ChatPayloadDecoding.decode(payload, as: [String].self)) ?? []
+    }
+
+    private static func intValue(_ payload: AnyCodable?) -> Int? {
+        guard let payload else { return nil }
+        if let value = payload.value as? Int {
+            return value
+        }
+        if let value = payload.value as? Double {
+            return Int(value)
+        }
+        return try? ChatPayloadDecoding.decode(payload, as: Int.self)
+    }
+
+    private static func collapsedPreview(
+        from text: String,
+        maxLines: Int = 4,
+        maxCharacters: Int = 180)
+        -> String
+    {
+        let normalized = text
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .prefix(maxLines)
+            .joined(separator: " ")
+        if normalized.count <= maxCharacters {
+            return normalized
+        }
+        return String(normalized.prefix(maxCharacters)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
+    }
+
+    private static func checklistState(fromItemStatus status: String) -> OpenClawChatChecklistEntry.State {
+        switch status {
+        case "completed":
+            return .completed
+        case "failed":
+            return .failed
+        case "blocked":
+            return .blocked
+        default:
+            return .running
+        }
+    }
+
+    private static func checklistState(fromApprovalStatus status: String) -> OpenClawChatChecklistEntry.State {
+        switch status {
+        case "approved":
+            return .completed
+        case "denied", "unavailable":
+            return .blocked
+        case "failed":
+            return .failed
+        default:
+            return .pending
+        }
+    }
+
+    private static func checklistState(
+        fromCommandStatus status: String?,
+        phase: String,
+        exitCode: Int?)
+        -> OpenClawChatChecklistEntry.State
+    {
+        if phase == "end" {
+            if let exitCode, exitCode != 0 {
+                return .failed
+            }
+            if status == "failed" {
+                return .failed
+            }
+            if status == "blocked" {
+                return .blocked
+            }
+            return .completed
+        }
+        if status == "failed" {
+            return .failed
+        }
+        if status == "blocked" {
+            return .blocked
+        }
+        return .running
+    }
+
+    private static func checklistSortRank(_ state: OpenClawChatChecklistEntry.State) -> Int {
+        switch state {
+        case .running:
+            return 0
+        case .pending:
+            return 1
+        case .blocked:
+            return 2
+        case .failed:
+            return 3
+        case .completed:
+            return 4
         }
     }
 
@@ -1072,7 +1960,12 @@ public final class OpenClawChatViewModel {
                 guard let self else { return }
                 guard self.pendingRuns.contains(runId) else { return }
                 self.clearPendingRun(runId)
-                self.errorText = "Timed out waiting for a reply; try again or refresh."
+                let timeoutMessage = "Timed out waiting for a reply; try again or refresh."
+                self.finalizeStreamState(
+                    sessionKey: self.resolveEventSessionKey(explicit: nil, runId: runId),
+                    failed: true,
+                    subtitle: timeoutMessage)
+                self.errorText = timeoutMessage
             }
         }
     }

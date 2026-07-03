@@ -2,6 +2,8 @@ import { onAgentEvent } from "../infra/agent-events.js";
 import { onHeartbeatEvent } from "../infra/heartbeat-events.js";
 import { onSessionLifecycleEvent } from "../sessions/session-lifecycle-events.js";
 import { onSessionTranscriptUpdate } from "../sessions/transcript-events.js";
+import { GATEWAY_CLIENT_CAPS } from "./protocol/client-info.js";
+import { selectConnIdsWithClientCap } from "./server-broadcast.js";
 import {
   createAgentEventHandler,
   type ChatRunState,
@@ -13,9 +15,11 @@ import {
   createLifecycleEventBroadcastHandler,
   createTranscriptUpdateBroadcastHandler,
 } from "./server-session-events.js";
+import type { GatewayWsClient } from "./server/ws-types.js";
 
 export function startGatewayEventSubscriptions(params: {
   minimalTestGateway: boolean;
+  clients: ReadonlySet<GatewayWsClient>;
   broadcast: (event: string, payload: unknown, opts?: { dropIfSlow?: boolean }) => void;
   broadcastToConnIds: (
     event: string,
@@ -33,6 +37,12 @@ export function startGatewayEventSubscriptions(params: {
   sessionMessageSubscribers: SessionMessageSubscriberRegistry;
   chatAbortControllers: Map<string, unknown>;
 }) {
+  const selectOrchestrationConnIds = (connIds?: ReadonlySet<string>) =>
+    selectConnIdsWithClientCap({
+      clients: params.clients,
+      connIds,
+      cap: GATEWAY_CLIENT_CAPS.ORCHESTRATION_EVENTS,
+    });
   const agentUnsub = params.minimalTestGateway
     ? null
     : onAgentEvent(
@@ -46,6 +56,7 @@ export function startGatewayEventSubscriptions(params: {
           clearAgentRunContext: params.clearAgentRunContext,
           toolEventRecipients: params.toolEventRecipients,
           sessionEventSubscribers: params.sessionEventSubscribers,
+          selectOrchestrationConnIds,
           isChatSendRunActive: (runId) => params.chatAbortControllers.has(runId),
         }),
       );
@@ -63,6 +74,7 @@ export function startGatewayEventSubscriptions(params: {
           broadcastToConnIds: params.broadcastToConnIds,
           sessionEventSubscribers: params.sessionEventSubscribers,
           sessionMessageSubscribers: params.sessionMessageSubscribers,
+          selectOrchestrationConnIds,
         }),
       );
 

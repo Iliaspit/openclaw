@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildMemorySystemPromptAddition } from "../../../plugin-sdk/core.js";
@@ -6,11 +9,17 @@ import {
   registerMemoryPromptSection,
 } from "../../../plugins/memory-state.js";
 import {
+  readLatestChildRouteContextHeadroomSnapshot,
+  resetChildRouteHealthForTest,
+} from "../../child-route-health.js";
+import {
   type AttemptContextEngine,
+  buildLoopPromptCacheInfo,
   assembleAttemptContextEngine,
   buildContextEnginePromptCacheInfo,
   findCurrentAttemptAssistantMessage,
   finalizeAttemptContextEngineTurn,
+  resolvePromptCacheTouchTimestamp,
   runAttemptContextEngineBootstrap,
 } from "./attempt.context-engine-helpers.js";
 import {
@@ -140,6 +149,49 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
     expectCalledWithSessionKey(bootstrap, sessionKey);
     expectCalledWithSessionKey(assemble, sessionKey);
     expectCalledWithSessionKey(afterTurn, sessionKey);
+  });
+
+  it("records scalar context-headroom telemetry for child request assembly", async () => {
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-route-headroom-attempt-"));
+    tempPaths.push(stateDir);
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    resetChildRouteHealthForTest();
+    try {
+      const childSessionKey = "agent:main:subagent:route-headroom";
+      const runId = "run-route-headroom";
+      await createContextEngineAttemptRunner({
+        sessionKey: childSessionKey,
+        tempPaths,
+        contextEngine: {
+          assemble: async ({ messages }) => ({ messages, estimatedTokens: messages.length }),
+        },
+        attemptOverrides: { runId },
+      });
+
+      await expect(
+        readLatestChildRouteContextHeadroomSnapshot({ childSessionKey, runId }),
+      ).resolves.toEqual({
+        ok: true,
+        snapshot: expect.objectContaining({
+          childSessionKey,
+          runId,
+          modelContextLimitTokens: 2048,
+          estimateSource: "actual_request",
+          lastCompactionStatus: "none",
+          estimatedPromptTokens: expect.any(Number),
+          headroomTokens: expect.any(Number),
+          headroomPercent: expect.any(Number),
+        }),
+      });
+    } finally {
+      resetChildRouteHealthForTest();
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+    }
   });
 
   it("forwards modelId to assemble", async () => {
@@ -365,6 +417,88 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
 
     expect(currentAttemptAssistant).toBeUndefined();
     expect(promptCache).toEqual({ retention: "short" });
+  });
+
+  it("derives live loop prompt-cache info from the current attempt assistant", () => {
+    const toolUseAssistant = {
+      role: "assistant",
+      content: "tool use",
+      timestamp: "2026-04-16T16:49:59.536Z",
+      usage: {
+        input: 1,
+        output: 2,
+        cacheRead: 39036,
+        cacheWrite: 59934,
+        total: 98973,
+      },
+    } as unknown as AgentMessage;
+
+    expect(
+      buildLoopPromptCacheInfo({
+        messagesSnapshot: [seedMessage, toolUseAssistant],
+        prePromptMessageCount: 1,
+        retention: "short",
+        fallbackLastCacheTouchAt: 123,
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        retention: "short",
+        lastCallUsage: expect.objectContaining({
+          cacheRead: 39036,
+          cacheWrite: 59934,
+          total: 98973,
+        }),
+        lastCacheTouchAt: Date.parse("2026-04-16T16:49:59.536Z"),
+      }),
+    );
+  });
+
+  it("falls back to the persisted cache touch when loop usage has no cache metrics", () => {
+    const toolUseAssistant = {
+      role: "assistant",
+      content: "tool use",
+      timestamp: "2026-04-16T16:49:59.536Z",
+      usage: {
+        input: 1,
+        output: 2,
+        total: 3,
+      },
+    } as unknown as AgentMessage;
+
+    expect(
+      buildLoopPromptCacheInfo({
+        messagesSnapshot: [seedMessage, toolUseAssistant],
+        prePromptMessageCount: 1,
+        retention: "short",
+        fallbackLastCacheTouchAt: 123,
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        retention: "short",
+        lastCallUsage: expect.objectContaining({
+          total: 3,
+        }),
+        lastCacheTouchAt: 123,
+      }),
+    );
+  });
+
+  it("derives a live cache touch timestamp for final afterTurn usage snapshots", () => {
+    const lastCallUsage = {
+      input: 1,
+      output: 2,
+      cacheRead: 39036,
+      cacheWrite: 0,
+      total: 39039,
+    };
+
+    expect(
+      resolvePromptCacheTouchTimestamp({
+        lastCallUsage,
+        assistantTimestamp: "2026-04-16T17:04:46.974Z",
+        fallbackLastCacheTouchAt: 123,
+      }),
+    ).toBe(Date.parse("2026-04-16T17:04:46.974Z"));
   });
 
   it("threads prompt-cache break observations into afterTurn", async () => {

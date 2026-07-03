@@ -7,13 +7,15 @@ import {
   type SubagentTargetResolution,
 } from "../auto-reply/reply/subagents-utils.js";
 import type { SessionEntry } from "../config/sessions.js";
-import { loadSessionStore, resolveStorePath, updateSessionStore } from "../config/sessions.js";
+import { updateSessionStore } from "../config/sessions.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { callGateway } from "../gateway/call.js";
 import { logVerbose } from "../globals.js";
 import { formatErrorMessage } from "../infra/errors.js";
-import { isSubagentSessionKey, parseAgentSessionKey } from "../routing/session-key.js";
+import { isSubagentSessionKey } from "../routing/session-key.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../utils/message-channel.js";
+import { guardChildRouteForDelivery } from "./child-route-guard.js";
+import { resolveChildRouteProviderContextFromSession } from "./child-route-provider-context.js";
 import { AGENT_LANE_SUBAGENT } from "./lanes.js";
 import { abortEmbeddedPiRun } from "./pi-embedded-runner/runs.js";
 import {
@@ -467,6 +469,55 @@ export async function steerControlledSubagentRun(params: {
       text: `${resolveSubagentLabel(params.entry)} is already finished.`,
     };
   }
+  if (currentEntry.suppressAnnounceReason === "fresh-reroute") {
+    return {
+      status: "error",
+      runId: params.entry.runId,
+      sessionKey: params.entry.childSessionKey,
+      error: `${resolveSubagentLabel(params.entry)} was superseded by a fresh child generation.`,
+    };
+  }
+  const targetSession = resolveSessionEntryForKey({
+    cfg: params.cfg,
+    key: params.entry.childSessionKey,
+    cache: new Map<string, Record<string, SessionEntry>>(),
+  });
+  const routeGuard = await guardChildRouteForDelivery({
+    childSessionKey: params.entry.childSessionKey,
+    context: {
+      routeIntent: "followup_reuse",
+      targetMethod: "subagent_control.steer",
+      requesterSessionKey: params.controller.controllerSessionKey,
+      requesterGeneration: getLatestSubagentRunByChildSessionKey(
+        params.controller.controllerSessionKey,
+      )?.runId,
+      childTargetKind: "subagent",
+      registryRecord: currentEntry,
+      provider: resolveChildRouteProviderContextFromSession({
+        cfg: params.cfg,
+        sessionKey: params.entry.childSessionKey,
+        entry: targetSession.entry,
+        requesterSessionKey: params.controller.controllerSessionKey,
+      }),
+    },
+    payloadForHash: {
+      method: "subagent_control.steer",
+      message: params.message.trim(),
+    },
+  });
+  if (!routeGuard.ok) {
+    return {
+      status: "error",
+      runId: params.entry.runId,
+      sessionKey: params.entry.childSessionKey,
+      error: routeGuard.message,
+      text: JSON.stringify({
+        ok: false,
+        code: routeGuard.code,
+        details: routeGuard.details,
+      }),
+    };
+  }
 
   const rateKey = `${params.controller.callerSessionKey}:${params.entry.childSessionKey}`;
   if (process.env.VITEST !== "true") {
@@ -485,11 +536,6 @@ export async function steerControlledSubagentRun(params: {
 
   markSubagentRunForSteerRestart(params.entry.runId);
 
-  const targetSession = resolveSessionEntryForKey({
-    cfg: params.cfg,
-    key: params.entry.childSessionKey,
-    cache: new Map<string, Record<string, SessionEntry>>(),
-  });
   const sessionId =
     typeof targetSession.entry?.sessionId === "string" && targetSession.entry.sessionId.trim()
       ? targetSession.entry.sessionId.trim()
@@ -613,108 +659,79 @@ export async function sendControlledSubagentMessage(params: {
       text: `${resolveSubagentLabel(params.entry)} is already finished.`,
     };
   }
-  if (typeof currentEntry.endedAt === "number") {
-    try {
-      const baselineReply = await readLatestAssistantReplySnapshot({
-        sessionKey: targetSessionKey,
-        limit: SUBAGENT_REPLY_HISTORY_LIMIT,
-        callGateway: subagentControlDeps.callGateway,
-      });
-      const restart = await steerControlledSubagentRun({
+  const targetSession = resolveSessionEntryForKey({
+    cfg: params.cfg,
+    key: targetSessionKey,
+    cache: new Map<string, Record<string, SessionEntry>>(),
+  });
+  const routeGuard = await guardChildRouteForDelivery({
+    childSessionKey: targetSessionKey,
+    context: {
+      routeIntent: "followup_reuse",
+      targetMethod: "subagent_control.send",
+      requesterSessionKey: params.controller.controllerSessionKey,
+      requesterGeneration: getLatestSubagentRunByChildSessionKey(
+        params.controller.controllerSessionKey,
+      )?.runId,
+      childTargetKind: "subagent",
+      registryRecord: currentEntry,
+      provider: resolveChildRouteProviderContextFromSession({
         cfg: params.cfg,
-        controller: params.controller,
-        entry: currentEntry,
-        message: params.message,
-      });
-      if (restart.status !== "accepted") {
-        if (restart.status === "forbidden") {
-          return {
-            status: "forbidden" as const,
-            error: restart.error ?? restart.text ?? "send failed",
-          };
-        }
-        if (restart.status === "done") {
-          return {
-            status: "done" as const,
-            runId: restart.runId ?? params.entry.runId,
-            text: restart.text ?? `${resolveSubagentLabel(params.entry)} is already finished.`,
-          };
-        }
-        return {
-          status: "error" as const,
-          runId: restart.runId ?? params.entry.runId,
-          error: restart.error ?? restart.text ?? "send failed",
-        };
-      }
-      const result = await waitForAgentRunAndReadUpdatedAssistantReply({
-        runId: restart.runId,
         sessionKey: targetSessionKey,
-        timeoutMs: waitTimeoutMs,
-        limit: SUBAGENT_REPLY_HISTORY_LIMIT,
-        baseline: baselineReply,
-        callGateway: subagentControlDeps.callGateway,
-      });
-      if (result.status === "timeout") {
-        return { status: "timeout" as const, runId: restart.runId };
-      }
-      if (result.status === "error") {
-        return {
-          status: "error" as const,
-          runId: restart.runId,
-          error: result.error ?? "unknown error",
-        };
-      }
-      return { status: "ok" as const, runId: restart.runId, replyText: result.replyText };
-    } catch (err) {
-      const error = formatErrorMessage(err);
-      return {
-        status: "error" as const,
-        runId: currentEntry.runId,
-        error,
-      };
-    }
+        entry: targetSession.entry,
+        requesterSessionKey: params.controller.controllerSessionKey,
+      }),
+    },
+    payloadForHash: {
+      method: "subagent_control.send",
+      message: params.message.trim(),
+    },
+  });
+  if (!routeGuard.ok) {
+    return {
+      status: "error" as const,
+      runId: params.entry.runId,
+      error: JSON.stringify({
+        ok: false,
+        code: routeGuard.code,
+        details: routeGuard.details,
+      }),
+    };
   }
-
-  const parsed = parseAgentSessionKey(targetSessionKey);
-  const storePath = resolveStorePath(params.cfg.session?.store, { agentId: parsed?.agentId });
-  const store = loadSessionStore(storePath);
-  const targetSessionEntry = store[targetSessionKey];
-  const targetSessionId =
-    typeof targetSessionEntry?.sessionId === "string" && targetSessionEntry.sessionId.trim()
-      ? targetSessionEntry.sessionId.trim()
-      : undefined;
-
-  const idempotencyKey = crypto.randomUUID();
-  const runTimeoutSeconds = params.entry.runTimeoutSeconds ?? 0;
-  let runId: string = idempotencyKey;
   try {
     const baselineReply = await readLatestAssistantReplySnapshot({
       sessionKey: targetSessionKey,
       limit: SUBAGENT_REPLY_HISTORY_LIMIT,
       callGateway: subagentControlDeps.callGateway,
     });
-
-    const response = await subagentControlDeps.callGateway<{ runId: string }>({
-      method: "agent",
-      params: {
-        message: params.message,
-        sessionKey: targetSessionKey,
-        sessionId: targetSessionId,
-        idempotencyKey,
-        deliver: false,
-        channel: INTERNAL_MESSAGE_CHANNEL,
-        lane: AGENT_LANE_SUBAGENT,
-        timeout: runTimeoutSeconds,
-      },
-      timeoutMs: 10_000,
+    const restart = await steerControlledSubagentRun({
+      cfg: params.cfg,
+      controller: params.controller,
+      entry: currentEntry,
+      message: params.message,
     });
-    const responseRunId = typeof response?.runId === "string" ? response.runId : undefined;
-    if (responseRunId) {
-      runId = responseRunId;
+    if (restart.status !== "accepted") {
+      if (restart.status === "forbidden") {
+        return {
+          status: "forbidden" as const,
+          error: restart.error ?? restart.text ?? "send failed",
+        };
+      }
+      if (restart.status === "done") {
+        return {
+          status: "done" as const,
+          runId: restart.runId ?? params.entry.runId,
+          text: restart.text ?? `${resolveSubagentLabel(params.entry)} is already finished.`,
+        };
+      }
+      return {
+        status: "error" as const,
+        runId: restart.runId ?? params.entry.runId,
+        error: restart.error ?? restart.text ?? "send failed",
+      };
     }
-
     const result = await waitForAgentRunAndReadUpdatedAssistantReply({
-      runId,
+      runId: restart.runId,
       sessionKey: targetSessionKey,
       timeoutMs: waitTimeoutMs,
       limit: SUBAGENT_REPLY_HISTORY_LIMIT,
@@ -722,19 +739,23 @@ export async function sendControlledSubagentMessage(params: {
       callGateway: subagentControlDeps.callGateway,
     });
     if (result.status === "timeout") {
-      return { status: "timeout" as const, runId };
+      return { status: "timeout" as const, runId: restart.runId };
     }
     if (result.status === "error") {
       return {
         status: "error" as const,
-        runId,
+        runId: restart.runId,
         error: result.error ?? "unknown error",
       };
     }
-    return { status: "ok" as const, runId, replyText: result.replyText };
+    return { status: "ok" as const, runId: restart.runId, replyText: result.replyText };
   } catch (err) {
     const error = formatErrorMessage(err);
-    return { status: "error" as const, runId, error };
+    return {
+      status: "error" as const,
+      runId: currentEntry.runId,
+      error,
+    };
   }
 }
 

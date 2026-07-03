@@ -8,6 +8,7 @@ export type SubagentRunRecord = {
   childSessionKey: string;
   controllerSessionKey?: string;
   requesterSessionKey: string;
+  requesterGeneration?: string;
   requesterOrigin?: DeliveryContext;
   requesterDisplayKey: string;
   task: string;
@@ -26,7 +27,7 @@ export type SubagentRunRecord = {
   archiveAtMs?: number;
   cleanupCompletedAt?: number;
   cleanupHandled?: boolean;
-  suppressAnnounceReason?: "steer-restart" | "killed";
+  suppressAnnounceReason?: "steer-restart" | "killed" | "fresh-reroute";
   expectsCompletionMessage?: boolean;
   announceRetryCount?: number;
   lastAnnounceRetryAt?: number;
@@ -34,6 +35,10 @@ export type SubagentRunRecord = {
   wakeOnDescendantSettle?: boolean;
   frozenResultText?: string | null;
   frozenResultCapturedAt?: number;
+  resultReceiptId?: string;
+  resultReceiptSha256?: string;
+  resultReceiptBytes?: number;
+  resultReceiptCapturedAt?: number;
   fallbackFrozenResultText?: string | null;
   fallbackFrozenResultCapturedAt?: number;
   endedHookEmittedAt?: number;

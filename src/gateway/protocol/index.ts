@@ -191,6 +191,14 @@ import {
   type PushTestParams,
   PushTestParamsSchema,
   PushTestResultSchema,
+  type QueueHealthParams,
+  QueueHealthParamsSchema,
+  type QueueHealthResult,
+  QueueHealthResultSchema,
+  type QueueLaneSnapshot,
+  QueueLaneSnapshotSchema,
+  type QueueRuntimeIssue,
+  QueueRuntimeIssueSchema,
   type PresenceEntry,
   PresenceEntrySchema,
   ProtocolSchemas,
@@ -360,6 +368,8 @@ export const validateNodePendingEnqueueParams = ajv.compile<NodePendingEnqueuePa
   NodePendingEnqueueParamsSchema,
 );
 export const validatePushTestParams = ajv.compile<PushTestParams>(PushTestParamsSchema);
+export const validateQueueHealthParams = ajv.compile<QueueHealthParams>(QueueHealthParamsSchema);
+export const validateQueueHealthResult = ajv.compile<QueueHealthResult>(QueueHealthResultSchema);
 export const validateSecretsResolveParams = ajv.compile<SecretsResolveParams>(
   SecretsResolveParamsSchema,
 );
@@ -567,6 +577,10 @@ export {
   WakeParamsSchema,
   PushTestParamsSchema,
   PushTestResultSchema,
+  QueueHealthParamsSchema,
+  QueueRuntimeIssueSchema,
+  QueueLaneSnapshotSchema,
+  QueueHealthResultSchema,
   NodePairRequestParamsSchema,
   NodePairListParamsSchema,
   NodePairApproveParamsSchema,
@@ -792,6 +806,10 @@ export type {
   LogsTailParams,
   LogsTailResult,
   PollParams,
+  QueueHealthParams,
+  QueueRuntimeIssue,
+  QueueLaneSnapshot,
+  QueueHealthResult,
   UpdateRunParams,
   ChatInjectParams,
 };

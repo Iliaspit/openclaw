@@ -1,4 +1,13 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { guardChildRouteForDelivery } from "../agents/child-route-guard.js";
+import {
+  recordChildRouteHealthEvent,
+  resetChildRouteHealthForTest,
+} from "../agents/child-route-health.js";
+import type { SubagentRunRecord } from "../agents/subagent-registry.types.js";
 import {
   clearAgentRunContext,
   emitAgentEvent,
@@ -9,6 +18,7 @@ import {
   resetAgentRunContextForTest,
   sweepStaleRunContexts,
 } from "./agent-events.js";
+import { getAgentRuntimeIssues } from "./agent-runtime-health.js";
 
 type AgentEventsModule = typeof import("./agent-events.js");
 
@@ -19,8 +29,19 @@ async function importAgentEventsModule(cacheBust: string): Promise<AgentEventsMo
 }
 
 describe("agent-events sequencing", () => {
+  const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+
   beforeEach(() => {
     resetAgentEventsForTest();
+  });
+
+  afterEach(() => {
+    resetChildRouteHealthForTest();
+    if (previousStateDir === undefined) {
+      delete process.env.OPENCLAW_STATE_DIR;
+    } else {
+      process.env.OPENCLAW_STATE_DIR = previousStateDir;
+    }
   });
 
   test("stores and clears run context", async () => {
@@ -73,6 +94,132 @@ describe("agent-events sequencing", () => {
     stop();
 
     expect(phases).toEqual(["start", "end"]);
+  });
+
+  test("records context overflow lifecycle errors as runtime health issues", async () => {
+    registerAgentRunContext("run-overflow", { sessionKey: "agent:planner-4:main" });
+
+    emitAgentEvent({
+      runId: "run-overflow",
+      stream: "lifecycle",
+      data: {
+        phase: "error",
+        error: "Context overflow: estimated context size exceeds safe threshold during tool loop.",
+        livenessState: "blocked",
+      },
+    });
+
+    expect(getAgentRuntimeIssues()).toEqual([
+      expect.objectContaining({
+        runId: "run-overflow",
+        code: "context_overflow",
+        severity: "error",
+        sessionKey: "agent:planner-4:main",
+        lane: "session:agent:planner-4:main",
+        livenessState: "blocked",
+      }),
+    ]);
+  });
+
+  test("clears runtime health issues on a clean lifecycle end", async () => {
+    registerAgentRunContext("run-recovered", { sessionKey: "agent:planner-4:main" });
+    emitAgentEvent({
+      runId: "run-recovered",
+      stream: "lifecycle",
+      data: {
+        phase: "error",
+        error: "Context overflow: prompt too large for the model.",
+      },
+    });
+    expect(getAgentRuntimeIssues()).toHaveLength(1);
+
+    emitAgentEvent({
+      runId: "run-recovered",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+
+    expect(getAgentRuntimeIssues()).toEqual([]);
+  });
+
+  test("keeps blocked lifecycle ends visible in runtime health", async () => {
+    registerAgentRunContext("run-blocked", { sessionKey: "agent:planner-4:main" });
+
+    emitAgentEvent({
+      runId: "run-blocked",
+      stream: "lifecycle",
+      data: { phase: "end", livenessState: "blocked" },
+    });
+
+    expect(getAgentRuntimeIssues({ lane: "session:agent:planner-4:main" })).toEqual([
+      expect.objectContaining({
+        runId: "run-blocked",
+        code: "agent_lifecycle_blocked",
+        severity: "error",
+      }),
+    ]);
+  });
+
+  test("does not clear child route blockers on paused lifecycle ends", async () => {
+    const tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-agent-events-"));
+    process.env.OPENCLAW_STATE_DIR = tempStateDir;
+    const childSessionKey = "agent:planner:subagent:paused";
+    const trackedRun: SubagentRunRecord = {
+      runId: "run-paused",
+      childSessionKey,
+      requesterSessionKey: "agent:planner:main",
+      requesterDisplayKey: "main",
+      task: "paused lifecycle regression",
+      cleanup: "keep",
+      createdAt: Date.now(),
+    };
+
+    try {
+      const recorded = await recordChildRouteHealthEvent({
+        code: "context_overflow",
+        status: "active",
+        source: "context_overflow",
+        childSessionKey,
+        runId: trackedRun.runId,
+        reason: "context overflow before paused end",
+      });
+      expect(recorded).toEqual(expect.objectContaining({ ok: true }));
+
+      registerAgentRunContext(trackedRun.runId, { sessionKey: childSessionKey });
+      emitAgentEvent({
+        runId: trackedRun.runId,
+        stream: "lifecycle",
+        data: { phase: "end", livenessState: "paused", replayInvalid: true },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const routeGuard = await guardChildRouteForDelivery({
+        childSessionKey,
+        context: {
+          routeIntent: "followup_reuse",
+          targetMethod: "sessions.send",
+          requesterSessionKey: "agent:planner:main",
+          childTargetKind: "subagent",
+          registryRecord: trackedRun,
+        },
+      });
+      expect(routeGuard).toEqual(
+        expect.objectContaining({
+          ok: false,
+          code: "child_session_unhealthy",
+        }),
+      );
+      if (routeGuard.ok) {
+        throw new Error("expected paused lifecycle end to preserve child route blocker");
+      }
+      expect(routeGuard.details).toMatchObject({
+        codes: ["context_overflow"],
+        recommendedAction: "spawn_fresh",
+      });
+    } finally {
+      await fs.rm(tempStateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
   });
 
   test("omits sessionKey for runs hidden from Control UI", async () => {

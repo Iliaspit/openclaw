@@ -29,7 +29,8 @@ import {
   resolveProviderTextTransforms,
   transformProviderSystemPrompt,
 } from "../../../plugins/provider-runtime.js";
-import { isSubagentSessionKey } from "../../../routing/session-key.js";
+import { getPluginToolMeta } from "../../../plugins/tools.js";
+import { isAcpSessionKey, isSubagentSessionKey } from "../../../routing/session-key.js";
 import { normalizeOptionalLowercaseString } from "../../../shared/string-coerce.js";
 import { normalizeOptionalString } from "../../../shared/string-coerce.js";
 import { buildTtsSystemPromptHint } from "../../../tts/tts.js";
@@ -60,6 +61,7 @@ import {
   resolveChannelMessageToolHints,
   resolveChannelReactionGuidance,
 } from "../../channel-tools.js";
+import { recordChildRouteContextHeadroomSnapshot } from "../../child-route-health.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../defaults.js";
 import { resolveOpenClawDocsPath } from "../../docs-path.js";
 import { isTimeoutError } from "../../failover-error.js";
@@ -86,7 +88,11 @@ import {
 import { subscribeEmbeddedPiSession } from "../../pi-embedded-subscribe.js";
 import { createPreparedEmbeddedPiSettingsManager } from "../../pi-project-settings.js";
 import { applyPiAutoCompactionGuard } from "../../pi-settings.js";
-import { toClientToolDefinitions } from "../../pi-tool-definition-adapter.js";
+import {
+  createClientToolNameConflictError,
+  findClientToolNameConflicts,
+  toClientToolDefinitions,
+} from "../../pi-tool-definition-adapter.js";
 import { createOpenClawCodingTools, resolveToolLoopDetectionConfig } from "../../pi-tools.js";
 import { wrapStreamFnTextTransforms } from "../../plugin-text-transforms.js";
 import { describeProviderRequestRoutingSummary } from "../../provider-attribution.js";
@@ -110,7 +116,6 @@ import { resolveSystemPromptOverride } from "../../system-prompt-override.js";
 import { buildSystemPromptParams } from "../../system-prompt-params.js";
 import { buildSystemPromptReport } from "../../system-prompt-report.js";
 import { resolveAgentTimeoutMs } from "../../timeout.js";
-import { sanitizeToolCallIdsForCloudCodeAssist } from "../../tool-call-id.js";
 import { UNKNOWN_TOOL_THRESHOLD } from "../../tool-loop-detection.js";
 import {
   resolveTranscriptPolicy,
@@ -165,7 +170,10 @@ import {
   installContextEngineLoopHook,
   installToolResultContextGuard,
 } from "../tool-result-context-guard.js";
-import { truncateOversizedToolResultsInSessionManager } from "../tool-result-truncation.js";
+import {
+  resolveLiveToolResultMaxChars,
+  truncateOversizedToolResultsInSessionManager,
+} from "../tool-result-truncation.js";
 import {
   logProviderToolSchemaDiagnostics,
   normalizeProviderToolSchemas,
@@ -175,9 +183,11 @@ import { mapThinkingLevel } from "../utils.js";
 import { flushPendingToolResultsAfterIdle } from "../wait-for-idle-before-flush.js";
 import {
   assembleAttemptContextEngine,
+  buildLoopPromptCacheInfo,
   buildContextEnginePromptCacheInfo,
   findCurrentAttemptAssistantMessage,
   finalizeAttemptContextEngineTurn,
+  resolvePromptCacheTouchTimestamp,
   resolveAttemptBootstrapContext,
   runAttemptContextEngineBootstrap,
 } from "./attempt.context-engine-helpers.js";
@@ -217,6 +227,7 @@ import {
   wrapStreamFnRepairMalformedToolCallArguments,
 } from "./attempt.tool-call-argument-repair.js";
 import {
+  sanitizeReplayToolCallIdsForStream,
   wrapStreamFnSanitizeMalformedToolCalls,
   wrapStreamFnTrimToolCallNames,
 } from "./attempt.tool-call-normalization.js";
@@ -286,11 +297,21 @@ const MAX_BTW_SNAPSHOT_MESSAGES = 100;
 export function resolveUnknownToolGuardThreshold(loopDetection?: {
   enabled?: boolean;
   unknownToolThreshold?: number;
-}): number | undefined {
-  if (loopDetection?.enabled !== true) {
-    return undefined;
+}): number {
+  // The unknown-tool guard is a safety net against the model hallucinating a
+  // tool name or calling a tool that has since been removed from the allowlist
+  // (for example after a `skills.allowBundled` config change). After `threshold`
+  // consecutive unknown-tool attempts the stream wrapper rewrites the assistant
+  // message content to tell the model to stop, which breaks otherwise-infinite
+  // Tool-not-found loops against the provider. Unlike the genericRepeat /
+  // pingPong / pollNoProgress detectors this guard has no false-positive
+  // surface because the tool is objectively not registered in this run, so it
+  // stays on regardless of `tools.loopDetection.enabled`.
+  const raw = loopDetection?.unknownToolThreshold;
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
+    return Math.floor(raw);
   }
-  return loopDetection.unknownToolThreshold ?? UNKNOWN_TOOL_THRESHOLD;
+  return UNKNOWN_TOOL_THRESHOLD;
 }
 
 function summarizeMessagePayload(msg: AgentMessage): { textChars: number; imageBlocks: number } {
@@ -764,6 +785,7 @@ export async function runEmbeddedAttempt(
       resolveSystemPromptOverride({
         config: params.config,
         agentId: sessionAgentId,
+        workspaceDir: effectiveWorkspace,
       }) ??
       buildEmbeddedSystemPrompt({
         workspaceDir: effectiveWorkspace,
@@ -870,6 +892,8 @@ export async function runEmbeddedAttempt(
       sessionManager = guardSessionManager(SessionManager.open(params.sessionFile), {
         agentId: sessionAgentId,
         sessionKey: params.sessionKey,
+        config: params.config,
+        contextWindowTokens: params.contextTokenBudget,
         inputProvenance: params.inputProvenance,
         allowSyntheticToolResults: transcriptPolicy.allowSyntheticToolResults,
         allowedToolNames,
@@ -957,6 +981,37 @@ export async function runEmbeddedAttempt(
         cfg: params.config,
         agentId: sessionAgentId,
       });
+      // Exact raw names of every tool registered for this run, including
+      // bundled/plugin tools. Used as the raw-name set for the trusted local
+      // MEDIA: passthrough gate: a normalized alias is not sufficient — the
+      // emitted tool name must match an exact registration of this run.
+      const builtinToolNames = new Set(
+        effectiveTools.flatMap((tool) => {
+          const name = (tool.name ?? "").trim();
+          return name ? [name] : [];
+        }),
+      );
+      // Admission-time conflict check only against non-plugin core tools, to
+      // preserve prior behavior where client tools may coexist with unrelated
+      // plugin tool names. MEDIA passthrough is still gated by the raw-name
+      // set above, so a client tool that normalize-collides with a plugin
+      // tool cannot inherit the plugin's local-media trust.
+      const coreBuiltinToolNames = new Set(
+        effectiveTools.flatMap((tool) => {
+          const name = (tool.name ?? "").trim();
+          if (!name || getPluginToolMeta(tool)) {
+            return [];
+          }
+          return [name];
+        }),
+      );
+      const clientToolNameConflicts = findClientToolNameConflicts({
+        tools: clientTools ?? [],
+        existingToolNames: coreBuiltinToolNames,
+      });
+      if (clientToolNameConflicts.length > 0) {
+        throw createClientToolNameConflictError(clientToolNameConflicts);
+      }
       const clientToolDefs = clientTools
         ? toClientToolDefinitions(
             clientTools,
@@ -1020,6 +1075,24 @@ export async function runEmbeddedAttempt(
           tokenBudget: params.contextTokenBudget,
           modelId: params.modelId,
           getPrePromptMessageCount: () => prePromptMessageCount,
+          getRuntimeContext: ({ messages, prePromptMessageCount: loopPrePromptMessageCount }) =>
+            buildAfterTurnRuntimeContext({
+              attempt: params,
+              workspaceDir: effectiveWorkspace,
+              agentDir,
+              tokenBudget: params.contextTokenBudget,
+              promptCache:
+                promptCache ??
+                buildLoopPromptCacheInfo({
+                  messagesSnapshot: messages,
+                  prePromptMessageCount: loopPrePromptMessageCount,
+                  retention: effectivePromptCacheRetention,
+                  fallbackLastCacheTouchAt: readLastCacheTtlTimestamp(sessionManager, {
+                    provider: params.provider,
+                    modelId: params.modelId,
+                  }),
+                }),
+            }),
         });
       }
       const cacheTrace = createCacheTrace({
@@ -1200,25 +1273,23 @@ export async function runEmbeddedAttempt(
           if (!Array.isArray(messages)) {
             return inner(model, context, options);
           }
-          const allowProviderOwnedThinkingReplay = shouldAllowProviderOwnedThinkingReplay({
-            modelApi: (model as { api?: unknown })?.api as string | null | undefined,
-            policy: transcriptPolicy,
-          });
-          const sanitized = sanitizeToolCallIdsForCloudCodeAssist(
-            messages as AgentMessage[],
+          const nextMessages = sanitizeReplayToolCallIdsForStream({
+            messages: messages as AgentMessage[],
             mode,
-            {
-              preserveNativeAnthropicToolUseIds: transcriptPolicy.preserveNativeAnthropicToolUseIds,
-              preserveReplaySafeThinkingToolCallIds: allowProviderOwnedThinkingReplay,
-              allowedToolNames,
-            },
-          );
-          if (sanitized === messages) {
+            allowedToolNames,
+            preserveNativeAnthropicToolUseIds: transcriptPolicy.preserveNativeAnthropicToolUseIds,
+            preserveReplaySafeThinkingToolCallIds: shouldAllowProviderOwnedThinkingReplay({
+              modelApi: (model as { api?: unknown })?.api as string | null | undefined,
+              policy: transcriptPolicy,
+            }),
+            repairToolUseResultPairing: transcriptPolicy.repairToolUseResultPairing,
+          });
+          if (nextMessages === messages) {
             return inner(model, context, options);
           }
           const nextContext = {
             ...(context as unknown as Record<string, unknown>),
-            messages: sanitized,
+            messages: nextMessages,
           } as unknown;
           return inner(model, nextContext as typeof context, options);
         };
@@ -1524,6 +1595,7 @@ export async function runEmbeddedAttempt(
           sessionKey: sandboxSessionKey,
           sessionId: params.sessionId,
           agentId: sessionAgentId,
+          builtinToolNames,
           internalEvents: params.internalEvents,
         }),
       );
@@ -1935,11 +2007,22 @@ export async function runEmbeddedAttempt(
                   prompt: effectivePrompt,
                   contextTokenBudget,
                   reserveTokens,
+                  toolResultMaxChars: resolveLiveToolResultMaxChars({
+                    contextWindowTokens: contextTokenBudget,
+                    cfg: params.config,
+                    agentId: sessionAgentId,
+                  }),
                 });
           if (preemptiveCompaction.route === "truncate_tool_results_only") {
+            const toolResultMaxChars = resolveLiveToolResultMaxChars({
+              contextWindowTokens: contextTokenBudget,
+              cfg: params.config,
+              agentId: sessionAgentId,
+            });
             const truncationResult = truncateOversizedToolResultsInSessionManager({
               sessionManager,
               contextWindowTokens: contextTokenBudget,
+              maxCharsOverride: toolResultMaxChars,
               sessionFile: params.sessionFile,
               sessionId: params.sessionId,
               sessionKey: params.sessionKey,
@@ -1995,6 +2078,49 @@ export async function runEmbeddedAttempt(
                 `sessionFile=${params.sessionFile}`,
             );
             skipPromptSubmission = true;
+          }
+
+          const childRouteTelemetrySessionKey =
+            params.sessionKey &&
+            (isSubagentSessionKey(params.sessionKey) || isAcpSessionKey(params.sessionKey))
+              ? params.sessionKey
+              : undefined;
+          if (childRouteTelemetrySessionKey) {
+            const estimateKnown = params.contextEngine?.info?.ownsCompaction !== true;
+            const estimatedPromptTokens = estimateKnown
+              ? preemptiveCompaction.estimatedPromptTokens
+              : undefined;
+            const headroomTokens =
+              typeof estimatedPromptTokens === "number"
+                ? contextTokenBudget - estimatedPromptTokens
+                : undefined;
+            const headroomPercent =
+              typeof headroomTokens === "number"
+                ? (headroomTokens / Math.max(1, contextTokenBudget)) * 100
+                : undefined;
+            const recordedHeadroom = await recordChildRouteContextHeadroomSnapshot({
+              childSessionKey: childRouteTelemetrySessionKey,
+              runId: params.runId,
+              ...(typeof estimatedPromptTokens === "number" ? { estimatedPromptTokens } : {}),
+              modelContextLimitTokens: contextTokenBudget,
+              ...(typeof headroomTokens === "number" ? { headroomTokens } : {}),
+              ...(typeof headroomPercent === "number" ? { headroomPercent } : {}),
+              estimateSource: estimateKnown
+                ? skipPromptSubmission
+                  ? "preflight_estimate"
+                  : "actual_request"
+                : "unknown",
+              lastCompactionStatus: preflightRecovery
+                ? preflightRecovery.handled === true
+                  ? "succeeded"
+                  : "pending"
+                : "none",
+            });
+            if (!recordedHeadroom.ok) {
+              log.warn(
+                `failed to record child route context-headroom telemetry: ${recordedHeadroom.error}`,
+              );
+            }
           }
 
           if (!skipPromptSubmission) {
@@ -2174,13 +2300,18 @@ export async function runEmbeddedAttempt(
                 changes: cacheBreak?.changes ?? promptCacheChangesForTurn,
               }
             : undefined;
+        const fallbackLastCacheTouchAt = readLastCacheTtlTimestamp(sessionManager, {
+          provider: params.provider,
+          modelId: params.modelId,
+        });
         promptCache = buildContextEnginePromptCacheInfo({
           retention: effectivePromptCacheRetention,
           lastCallUsage,
           observation: promptCacheObservation,
-          lastCacheTouchAt: readLastCacheTtlTimestamp(sessionManager, {
-            provider: params.provider,
-            modelId: params.modelId,
+          lastCacheTouchAt: resolvePromptCacheTouchTimestamp({
+            lastCallUsage,
+            assistantTimestamp: currentAttemptAssistant?.timestamp,
+            fallbackLastCacheTouchAt,
           }),
         });
 

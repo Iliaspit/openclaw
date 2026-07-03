@@ -247,6 +247,50 @@ describe("session-memory hook", () => {
     expect(memoryContent).toContain("assistant: Captured before reset");
   });
 
+  it("writes slugged session notes to archiveDir when configured", async () => {
+    const tempDir = await createCaseWorkspace("workspace");
+    const sessionsDir = path.join(tempDir, "sessions");
+    await fs.mkdir(sessionsDir, { recursive: true });
+
+    const sessionFile = await writeWorkspaceFile({
+      dir: sessionsDir,
+      name: "test-session.jsonl",
+      content: createMockSessionContent([
+        { role: "user", content: "Archive this session summary" },
+        { role: "assistant", content: "Stored outside the hot memory path" },
+      ]),
+    });
+
+    const event = createHookEvent("command", "new", "agent:main:main", {
+      cfg: {
+        agents: { defaults: { workspace: tempDir } },
+        hooks: {
+          internal: {
+            entries: {
+              "session-memory": {
+                archiveDir: ".openclaw/session-memory-archive",
+              },
+            },
+          },
+        },
+      } satisfies OpenClawConfig,
+      previousSessionEntry: {
+        sessionId: "test-archive-session",
+        sessionFile,
+      },
+    });
+
+    await handler(event);
+
+    await expect(fs.access(path.join(tempDir, "memory"))).rejects.toThrow();
+    const archiveDir = path.join(tempDir, ".openclaw", "session-memory-archive");
+    const files = await fs.readdir(archiveDir);
+    expect(files.length).toBe(1);
+    const memoryContent = await fs.readFile(path.join(archiveDir, files[0]), "utf-8");
+    expect(memoryContent).toContain("user: Archive this session summary");
+    expect(memoryContent).toContain("assistant: Stored outside the hot memory path");
+  });
+
   it("prefers workspaceDir from hook context when sessionKey points at main", async () => {
     const mainWorkspace = await createCaseWorkspace("workspace-main");
     const naviWorkspace = await createCaseWorkspace("workspace-navi");

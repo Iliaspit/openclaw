@@ -1,12 +1,17 @@
-import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback } from "@mariozechner/pi-agent-core";
+import { expandHomePrefix, resolveOsHomeDir } from "../infra/home-dir.js";
+import { recordChildRouteEditFailure, recordChildRouteEditSuccess } from "./child-route-health.js";
 import { getToolParamsRecord } from "./pi-tools.params.js";
 import type { AnyAgentTool } from "./pi-tools.types.js";
 
 type EditToolRecoveryOptions = {
   root: string;
   readFile: (absolutePath: string) => Promise<string>;
+  routeHealth?: {
+    childSessionKey?: string;
+    runId?: string;
+  };
 };
 
 type EditToolParams = {
@@ -21,13 +26,15 @@ type EditReplacement = {
 
 const EDIT_MISMATCH_MESSAGE = "Could not find the exact text in";
 const EDIT_MISMATCH_HINT_LIMIT = 800;
+const AMBIGUOUS_EDIT_PATTERNS = [
+  /\bmultiple\b.{0,40}\b(matches|occurrences)\b/i,
+  /\b(oldText|old text)\b.{0,60}\b(not unique|ambiguous|appears multiple|multiple occurrences)\b/i,
+  /\bnot unique\b.{0,40}\b(oldText|old text|edit anchor)\b/i,
+];
 
-/** Resolve path for edit recovery: expand ~ and resolve relative paths against root. */
 function resolveEditPath(root: string, pathParam: string): string {
-  const expanded =
-    pathParam.startsWith("~/") || pathParam === "~"
-      ? pathParam.replace(/^~/, os.homedir())
-      : pathParam;
+  const home = resolveOsHomeDir();
+  const expanded = home ? expandHomePrefix(pathParam, { home }) : pathParam;
   return path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(root, expanded);
 }
 
@@ -132,7 +139,65 @@ function buildEditSuccessResult(pathParam: string, editCount: number): AgentTool
 }
 
 function shouldAddMismatchHint(error: unknown) {
-  return error instanceof Error && error.message.includes(EDIT_MISMATCH_MESSAGE);
+  return (
+    error instanceof Error &&
+    (error.message.includes(EDIT_MISMATCH_MESSAGE) ||
+      error.message.includes("Missing required parameter: edits") ||
+      error.message.includes("Missing required parameters: edits"))
+  );
+}
+
+function countOccurrences(content: string, needle: string): number {
+  if (!needle) {
+    return 0;
+  }
+  let count = 0;
+  let offset = 0;
+  while (offset <= content.length) {
+    const index = content.indexOf(needle, offset);
+    if (index === -1) {
+      break;
+    }
+    count += 1;
+    offset = index + needle.length;
+  }
+  return count;
+}
+
+function classifyMechanicalEditFailure(params: {
+  error: unknown;
+  currentContent?: string;
+  edits: EditReplacement[];
+}): "old_text_mismatch" | "ambiguous_old_text" | "mechanical_edit_failure" | undefined {
+  if (typeof params.currentContent === "string" && params.edits.length > 0) {
+    const normalizedCurrent = normalizeToLF(params.currentContent);
+    const counts = params.edits.map((edit) =>
+      countOccurrences(normalizedCurrent, normalizeToLF(edit.oldText)),
+    );
+    if (counts.some((count) => count > 1)) {
+      return "ambiguous_old_text";
+    }
+    if (counts.some((count) => count === 0)) {
+      return "old_text_mismatch";
+    }
+  }
+  const error = params.error;
+  if (!(error instanceof Error)) {
+    return undefined;
+  }
+  if (
+    error.message.includes("Missing required parameter: edits") ||
+    error.message.includes("Missing required parameters: edits")
+  ) {
+    return "mechanical_edit_failure";
+  }
+  if (error.message.includes(EDIT_MISMATCH_MESSAGE)) {
+    return "old_text_mismatch";
+  }
+  if (AMBIGUOUS_EDIT_PATTERNS.some((pattern) => pattern.test(error.message))) {
+    return "ambiguous_old_text";
+  }
+  return undefined;
 }
 
 function appendMismatchHint(error: Error, currentContent: string): Error {
@@ -140,9 +205,43 @@ function appendMismatchHint(error: Error, currentContent: string): Error {
     currentContent.length <= EDIT_MISMATCH_HINT_LIMIT
       ? currentContent
       : `${currentContent.slice(0, EDIT_MISMATCH_HINT_LIMIT)}\n... (truncated)`;
-  const enhanced = new Error(`${error.message}\nCurrent file contents:\n${snippet}`);
+  const enhanced = new Error(
+    `${error.message}\nCurrent file contents:\n${snippet}\nInspect the surrounding context and use a unique oldText anchor.`,
+  );
   enhanced.stack = error.stack;
   return enhanced;
+}
+
+async function recordEditFailureSignal(params: {
+  routeHealth?: EditToolRecoveryOptions["routeHealth"];
+  absolutePath?: string;
+  failureKind: "old_text_mismatch" | "ambiguous_old_text" | "mechanical_edit_failure";
+}) {
+  if (!params.routeHealth?.childSessionKey) {
+    return;
+  }
+  await recordChildRouteEditFailure({
+    childSessionKey: params.routeHealth.childSessionKey,
+    runId: params.routeHealth.runId,
+    ...(params.absolutePath ? { filePath: params.absolutePath } : {}),
+    toolKind: "edit",
+    failureKind: params.failureKind,
+  });
+}
+
+async function recordEditSuccessSignal(params: {
+  routeHealth?: EditToolRecoveryOptions["routeHealth"];
+  absolutePath?: string;
+}) {
+  if (!params.routeHealth?.childSessionKey) {
+    return;
+  }
+  await recordChildRouteEditSuccess({
+    childSessionKey: params.routeHealth.childSessionKey,
+    runId: params.routeHealth.runId,
+    ...(params.absolutePath ? { filePath: params.absolutePath } : {}),
+    toolKind: "edit",
+  });
 }
 
 /**
@@ -176,20 +275,25 @@ export function wrapEditToolWithRecovery(
       }
 
       try {
-        return await base.execute(toolCallId, params, signal, onUpdate);
+        const result = await base.execute(toolCallId, params, signal, onUpdate);
+        if (absolutePath && edits.length > 0) {
+          await recordEditSuccessSignal({
+            routeHealth: options.routeHealth,
+            absolutePath,
+          });
+        }
+        return result;
       } catch (err) {
-        if (!absolutePath) {
-          throw err;
-        }
-
         let currentContent: string | undefined;
-        try {
-          currentContent = await options.readFile(absolutePath);
-        } catch {
-          // Fall through to the original error if readback fails.
+        if (absolutePath) {
+          try {
+            currentContent = await options.readFile(absolutePath);
+          } catch {
+            // Fall through to the original error if readback fails.
+          }
         }
 
-        if (typeof currentContent === "string" && edits.length > 0) {
+        if (absolutePath && typeof currentContent === "string" && edits.length > 0) {
           if (
             didEditLikelyApply({
               originalContent,
@@ -197,8 +301,25 @@ export function wrapEditToolWithRecovery(
               edits,
             })
           ) {
+            await recordEditSuccessSignal({
+              routeHealth: options.routeHealth,
+              absolutePath,
+            });
             return buildEditSuccessResult(pathParam ?? absolutePath, edits.length);
           }
+        }
+
+        const failureKind = classifyMechanicalEditFailure({
+          error: err,
+          currentContent,
+          edits,
+        });
+        if (failureKind) {
+          await recordEditFailureSignal({
+            routeHealth: options.routeHealth,
+            absolutePath,
+            failureKind,
+          });
         }
 
         if (

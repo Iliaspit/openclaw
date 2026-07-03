@@ -196,8 +196,32 @@ export const FIELD_HELP: Record<string, string> = {
     "Shared default settings inherited by agents unless overridden per entry in agents.list. Use defaults to enforce consistent baseline behavior and reduce duplicated per-agent configuration.",
   "agents.defaults.skills":
     "Optional default skill allowlist inherited by agents that omit agents.list[].skills. Omit for unrestricted skills, set [] to give inheriting agents no skills, and remember explicit agents.list[].skills replaces this default instead of merging with it.",
+  "agents.defaults.contextLimits":
+    "Focused per-agent-context budget defaults for selected high-volume excerpts and injected prompt blocks. Use this to tune bounded read/injection sizes without reopening any unbounded call paths.",
+  "agents.defaults.contextLimits.memoryGetMaxChars":
+    "Default max characters returned by memory_get before truncation metadata and continuation notice are added. Increase to approximate older larger excerpts, but keep it bounded.",
+  "agents.defaults.contextLimits.memoryGetDefaultLines":
+    "Default memory_get line window used when requests omit lines. This controls how many source lines are selected before the max-char cap is applied.",
+  "agents.defaults.contextLimits.toolResultMaxChars":
+    "Default max characters kept for a single live tool result before truncation. This affects both persisted live tool-result writes and overflow-recovery truncation heuristics.",
+  "agents.defaults.contextLimits.postCompactionMaxChars":
+    "Default max characters retained from AGENTS.md during post-compaction context refresh injection. Lower this to make compaction recovery cheaper, or raise it for agents that depend on longer startup guidance.",
   "agents.list":
     "Explicit list of configured agents with IDs and optional overrides for model, tools, identity, and workspace. Keep IDs stable over time so bindings, approvals, and session routing remain deterministic.",
+  "agents.list[].skillsLimits":
+    "Optional per-agent overrides for skills subsystem budgets. Use this when an agent needs a different skills prompt budget without introducing a second generic context-limits path.",
+  "agents.list[].skillsLimits.maxSkillsPromptChars":
+    "Per-agent override for the skills prompt character budget. This extends the existing skills.limits.maxSkillsPromptChars path instead of routing the same budget through contextLimits.",
+  "agents.list[].contextLimits":
+    "Optional per-agent overrides for the focused context budget knobs. Omitted fields inherit agents.defaults.contextLimits.",
+  "agents.list[].contextLimits.memoryGetMaxChars":
+    "Per-agent override for the default memory_get max character budget.",
+  "agents.list[].contextLimits.memoryGetDefaultLines":
+    "Per-agent override for the default memory_get line window when lines is omitted.",
+  "agents.list[].contextLimits.toolResultMaxChars":
+    "Per-agent override for the live tool-result max character budget.",
+  "agents.list[].contextLimits.postCompactionMaxChars":
+    "Per-agent override for the post-compaction AGENTS.md excerpt budget.",
   "agents.list[].thinkingDefault":
     "Optional per-agent default thinking level. Overrides agents.defaults.thinkingDefault for this agent when no per-message or session override is set.",
   "agents.list[].reasoningDefault":
@@ -311,15 +335,19 @@ export const FIELD_HELP: Record<string, string> = {
   "tools.exec.node":
     "Node binding configuration for exec tooling when command execution is delegated through connected nodes. Use explicit node binding only when multi-node routing is required.",
   "tools.agentToAgent":
-    "Policy for allowing agent-to-agent tool calls and constraining which target agents can be reached. Keep disabled or tightly scoped unless cross-agent orchestration is intentionally enabled.",
+    "Policy for allowing agent-to-agent tool calls and constraining which target agents can be reached. Defaults allow PM1–PM4 orchestration; tighten or disable this in shared deployments.",
   "tools.agentToAgent.enabled":
-    "Enables the agent_to_agent tool surface so one agent can invoke another agent at runtime. Keep off in simple deployments and enable only when orchestration value outweighs complexity.",
+    "Enables the agent-to-agent tool surface so one agent can invoke another agent at runtime. Defaults to enabled so trusted PM1–PM4 coordination works without local config drift.",
   "tools.agentToAgent.allow":
-    "Allowlist of target agent IDs permitted for agent_to_agent calls when orchestration is enabled. Use explicit allowlists to avoid uncontrolled cross-agent call graphs.",
+    "Allowlist of agent IDs or patterns permitted for agent-to-agent calls when orchestration is enabled. Defaults to PM1, PM2, PM3, and PM4.",
   "tools.experimental":
     "Experimental built-in tool flags. Keep these off by default and enable only when you are intentionally testing a preview surface.",
   "tools.experimental.planTool":
     "Enable the experimental structured `update_plan` tool for non-trivial multi-step work tracking. Leave this off unless you explicitly want the tool outside strict-agentic embedded Pi runs.",
+  "tools.catalog":
+    "Native catalog tool registration for repo file-summary lookups backed by the workspace catalog CLI. Enable this only in workspaces that provide `scripts/openclaw-catalog/catalog.mjs`.",
+  "tools.catalog.enabled":
+    "Enables the built-in `catalog` tool when the active workspace contains the catalog CLI entrypoint. Leave this off in non-Astino workspaces so the tool is not advertised where the backing script is absent.",
   "tools.elevated":
     "Elevated tool access controls for privileged command surfaces that should only be reachable from trusted senders. Keep disabled unless operator workflows explicitly require elevated actions.",
   "tools.elevated.enabled":
@@ -679,7 +707,7 @@ export const FIELD_HELP: Record<string, string> = {
   "tools.fs.workspaceOnly":
     "Restrict filesystem tools (read/write/edit/apply_patch) to the workspace directory (default: false).",
   "tools.sessions.visibility":
-    'Controls which sessions can be targeted by sessions_list/sessions_history/sessions_send. ("tree" default = current session + spawned subagent sessions; "self" = only current; "agent" = any session in the current agent id; "all" = any session; cross-agent still requires tools.agentToAgent).',
+    'Controls which sessions can be targeted by sessions_list/sessions_history/sessions_send. ("all" default = any session; "self" = only current; "tree" = current session + spawned subagent sessions; "agent" = any session in the current agent id; cross-agent still requires tools.agentToAgent).',
   "tools.message.allowCrossContextSend":
     "Legacy override: allow cross-context sends across all providers.",
   "tools.message.crossContext.allowWithinProvider":
@@ -848,8 +876,10 @@ export const FIELD_HELP: Record<string, string> = {
     "Max characters of each workspace bootstrap file injected into the system prompt before truncation (default: 20000).",
   "agents.defaults.bootstrapTotalMaxChars":
     "Max total characters across all injected workspace bootstrap files (default: 150000).",
-  "agents.defaults.localModelMode":
-    'Local-model prompt profile: "default" keeps the standard tool surface, while "lean" drops heavyweight non-essential tools for smaller or weaker models.',
+  "agents.defaults.experimental":
+    "Experimental agent-default flags. Keep these off unless you are intentionally testing a preview surface.",
+  "agents.defaults.experimental.localModelLean":
+    "Experimental local-model prompt trim. When enabled, OpenClaw drops heavyweight default tools like browser, cron, and message for weaker or smaller local-model backends.",
   "agents.defaults.bootstrapPromptTruncationWarning":
     'Inject agent-visible warning text when bootstrap files are truncated: "off", "once" (default), or "always".',
   "agents.defaults.startupContext":
@@ -863,9 +893,9 @@ export const FIELD_HELP: Record<string, string> = {
   "agents.defaults.startupContext.maxFileBytes":
     "Maximum bytes allowed per daily memory file when building startup context (default: 16384). Files over this boundary-safe read limit are skipped.",
   "agents.defaults.startupContext.maxFileChars":
-    "Maximum characters retained from each loaded daily memory file in the startup prelude (default: 2000).",
+    "Maximum characters retained from each loaded daily memory file in the startup prelude (default: 1200).",
   "agents.defaults.startupContext.maxTotalChars":
-    "Maximum total characters retained across all loaded daily memory files in the startup prelude (default: 4500). Additional files are truncated from the prelude once this cap is reached.",
+    "Maximum total characters retained across all loaded daily memory files in the startup prelude (default: 2800). Additional files are truncated from the prelude once this cap is reached.",
   "agents.defaults.repoRoot":
     "Optional repository root shown in the system prompt runtime line (overrides auto-detect).",
   "agents.defaults.envelopeTimezone":

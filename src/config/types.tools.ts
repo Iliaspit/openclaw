@@ -589,16 +589,16 @@ export type ToolsConfig = {
     };
   };
   agentToAgent?: {
-    /** Enable agent-to-agent messaging tools. Default: false. */
+    /** Enable agent-to-agent messaging tools. Default: true. */
     enabled?: boolean;
-    /** Allowlist of agent ids or patterns (implementation-defined). */
+    /** Allowlist of agent ids or patterns. Default: ["PM1", "PM2", "PM3", "PM4"]. */
     allow?: string[];
   };
   /**
    * Session tool visibility controls which sessions can be targeted by session tools
    * (sessions_list, sessions_history, sessions_send).
    *
-   * Default: "tree" (current session + spawned subagent sessions).
+   * Default: "all" (cross-agent access still requires tools.agentToAgent).
    */
   sessions?: {
     /**
@@ -618,6 +618,11 @@ export type ToolsConfig = {
   };
   /** Exec tool defaults. */
   exec?: ExecToolConfig;
+  /** Native catalog tool registration. */
+  catalog?: {
+    /** Enable the built-in `catalog` tool when the workspace exposes the catalog CLI. */
+    enabled?: boolean;
+  };
   /** Filesystem tool path guards. */
   fs?: FsToolsConfig;
   /** Runtime loop detection for repetitive/ stuck tool-call patterns. */

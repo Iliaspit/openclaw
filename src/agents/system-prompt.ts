@@ -312,6 +312,7 @@ function buildMessagingSection(params: {
     "- Reply in current session → automatically routes to the source channel (Signal, Telegram, etc.)",
     "- Cross-session messaging → use sessions_send(sessionKey, message) for plain inter-session messages",
     "- Sub-agent orchestration (tracked completion, restarting finished child sessions, kill/list control) → use subagents(action=list|steer|kill) and sessions_spawn",
+    "- Do not use fire-and-forget sessions_send to stale or untracked subagent sessions; it cannot create tracked child completion events. Spawn a fresh child when the old child is no longer tracked.",
     `- Runtime-generated completion events may ask for a user update. Rewrite those in your normal assistant voice and send the update (do not forward raw internal metadata or default to ${SILENT_REPLY_TOKEN}).`,
     "- Never use exec/curl for provider messaging; OpenClaw handles all routing internally.",
     params.availableTools.has("message")
@@ -652,13 +653,13 @@ export function buildAgentSystemPrompt(params: {
           "- cron: manage cron jobs and wake events (use for reminders; when scheduling a reminder, write the systemEvent text as something that will read like a reminder when it fires, and mention that it is a reminder depending on the time gap between setting and firing; include recent context in reminder text if appropriate)",
           "- sessions_list: list sessions",
           "- sessions_history: fetch session history",
-          "- sessions_send: send a plain message to another session",
+          "- sessions_send: send a plain message to another session; not the tracked child-orchestration path",
           "- subagents: list/steer/kill tracked sub-agent runs (including restarting finished child sessions)",
           '- session_status: show usage/time/model state and answer "what model are we using?"',
         ].join("\n"),
     "TOOLS.md does not control tool availability; it is user guidance for how to use external tools.",
     `For long waits, avoid rapid poll loops: use ${execToolName} with enough yieldMs or ${processToolName}(action=poll, timeout=<ms>).`,
-    "If a task is more complex or takes longer, spawn a sub-agent. Completion is push-based: it will auto-announce when done. Re-task existing child sessions through subagents when you need that same tracked completion path.",
+    "If a task is more complex or takes longer, spawn a sub-agent. Completion is push-based: it will auto-announce when done. Re-task existing child sessions through subagents when you need that same tracked completion path. If the old child is no longer tracked, spawn a fresh child instead of using fire-and-forget sessions_send.",
     ...(acpHarnessSpawnAllowed
       ? [
           'For requests like "do this in codex/claude code/cursor/gemini" or similar ACP harnesses, treat it as ACP harness intent and call `sessions_spawn` with `runtime: "acp"`.',
@@ -744,6 +745,7 @@ export function buildAgentSystemPrompt(params: {
     "## Workspace",
     `Your working directory is: ${displayWorkspaceDir}`,
     workspaceGuidance,
+    "If INCIDENTS.md exists in this workspace, consult it before investigating an issue or making a requested change. Append a concise entry when this work reveals or resolves an incident.",
     ...workspaceNotes,
     "",
     ...docsSection,

@@ -621,6 +621,8 @@ export const zh_CN: TranslationMap = {
     hideCronSessions: "隐藏定时任务会话",
     showCronSessions: "显示定时任务会话",
     showCronSessionsHidden: "显示定时任务会话 (已隐藏 {count} 个)",
+    sessionSelectTopLevel: "Top-level agents",
+    sessionSelectOther: "Spawned and other sessions",
     onboardingDisabled: "引导期间禁用",
   },
   languages: {

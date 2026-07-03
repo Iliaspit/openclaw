@@ -100,6 +100,9 @@ function createChatHeaderState(
     chatModelOverrides: {},
     chatModelCatalog: catalog,
     chatModelsLoading: false,
+    queueHealthLoading: false,
+    queueHealthError: null,
+    queueHealthResult: null,
     client: { request } as unknown as GatewayBrowserClient,
     settings: {
       gatewayUrl: "",
@@ -927,6 +930,374 @@ describe("chat view", () => {
     vi.unstubAllGlobals();
   });
 
+  it("renders queue pressure for the selected chat session", () => {
+    const { state } = createChatHeaderState();
+    state.queueHealthResult = {
+      ts: 123,
+      gatewayDraining: false,
+      totalQueued: 2,
+      totalActive: 1,
+      totalDepth: 3,
+      totalRuntimeIssues: 0,
+      runtimeIssues: [],
+      lanes: [
+        {
+          lane: "session:main",
+          health: "waiting",
+          queued: 2,
+          active: 1,
+          depth: 3,
+          maxConcurrent: 1,
+          isOverloaded: true,
+          draining: false,
+          oldestQueuedAt: 100,
+          oldestQueuedMs: 125_000,
+          oldestActiveStartedAt: 50,
+          oldestActiveMs: 150_000,
+          lastWaitMs: 125_000,
+          lastDequeuedAt: 110,
+          lastTaskDurationMs: null,
+          lastCompletedAt: null,
+          lastErrorAt: null,
+          lastClearedAt: null,
+          runtimeIssues: [],
+        },
+      ],
+    };
+    const container = document.createElement("div");
+
+    render(renderChatSessionSelect(state), container);
+
+    const widget = container.querySelector<HTMLElement>(".queue-health");
+    expect(widget).not.toBeNull();
+    expect(widget?.classList.contains("queue-health--waiting")).toBe(true);
+    expect(widget?.textContent).toContain("Selected lane overloaded");
+    expect(widget?.textContent).toContain("oldest 2m 5s");
+    expect(widget?.textContent).toContain("1 running, 2 waiting");
+    expect(widget?.getAttribute("title")).toContain("Selected lane: session:main");
+    expect(widget?.getAttribute("title")).toContain("active=1 queued=2 tasks=3");
+  });
+
+  it("ignores other-lane queue pressure in the selected chat session pill", () => {
+    const { state } = createChatHeaderState();
+    state.queueHealthResult = {
+      ts: 123,
+      gatewayDraining: false,
+      totalQueued: 2,
+      totalActive: 1,
+      totalDepth: 3,
+      totalRuntimeIssues: 0,
+      runtimeIssues: [],
+      lanes: [
+        {
+          lane: "session:main",
+          health: "idle",
+          queued: 0,
+          active: 0,
+          depth: 0,
+          maxConcurrent: 1,
+          isOverloaded: false,
+          draining: false,
+          oldestQueuedAt: null,
+          oldestQueuedMs: null,
+          oldestActiveStartedAt: null,
+          oldestActiveMs: null,
+          lastWaitMs: null,
+          lastDequeuedAt: null,
+          lastTaskDurationMs: null,
+          lastCompletedAt: null,
+          lastErrorAt: null,
+          lastClearedAt: null,
+          runtimeIssues: [],
+        },
+        {
+          lane: "session:agent:planner-2:main",
+          health: "waiting",
+          queued: 2,
+          active: 1,
+          depth: 3,
+          maxConcurrent: 1,
+          isOverloaded: true,
+          draining: false,
+          oldestQueuedAt: 100,
+          oldestQueuedMs: 125_000,
+          oldestActiveStartedAt: 50,
+          oldestActiveMs: 150_000,
+          lastWaitMs: 125_000,
+          lastDequeuedAt: 110,
+          lastTaskDurationMs: null,
+          lastCompletedAt: null,
+          lastErrorAt: null,
+          lastClearedAt: null,
+          runtimeIssues: [],
+        },
+      ],
+    };
+    const container = document.createElement("div");
+
+    render(renderChatSessionSelect(state), container);
+
+    const widget = container.querySelector<HTMLElement>(".queue-health");
+    expect(widget).not.toBeNull();
+    expect(widget?.classList.contains("queue-health--idle")).toBe(true);
+    expect(widget?.textContent).toContain("Queue idle");
+    expect(widget?.textContent).not.toContain("Other lane overloaded");
+    expect(widget?.textContent).not.toContain("3 tasks");
+    expect(widget?.getAttribute("title")).not.toContain("session:agent:planner-2:main");
+  });
+
+  it("renders selected-lane runtime issues when the scheduler queue is otherwise idle", () => {
+    const { state } = createChatHeaderState();
+    state.sessionKey = "agent:planner-4:main";
+    state.queueHealthResult = {
+      ts: 123,
+      gatewayDraining: false,
+      totalQueued: 0,
+      totalActive: 0,
+      totalDepth: 0,
+      totalRuntimeIssues: 1,
+      runtimeIssues: [
+        {
+          runId: "run-planner-lifecycle-error",
+          code: "agent_lifecycle_error",
+          severity: "error",
+          message: "Agent lifecycle error.",
+          observedAt: 100,
+          lastUpdatedAt: 120,
+          count: 1,
+          sessionKey: "agent:planner-4:main",
+          lane: "session:agent:planner-4:main",
+          livenessState: "blocked",
+        },
+      ],
+      lanes: [
+        {
+          lane: "session:agent:planner-4:main",
+          health: "blocked",
+          queued: 0,
+          active: 0,
+          depth: 0,
+          maxConcurrent: 1,
+          isOverloaded: false,
+          draining: false,
+          oldestQueuedAt: null,
+          oldestQueuedMs: null,
+          oldestActiveStartedAt: null,
+          oldestActiveMs: null,
+          lastWaitMs: null,
+          lastDequeuedAt: null,
+          lastTaskDurationMs: null,
+          lastCompletedAt: null,
+          lastErrorAt: null,
+          lastClearedAt: null,
+          runtimeIssues: [
+            {
+              runId: "run-planner-lifecycle-error",
+              code: "agent_lifecycle_error",
+              severity: "error",
+              message: "Agent lifecycle error.",
+              observedAt: 100,
+              lastUpdatedAt: 120,
+              count: 1,
+              sessionKey: "agent:planner-4:main",
+              lane: "session:agent:planner-4:main",
+              livenessState: "blocked",
+            },
+          ],
+        },
+      ],
+    };
+    const container = document.createElement("div");
+
+    render(renderChatSessionSelect(state), container);
+
+    const widget = container.querySelector<HTMLElement>(".queue-health");
+    expect(widget).not.toBeNull();
+    expect(widget?.classList.contains("queue-health--error")).toBe(true);
+    expect(widget?.textContent).toContain("Agent blocked");
+    expect(widget?.textContent).toContain("runtime error");
+    expect(widget?.textContent).not.toContain("agent_lifecycle_error");
+    expect(widget?.getAttribute("title")).toContain("runtime issues=1");
+    expect(widget?.getAttribute("title")).toContain("issues=agent_lifecycle_error");
+  });
+
+  it("renders degraded runtime issues without treating the lane as idle", () => {
+    const { state } = createChatHeaderState();
+    state.queueHealthResult = {
+      ts: 123,
+      gatewayDraining: false,
+      totalQueued: 0,
+      totalActive: 0,
+      totalDepth: 0,
+      totalRuntimeIssues: 1,
+      runtimeIssues: [
+        {
+          runId: "run-planner-abandoned",
+          code: "agent_lifecycle_abandoned",
+          severity: "warning",
+          message: "Agent ended without a visible reply after replay-invalid work.",
+          observedAt: 100,
+          lastUpdatedAt: 120,
+          count: 1,
+          sessionKey: "main",
+          lane: "session:main",
+          livenessState: "abandoned",
+        },
+      ],
+      lanes: [
+        {
+          lane: "session:main",
+          health: "degraded",
+          queued: 0,
+          active: 0,
+          depth: 0,
+          maxConcurrent: 1,
+          isOverloaded: false,
+          draining: false,
+          oldestQueuedAt: null,
+          oldestQueuedMs: null,
+          oldestActiveStartedAt: null,
+          oldestActiveMs: null,
+          lastWaitMs: null,
+          lastDequeuedAt: null,
+          lastTaskDurationMs: null,
+          lastCompletedAt: null,
+          lastErrorAt: null,
+          lastClearedAt: null,
+          runtimeIssues: [
+            {
+              runId: "run-planner-abandoned",
+              code: "agent_lifecycle_abandoned",
+              severity: "warning",
+              message: "Agent ended without a visible reply after replay-invalid work.",
+              observedAt: 100,
+              lastUpdatedAt: 120,
+              count: 1,
+              sessionKey: "main",
+              lane: "session:main",
+              livenessState: "abandoned",
+            },
+          ],
+        },
+      ],
+    };
+    const container = document.createElement("div");
+
+    render(renderChatSessionSelect(state), container);
+
+    const widget = container.querySelector<HTMLElement>(".queue-health");
+    expect(widget).not.toBeNull();
+    expect(widget?.classList.contains("queue-health--degraded")).toBe(true);
+    expect(widget?.textContent).toContain("Agent degraded");
+    expect(widget?.textContent).toContain("no final report");
+    expect(widget?.textContent).not.toContain("agent_lifecycle_abandoned");
+  });
+
+  it("logs a sanitized queue snapshot when the queue widget is clicked", () => {
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const tableSpy = vi.spyOn(console, "table").mockImplementation(() => undefined);
+    try {
+      const { state } = createChatHeaderState();
+      state.queueHealthResult = {
+        ts: 123,
+        gatewayDraining: false,
+        totalQueued: 1,
+        totalActive: 1,
+        totalDepth: 2,
+        totalRuntimeIssues: 0,
+        runtimeIssues: [],
+        lanes: [
+          {
+            lane: "session:main",
+            health: "waiting",
+            queued: 1,
+            active: 1,
+            depth: 2,
+            maxConcurrent: 1,
+            isOverloaded: true,
+            draining: false,
+            oldestQueuedAt: 100,
+            oldestQueuedMs: 125_000,
+            oldestActiveStartedAt: 50,
+            oldestActiveMs: 150_000,
+            lastWaitMs: 125_000,
+            lastDequeuedAt: 110,
+            lastTaskDurationMs: null,
+            lastCompletedAt: null,
+            lastErrorAt: null,
+            lastClearedAt: null,
+            runtimeIssues: [],
+          },
+          {
+            lane: "session:agent:planner-2:main",
+            health: "waiting",
+            queued: 3,
+            active: 1,
+            depth: 4,
+            maxConcurrent: 1,
+            isOverloaded: true,
+            draining: false,
+            oldestQueuedAt: 100,
+            oldestQueuedMs: 300_000,
+            oldestActiveStartedAt: 50,
+            oldestActiveMs: 350_000,
+            lastWaitMs: 300_000,
+            lastDequeuedAt: 110,
+            lastTaskDurationMs: null,
+            lastCompletedAt: null,
+            lastErrorAt: null,
+            lastClearedAt: null,
+            runtimeIssues: [],
+          },
+        ],
+      };
+      const container = document.createElement("div");
+
+      render(renderChatSessionSelect(state), container);
+
+      container
+        .querySelector<HTMLElement>(".queue-health")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+      expect(infoSpy).toHaveBeenCalledWith(
+        "[openclaw queue.health]",
+        expect.objectContaining({
+          selectedLane: "session:main",
+          lane: expect.objectContaining({
+            lane: "session:main",
+            sessionKey: "main",
+            action: "Backlog is saturated. Wait, stop, or reduce sends to this lane.",
+            active: 1,
+            queued: 1,
+            depth: 2,
+            issueCodes: "none",
+          }),
+        }),
+      );
+      const loggedPayload = infoSpy.mock.calls[0]?.[1] as Record<string, unknown>;
+      expect(loggedPayload).not.toHaveProperty("totals");
+      expect(loggedPayload).not.toHaveProperty("lanes");
+      expect(JSON.stringify(loggedPayload)).not.toContain("planner-2");
+      expect(tableSpy).toHaveBeenCalledWith([
+        expect.objectContaining({
+          selected: true,
+          sessionKey: "main",
+          lane: "session:main",
+          action: "Backlog is saturated. Wait, stop, or reduce sends to this lane.",
+          active: 1,
+          queued: 1,
+          depth: 2,
+          activeAge: "2m 30s",
+          oldestWait: "2m 5s",
+          issueCodes: "none",
+        }),
+      ]);
+    } finally {
+      infoSpy.mockRestore();
+      tableSpy.mockRestore();
+    }
+  });
+
   it("reloads effective tools after a chat-header model switch for the active tools panel", async () => {
     vi.stubGlobal(
       "fetch",
@@ -1125,6 +1496,47 @@ describe("chat view", () => {
     );
   });
 
+  it("labels planner-owned subagents by planner, feature, and ordinal", () => {
+    const { state } = createChatHeaderState({ omitSessionFromList: true });
+    state.sessionKey = "agent:implementer:subagent:5fbe1d75-b538-4c91-99c8-ba1918b1d888";
+    state.settings.sessionKey = state.sessionKey;
+    state.agentsList = {
+      defaultId: "planner-4",
+      mainKey: "agent:planner-4:main",
+      scope: "all",
+      agents: [
+        { id: "planner-4", name: "Planner 4" },
+        { id: "implementer", name: "Implementer" },
+      ],
+    };
+    state.sessionsResult = {
+      ts: 0,
+      path: "",
+      count: 1,
+      defaults: { modelProvider: "openai", model: "gpt-5", contextTokens: null },
+      sessions: [
+        {
+          key: state.sessionKey,
+          kind: "direct",
+          updatedAt: null,
+          parentSessionKey: "agent:planner-4:main",
+          subagentLabel: "Runtime health UI",
+          subagentOrdinal: 17,
+        },
+      ],
+    };
+    const container = document.createElement("div");
+    render(renderChatSessionSelect(state), container);
+
+    const [sessionSelect] = Array.from(container.querySelectorAll<HTMLSelectElement>("select"));
+    const labels = Array.from(sessionSelect?.querySelectorAll("option") ?? []).map((option) =>
+      option.textContent?.trim(),
+    );
+
+    expect(labels).toContain("Planner 4 - Runtime health UI - #17");
+    expect(labels).not.toContain("subagent:5fbe1d75-b538-4c91-99c8-ba1918b1d888");
+  });
+
   it("keeps a unique scoped fallback when the current grouped session is missing from sessions.list", () => {
     const { state } = createChatHeaderState({ omitSessionFromList: true });
     state.sessionKey = "agent:main:subagent:4f2146de-887b-4176-9abe-91140082959b";
@@ -1250,8 +1662,8 @@ describe("chat view", () => {
       option.textContent?.trim(),
     );
 
-    expect(labels).toContain("Deep Chat (alpha) / main");
-    expect(labels).toContain("Coding (beta) / main");
+    expect(labels).toContain("Deep Chat (alpha)");
+    expect(labels).toContain("Coding (beta)");
     expect(labels).not.toContain("main");
   });
 
@@ -1300,9 +1712,10 @@ describe("chat view", () => {
       option.textContent?.trim(),
     );
 
-    expect(labels.filter((label) => label === "Deep Chat (alpha) / main")).toHaveLength(1);
-    expect(labels).toContain("Deep Chat (alpha) / main · named-main");
-    expect(labels).toContain("Coding (beta) / main");
+    expect(labels).toHaveLength(3);
+    expect(labels.filter((label) => label?.includes("Deep Chat (alpha) / main"))).toHaveLength(1);
+    expect(labels).toContain("Deep Chat (alpha)");
+    expect(labels).toContain("Coding (beta)");
   });
 
   it("keeps tool cards collapsed by default and expands them inline on demand", async () => {

@@ -1,4 +1,5 @@
 import {
+  CATALOG_TOOL_DISPLAY_SUMMARY,
   CRON_TOOL_DISPLAY_SUMMARY,
   EXEC_TOOL_DISPLAY_SUMMARY,
   PROCESS_TOOL_DISPLAY_SUMMARY,
@@ -92,6 +93,14 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     description: PROCESS_TOOL_DISPLAY_SUMMARY,
     sectionId: "runtime",
     profiles: ["coding"],
+  },
+  {
+    id: "catalog",
+    label: "catalog",
+    description: CATALOG_TOOL_DISPLAY_SUMMARY,
+    sectionId: "runtime",
+    profiles: [],
+    includeInOpenClawGroup: true,
   },
   {
     id: "code_execution",

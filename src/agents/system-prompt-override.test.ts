@@ -16,6 +16,21 @@ describe("resolveSystemPromptOverride", () => {
     ).toBe("default system");
   });
 
+  it("prepends the runtime workspace note when a workspace is provided", () => {
+    expect(
+      resolveSystemPromptOverride({
+        config: {
+          agents: {
+            defaults: { systemPromptOverride: "default system" },
+            list: [{ id: "main", systemPromptOverride: "agent system" }],
+          },
+        },
+        agentId: "main",
+        workspaceDir: "/tmp/worktree",
+      }),
+    ).toContain("Current session workspace (authoritative): /tmp/worktree");
+  });
+
   it("prefers the per-agent override", () => {
     expect(
       resolveSystemPromptOverride({

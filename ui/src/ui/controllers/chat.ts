@@ -114,6 +114,8 @@ export type ChatState = {
   chatStream: string | null;
   chatStreamStartedAt: number | null;
   lastError: string | null;
+  /** Reload chat.history after the active run ends (shared with session.message deferral in app-gateway). */
+  pendingSessionMessageReloadSessionKey?: string | null;
 };
 
 export type ChatEventPayload = {
@@ -141,6 +143,14 @@ export async function loadChatHistory(state: ChatState) {
     return;
   }
   const sessionKey = state.sessionKey;
+
+  // While a chat run is active, chat.history may omit the optimistic user turn (especially under
+  // load). Defer reload until the run completes — app-gateway replays pendingSessionMessageReloadSessionKey.
+  if (state.chatRunId) {
+    state.pendingSessionMessageReloadSessionKey = sessionKey;
+    return;
+  }
+
   const requestVersion = beginChatHistoryRequest(state);
   const startedAt = Date.now();
   state.chatLoading = true;
@@ -174,6 +184,10 @@ export async function loadChatHistory(state: ChatState) {
       }
     }
     if (!shouldApplyChatHistoryResult(state, requestVersion, sessionKey)) {
+      return;
+    }
+    if (state.chatRunId) {
+      state.pendingSessionMessageReloadSessionKey = sessionKey;
       return;
     }
     const messages = Array.isArray(res.messages) ? res.messages : [];

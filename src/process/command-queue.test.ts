@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { importFreshModule } from "../../test/helpers/import-fresh.js";
+import { recordAgentRuntimeIssue } from "../infra/agent-runtime-health.js";
 import { CommandLane } from "./lanes.js";
 
 const diagnosticMocks = vi.hoisted(() => ({
@@ -26,6 +27,7 @@ let enqueueCommand: CommandQueueModule["enqueueCommand"];
 let enqueueCommandInLane: CommandQueueModule["enqueueCommandInLane"];
 let GatewayDrainingError: CommandQueueModule["GatewayDrainingError"];
 let getActiveTaskCount: CommandQueueModule["getActiveTaskCount"];
+let getCommandQueueSnapshot: CommandQueueModule["getCommandQueueSnapshot"];
 let getQueueSize: CommandQueueModule["getQueueSize"];
 let markGatewayDraining: CommandQueueModule["markGatewayDraining"];
 let resetAllLanes: CommandQueueModule["resetAllLanes"];
@@ -64,6 +66,7 @@ describe("command queue", () => {
       enqueueCommandInLane,
       GatewayDrainingError,
       getActiveTaskCount,
+      getCommandQueueSnapshot,
       getQueueSize,
       markGatewayDraining,
       resetAllLanes,
@@ -120,6 +123,58 @@ describe("command queue", () => {
     expect(calls).toEqual([1, 2, 3]);
     expect(maxActive).toBe(1);
     expect(getQueueSize()).toBe(0);
+  });
+
+  it("runs high-priority pending tasks before normal pending tasks without preempting active work", async () => {
+    const calls: string[] = [];
+    const blocker = createDeferred();
+    const first = enqueueCommand(async () => {
+      calls.push("active-start");
+      await blocker.promise;
+      calls.push("active-end");
+    });
+    const normal = enqueueCommand(async () => {
+      calls.push("normal");
+    });
+    const high = enqueueCommand(
+      async () => {
+        calls.push("high");
+      },
+      { priority: "high" },
+    );
+
+    await Promise.resolve();
+    expect(calls).toEqual(["active-start"]);
+
+    blocker.resolve();
+    await Promise.all([first, normal, high]);
+
+    expect(calls).toEqual(["active-start", "active-end", "high", "normal"]);
+  });
+
+  it("preserves FIFO ordering within the same priority", async () => {
+    const calls: string[] = [];
+    const blocker = createDeferred();
+    const first = enqueueCommand(async () => {
+      await blocker.promise;
+    });
+    const highOne = enqueueCommand(
+      async () => {
+        calls.push("high-one");
+      },
+      { priority: "high" },
+    );
+    const highTwo = enqueueCommand(
+      async () => {
+        calls.push("high-two");
+      },
+      { priority: "high" },
+    );
+
+    blocker.resolve();
+    await Promise.all([first, highOne, highTwo]);
+
+    expect(calls).toEqual(["high-one", "high-two"]);
   });
 
   it("logs enqueue depth after push", async () => {
@@ -315,6 +370,109 @@ describe("command queue", () => {
 
     resolve2();
     await Promise.all([first, second]);
+  });
+
+  it("reports active and queued lane snapshots without exposing task payloads", async () => {
+    const lane = `snapshot-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setCommandLaneConcurrency(lane, 1);
+    const firstStarted = createDeferred();
+    const blocker = createDeferred();
+
+    const first = enqueueCommandInLane(lane, async () => {
+      firstStarted.resolve();
+      await blocker.promise;
+      return "first";
+    });
+    await firstStarted.promise;
+    const second = enqueueCommandInLane(lane, async () => "second");
+
+    const busySnapshot = getCommandQueueSnapshot();
+    const busyLane = busySnapshot.lanes.find((entry) => entry.lane === lane);
+    expect(busyLane).toMatchObject({
+      lane,
+      health: "waiting",
+      active: 1,
+      queued: 1,
+      depth: 2,
+      maxConcurrent: 1,
+      isOverloaded: true,
+      draining: false,
+    });
+    expect(busyLane?.oldestQueuedAt).toEqual(expect.any(Number));
+    expect(busyLane?.oldestActiveStartedAt).toEqual(expect.any(Number));
+    expect(busyLane?.oldestActiveMs).toEqual(expect.any(Number));
+    expect(Object.keys(busyLane ?? {})).not.toContain("task");
+
+    blocker.resolve();
+    await expect(first).resolves.toBe("first");
+    await expect(second).resolves.toBe("second");
+
+    const idleSnapshot = getCommandQueueSnapshot({ lane });
+    expect(idleSnapshot.lanes).toHaveLength(1);
+    expect(idleSnapshot.lanes[0]).toMatchObject({
+      lane,
+      health: "idle",
+      active: 0,
+      queued: 0,
+      depth: 0,
+      isOverloaded: false,
+    });
+    expect(idleSnapshot.lanes[0]?.lastWaitMs).toEqual(expect.any(Number));
+    expect(idleSnapshot.lanes[0]?.lastCompletedAt).toEqual(expect.any(Number));
+  });
+
+  it("returns a zero-depth snapshot for a requested lane that has not been created", () => {
+    const snapshot = getCommandQueueSnapshot({ lane: " session:missing " });
+    expect(snapshot.totalDepth).toBe(0);
+    expect(snapshot.lanes).toEqual([
+      expect.objectContaining({
+        lane: "session:missing",
+        health: "idle",
+        active: 0,
+        queued: 0,
+        depth: 0,
+        isOverloaded: false,
+      }),
+    ]);
+  });
+
+  it("reports runtime issue-only lanes when no queue task is active", () => {
+    recordAgentRuntimeIssue({
+      runId: "run-planner-overflow",
+      code: "context_overflow",
+      severity: "error",
+      message: "Context overflow: estimated context size exceeds safe threshold.",
+      sessionKey: "agent:planner-4:main",
+    });
+
+    const snapshot = getCommandQueueSnapshot();
+
+    expect(snapshot.totalRuntimeIssues).toBe(1);
+    expect(snapshot.runtimeIssues).toEqual([
+      expect.objectContaining({
+        runId: "run-planner-overflow",
+        code: "context_overflow",
+        lane: "session:agent:planner-4:main",
+      }),
+    ]);
+    expect(snapshot.lanes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          lane: "session:agent:planner-4:main",
+          health: "blocked",
+          active: 0,
+          queued: 0,
+          depth: 0,
+          isOverloaded: false,
+          runtimeIssues: [
+            expect.objectContaining({
+              runId: "run-planner-overflow",
+              code: "context_overflow",
+            }),
+          ],
+        }),
+      ]),
+    );
   });
 
   it("clearCommandLane rejects pending promises", async () => {

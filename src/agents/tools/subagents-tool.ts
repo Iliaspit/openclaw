@@ -1,5 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import { loadConfig } from "../../config/config.js";
+import { guardChildRouteForDelivery } from "../child-route-guard.js";
+import { resolveChildRouteProviderContextFromSession } from "../child-route-provider-context.js";
 import { optionalStringEnum } from "../schema/typebox.js";
 import {
   DEFAULT_RECENT_MINUTES,
@@ -9,6 +11,7 @@ import {
   MAX_RECENT_MINUTES,
   MAX_STEER_MESSAGE_CHARS,
   resolveControlledSubagentTarget,
+  resolveSessionEntryForKey,
   resolveSubagentController,
   steerControlledSubagentRun,
 } from "../subagent-control.js";
@@ -153,6 +156,38 @@ export function createSubagentsTool(opts?: { agentSessionKey?: string }): AnyAge
             action: "steer",
             target,
             error: resolved.error ?? "Unknown subagent target.",
+          });
+        }
+        const targetSession = resolveSessionEntryForKey({
+          cfg,
+          key: resolved.entry.childSessionKey,
+          cache: new Map(),
+        });
+        const routeGuard = await guardChildRouteForDelivery({
+          childSessionKey: resolved.entry.childSessionKey,
+          context: {
+            routeIntent: "followup_reuse",
+            targetMethod: "subagents.steer",
+            requesterSessionKey: controller.controllerSessionKey,
+            childTargetKind: "subagent",
+            registryRecord: resolved.entry,
+            provider: resolveChildRouteProviderContextFromSession({
+              cfg,
+              sessionKey: resolved.entry.childSessionKey,
+              entry: targetSession.entry,
+              requesterSessionKey: controller.controllerSessionKey,
+            }),
+          },
+          payloadForHash: {
+            method: "subagents.steer",
+            message: message.trim(),
+          },
+        });
+        if (!routeGuard.ok) {
+          return jsonResult({
+            ok: false,
+            code: routeGuard.code,
+            details: routeGuard.details,
           });
         }
         const result = await steerControlledSubagentRun({

@@ -1,3 +1,4 @@
+import { stripInternalRuntimeContext } from "../../../../src/agents/internal-runtime-context.js";
 import { stripInboundMetadata } from "../../../../src/auto-reply/reply/strip-inbound-meta.js";
 import { stripEnvelope } from "../../../../src/shared/chat-envelope.js";
 import { extractAssistantVisibleText as extractSharedAssistantVisibleText } from "../../../../src/shared/chat-message-content.js";
@@ -10,7 +11,7 @@ const thinkingCache = new WeakMap<object, string | null>();
 function processMessageText(text: string, role: string): string {
   const shouldStripInboundMetadata = normalizeLowercaseStringOrEmpty(role) === "user";
   if (role === "assistant") {
-    return stripThinkingTags(text);
+    return stripInternalRuntimeContext(stripThinkingTags(text));
   }
   return shouldStripInboundMetadata
     ? stripInboundMetadata(stripEnvelope(text))

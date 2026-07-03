@@ -1,9 +1,47 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AnyAgentTool } from "../agents/tools/common.js";
 import { getFreePortBlockWithPermissionFallback } from "../test-utils/ports.js";
 
 type MockBeforeToolCallHookResult =
   | { blocked: true; reason: string }
   | { blocked: false; params: unknown };
+type ResolveGatewayScopedTools = typeof import("./tool-resolution.js").resolveGatewayScopedTools;
+
+const testToolParameters = {
+  type: "object",
+  properties: {},
+} satisfies AnyAgentTool["parameters"];
+
+function createTextToolExecute(text: string): AnyAgentTool["execute"] {
+  return async () => ({
+    content: [{ type: "text", text }],
+    details: {},
+  });
+}
+
+function createTestTool(params: {
+  name: string;
+  description: string;
+  execute: AnyAgentTool["execute"];
+  ownerOnly?: boolean;
+  label?: string;
+}): AnyAgentTool {
+  return {
+    name: params.name,
+    label: params.label ?? params.name,
+    description: params.description,
+    parameters: testToolParameters,
+    ...(params.ownerOnly ? { ownerOnly: true } : {}),
+    execute: params.execute,
+  };
+}
+
+function createGatewayScopedTools(tools: AnyAgentTool[]): ReturnType<ResolveGatewayScopedTools> {
+  return {
+    agentId: "main",
+    tools,
+  };
+}
 
 const runBeforeToolCallHookMock = vi.hoisted(() =>
   vi.fn(
@@ -14,21 +52,7 @@ const runBeforeToolCallHookMock = vi.hoisted(() =>
   ),
 );
 
-const resolveGatewayScopedToolsMock = vi.hoisted(() =>
-  vi.fn(() => ({
-    agentId: "main",
-    tools: [
-      {
-        name: "message",
-        description: "send a message",
-        parameters: { type: "object", properties: {} },
-        execute: async () => ({
-          content: [{ type: "text", text: "ok" }],
-        }),
-      },
-    ],
-  })),
-);
+const resolveGatewayScopedToolsMock = vi.hoisted(() => vi.fn<ResolveGatewayScopedTools>());
 
 vi.mock("../config/config.js", () => ({
   loadConfig: () => ({ session: { mainKey: "main" } }),
@@ -89,19 +113,15 @@ beforeEach(() => {
       params: args.params,
     }),
   );
-  resolveGatewayScopedToolsMock.mockReturnValue({
-    agentId: "main",
-    tools: [
-      {
+  resolveGatewayScopedToolsMock.mockReturnValue(
+    createGatewayScopedTools([
+      createTestTool({
         name: "message",
         description: "send a message",
-        parameters: { type: "object", properties: {} },
-        execute: async () => ({
-          content: [{ type: "text", text: "ok" }],
-        }),
-      },
-    ],
-  });
+        execute: createTextToolExecute("ok"),
+      }),
+    ]),
+  );
 });
 
 afterEach(async () => {
@@ -213,36 +233,26 @@ describe("mcp loopback server", () => {
   });
 
   it("filters owner-only tools from non-owner tool lists", async () => {
-    resolveGatewayScopedToolsMock.mockReturnValue({
-      agentId: "main",
-      tools: [
-        {
+    resolveGatewayScopedToolsMock.mockReturnValue(
+      createGatewayScopedTools([
+        createTestTool({
           name: "message",
           description: "send a message",
-          parameters: { type: "object", properties: {} },
-          execute: async () => ({
-            content: [{ type: "text", text: "ok" }],
-          }),
-        },
-        {
+          execute: createTextToolExecute("ok"),
+        }),
+        createTestTool({
           name: "cron",
           description: "manage schedules",
-          parameters: { type: "object", properties: {} },
-          execute: async () => ({
-            content: [{ type: "text", text: "cron" }],
-          }),
-        },
-        {
+          execute: createTextToolExecute("cron"),
+        }),
+        createTestTool({
           name: "owner_probe",
           description: "owner-only by flag",
-          parameters: { type: "object", properties: {} },
           ownerOnly: true,
-          execute: async () => ({
-            content: [{ type: "text", text: "owner" }],
-          }),
-        },
-      ],
-    });
+          execute: createTextToolExecute("owner"),
+        }),
+      ]),
+    );
     server = await startMcpLoopbackServer(0);
     const runtime = getActiveMcpLoopbackRuntime();
 
@@ -267,27 +277,20 @@ describe("mcp loopback server", () => {
   });
 
   it("keeps owner-only tools available to owner loopback callers", async () => {
-    resolveGatewayScopedToolsMock.mockReturnValue({
-      agentId: "main",
-      tools: [
-        {
+    resolveGatewayScopedToolsMock.mockReturnValue(
+      createGatewayScopedTools([
+        createTestTool({
           name: "message",
           description: "send a message",
-          parameters: { type: "object", properties: {} },
-          execute: async () => ({
-            content: [{ type: "text", text: "ok" }],
-          }),
-        },
-        {
+          execute: createTextToolExecute("ok"),
+        }),
+        createTestTool({
           name: "cron",
           description: "manage schedules",
-          parameters: { type: "object", properties: {} },
-          execute: async () => ({
-            content: [{ type: "text", text: "cron" }],
-          }),
-        },
-      ],
-    });
+          execute: createTextToolExecute("cron"),
+        }),
+      ]),
+    );
     server = await startMcpLoopbackServer(0);
     const runtime = getActiveMcpLoopbackRuntime();
 
@@ -311,28 +314,21 @@ describe("mcp loopback server", () => {
   });
 
   it("does not execute owner-only tools for non-owner callers", async () => {
-    const cronExecute = vi.fn(async () => ({
-      content: [{ type: "text", text: "CRON_EXECUTED" }],
-    }));
-    resolveGatewayScopedToolsMock.mockReturnValue({
-      agentId: "main",
-      tools: [
-        {
+    const cronExecute = vi.fn(createTextToolExecute("CRON_EXECUTED"));
+    resolveGatewayScopedToolsMock.mockReturnValue(
+      createGatewayScopedTools([
+        createTestTool({
           name: "message",
           description: "send a message",
-          parameters: { type: "object", properties: {} },
-          execute: async () => ({
-            content: [{ type: "text", text: "ok" }],
-          }),
-        },
-        {
+          execute: createTextToolExecute("ok"),
+        }),
+        createTestTool({
           name: "cron",
           description: "manage schedules",
-          parameters: { type: "object", properties: {} },
           execute: cronExecute,
-        },
-      ],
-    });
+        }),
+      ]),
+    );
     server = await startMcpLoopbackServer(0);
     const runtime = getActiveMcpLoopbackRuntime();
 
@@ -361,24 +357,20 @@ describe("mcp loopback server", () => {
   });
 
   it("honors before-tool-call hook blocks before loopback tool execution", async () => {
-    const execute = vi.fn(async () => ({
-      content: [{ type: "text", text: "EXECUTED" }],
-    }));
+    const execute = vi.fn(createTextToolExecute("EXECUTED"));
     runBeforeToolCallHookMock.mockResolvedValueOnce({
       blocked: true,
       reason: "blocked by hook",
     });
-    resolveGatewayScopedToolsMock.mockReturnValue({
-      agentId: "main",
-      tools: [
-        {
+    resolveGatewayScopedToolsMock.mockReturnValue(
+      createGatewayScopedTools([
+        createTestTool({
           name: "message",
           description: "send a message",
-          parameters: { type: "object", properties: {} },
           execute,
-        },
-      ],
-    });
+        }),
+      ]),
+    );
     server = await startMcpLoopbackServer(0);
     const runtime = getActiveMcpLoopbackRuntime();
 
@@ -418,20 +410,16 @@ describe("mcp loopback server", () => {
   });
 
   it("forwards the request abort signal to loopback tool execution", async () => {
-    const execute = vi.fn(async () => ({
-      content: [{ type: "text", text: "EXECUTED" }],
-    }));
-    resolveGatewayScopedToolsMock.mockReturnValue({
-      agentId: "main",
-      tools: [
-        {
+    const execute = vi.fn(createTextToolExecute("EXECUTED"));
+    resolveGatewayScopedToolsMock.mockReturnValue(
+      createGatewayScopedTools([
+        createTestTool({
           name: "message",
           description: "send a message",
-          parameters: { type: "object", properties: {} },
           execute,
-        },
-      ],
-    });
+        }),
+      ]),
+    );
     server = await startMcpLoopbackServer(0);
     const runtime = getActiveMcpLoopbackRuntime();
 

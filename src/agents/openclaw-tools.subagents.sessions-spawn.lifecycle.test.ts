@@ -50,7 +50,7 @@ vi.mock("./pi-embedded.js", async () => {
   };
 });
 
-vi.mock("./tools/agent-step.js", () => ({
+vi.mock("./subagent-output-latest-reply.js", () => ({
   readLatestAssistantReply: async () => "done",
 }));
 

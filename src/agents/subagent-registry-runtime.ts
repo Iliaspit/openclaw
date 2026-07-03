@@ -8,6 +8,7 @@ export {
   isSubagentSessionRunActive,
   listSubagentRunsForRequester,
   resolveRequesterForChildSession,
+  shouldIgnorePostCompletionAnnounceForRun,
   shouldIgnorePostCompletionAnnounceForSession,
 } from "./subagent-registry-announce-read.js";
 export { replaceSubagentRunAfterSteer } from "./subagent-registry-steer-runtime.js";

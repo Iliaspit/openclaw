@@ -1,4 +1,5 @@
 import { subagentRuns } from "./subagent-registry-memory.js";
+import { isSubagentRunNewer } from "./subagent-registry-ordering.js";
 import {
   countActiveDescendantRunsFromRuns,
   listDescendantRunsForRequesterFromRuns,
@@ -52,12 +53,12 @@ export function getSubagentRunByChildSessionKey(childSessionKey: string): Subage
       continue;
     }
     if (typeof entry.endedAt !== "number") {
-      if (!latestActive || entry.createdAt > latestActive.createdAt) {
+      if (!latestActive || isSubagentRunNewer(entry, latestActive)) {
         latestActive = entry;
       }
       continue;
     }
-    if (!latestEnded || entry.createdAt > latestEnded.createdAt) {
+    if (!latestEnded || isSubagentRunNewer(entry, latestEnded)) {
       latestEnded = entry;
     }
   }
@@ -80,12 +81,12 @@ export function getSessionDisplaySubagentRunByChildSessionKey(
       continue;
     }
     if (typeof entry.endedAt === "number") {
-      if (!latestInMemoryEnded || entry.createdAt > latestInMemoryEnded.createdAt) {
+      if (!latestInMemoryEnded || isSubagentRunNewer(entry, latestInMemoryEnded)) {
         latestInMemoryEnded = entry;
       }
       continue;
     }
-    if (!latestInMemoryActive || entry.createdAt > latestInMemoryActive.createdAt) {
+    if (!latestInMemoryActive || isSubagentRunNewer(entry, latestInMemoryActive)) {
       latestInMemoryActive = entry;
     }
   }
@@ -93,7 +94,7 @@ export function getSessionDisplaySubagentRunByChildSessionKey(
   if (latestInMemoryEnded || latestInMemoryActive) {
     if (
       latestInMemoryEnded &&
-      (!latestInMemoryActive || latestInMemoryEnded.createdAt > latestInMemoryActive.createdAt)
+      (!latestInMemoryActive || isSubagentRunNewer(latestInMemoryEnded, latestInMemoryActive))
     ) {
       return latestInMemoryEnded;
     }
@@ -116,7 +117,7 @@ export function getLatestSubagentRunByChildSessionKey(
     if (entry.childSessionKey !== key) {
       continue;
     }
-    if (!latest || entry.createdAt > latest.createdAt) {
+    if (!latest || isSubagentRunNewer(entry, latest)) {
       latest = entry;
     }
   }

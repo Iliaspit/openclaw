@@ -5,6 +5,17 @@ import path from "node:path";
 import type { AssistantMessage, UserMessage } from "@mariozechner/pi-ai";
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { WebSocket } from "ws";
+import { guardChildRouteForDelivery } from "../agents/child-route-guard.js";
+import {
+  assessChildRouteHealth,
+  recordChildRouteHealthEvent,
+  resetChildRouteHealthForTest,
+  resolveChildRouteHealthPath,
+} from "../agents/child-route-health.js";
+import {
+  addSubagentRunForTests,
+  resetSubagentRegistryForTests,
+} from "../agents/subagent-registry.js";
 import { isSessionPatchEvent, type InternalHookEvent } from "../hooks/internal-hooks.js";
 import { withEnvAsync } from "../test-utils/env.js";
 import { GATEWAY_CLIENT_IDS, GATEWAY_CLIENT_MODES } from "./protocol/client-info.js";
@@ -390,6 +401,13 @@ describe("gateway server sessions", () => {
     acpManagerMocks.closeSession.mockClear();
     browserSessionTabMocks.closeTrackedBrowserTabsForSessions.mockClear();
     browserSessionTabMocks.closeTrackedBrowserTabsForSessions.mockResolvedValue(0);
+    resetSubagentRegistryForTests({ persist: false });
+    resetChildRouteHealthForTest();
+    fsSync.rmSync(resolveChildRouteHealthPath(), { force: true });
+    fsSync.rmSync(
+      path.join(path.dirname(resolveChildRouteHealthPath()), "route-health-unavailable.json"),
+      { force: true },
+    );
   });
 
   test("sessions.create stores dashboard session model and parent linkage, and creates a transcript", async () => {
@@ -462,6 +480,131 @@ describe("gateway server sessions", () => {
       type: "session",
       id: created.payload?.sessionId,
     });
+
+    ws.close();
+  });
+
+  test("sessions.create rejects child-shaped initial work before creating session state", async () => {
+    const { storePath } = await createSessionStoreDir();
+    await writeSessionStore({ entries: {} });
+    const { ws } = await openClient();
+
+    const created = await rpcReq(ws, "sessions.create", {
+      key: "agent:main:subagent:spoofed-create",
+      message: "start work without a trusted spawn",
+    });
+
+    expect(created.ok).toBe(false);
+    expect(created.error).toMatchObject({
+      code: "UNAVAILABLE",
+      details: {
+        kind: "child_route_health_unavailable",
+        errorKind: "child_route_untrusted",
+        childSessionKey: "agent:main:subagent:spoofed-create",
+      },
+    });
+    const storeAfter = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<string, unknown>;
+    expect(storeAfter["agent:main:subagent:spoofed-create"]).toBeUndefined();
+
+    ws.close();
+  });
+
+  test("sessions.patch lineage alone cannot authorize child follow-up delivery", async () => {
+    const { dir } = await createSessionStoreDir();
+    const childSessionKey = "agent:main:subagent:spoofed-lineage";
+    await writeSingleLineSession(dir, "sess-child-spoof", "child");
+    await writeSessionStore({
+      entries: {
+        [childSessionKey]: {
+          sessionId: "sess-child-spoof",
+          updatedAt: Date.now(),
+        },
+      },
+    });
+    const { ws } = await openClient();
+
+    const patched = await rpcReq(ws, "sessions.patch", {
+      key: childSessionKey,
+      spawnedBy: childSessionKey,
+    });
+    expect(patched.ok).toBe(true);
+
+    const sent = await rpcReq(ws, "sessions.send", {
+      key: childSessionKey,
+      message: "reuse this patched child lineage",
+      idempotencyKey: "patched-lineage-followup",
+    });
+
+    expect(sent.ok).toBe(false);
+    expect(sent.error).toMatchObject({
+      code: "UNAVAILABLE",
+      details: {
+        kind: "child_route_health_unavailable",
+        errorKind: "child_route_untrusted",
+        childSessionKey,
+      },
+    });
+
+    ws.close();
+  });
+
+  test("sessions.send rejects matching auth-scope blockers before child delivery", async () => {
+    const { dir } = await createSessionStoreDir();
+    const childSessionKey = "agent:main:subagent:auth-blocked-send";
+    await writeSingleLineSession(dir, "sess-child-auth-blocked", "child");
+    await writeSessionStore({
+      entries: {
+        [childSessionKey]: {
+          sessionId: "sess-child-auth-blocked",
+          updatedAt: Date.now(),
+          modelProvider: "openai",
+          model: "gpt-test-a",
+          authProfileOverride: "work",
+          authProfileOverrideSource: "user",
+        },
+      },
+    });
+    addSubagentRunForTests({
+      runId: "run-child-auth-blocked",
+      childSessionKey,
+      controllerSessionKey: "agent:main:main",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "agent:main:main",
+      task: "child route auth-scoped send test",
+      cleanup: "keep",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+    });
+    await expect(
+      recordChildRouteHealthEvent({
+        code: "auth_profile_session_expired",
+        status: "active",
+        source: "provider_error",
+        provider: {
+          providerId: "openai",
+          authProfileKey: "work",
+        },
+      }),
+    ).resolves.toEqual(expect.objectContaining({ ok: true }));
+    const { ws } = await openClient();
+
+    const sent = await rpcReq(ws, "sessions.send", {
+      key: childSessionKey,
+      message: "this must not reach chat.send",
+      idempotencyKey: "auth-blocked-child-followup",
+    });
+
+    expect(sent.ok).toBe(false);
+    expect(sent.error).toMatchObject({
+      code: "UNAVAILABLE",
+      details: {
+        kind: "child_route_unhealthy",
+        childSessionKey,
+        codes: ["auth_profile_session_expired"],
+        recommendedAction: "reauth",
+      },
+    });
+    expect(embeddedRunMock.activeIds.size).toBe(0);
 
     ws.close();
   });
@@ -1455,6 +1598,316 @@ describe("gateway server sessions", () => {
     ws.close();
   });
 
+  test("sessions.compaction.branch preserves child route ancestry for child-derived sources", async () => {
+    const { dir, storePath } = await createSessionStoreDir();
+    const fixture = await createCheckpointFixture(dir);
+    await writeSessionStore({
+      entries: {
+        "agent:main:dashboard:child-derived-source": {
+          sessionId: fixture.sessionId,
+          sessionFile: fixture.sessionFile,
+          updatedAt: Date.now(),
+          parentSessionKey: "agent:main:subagent:overflowed-child",
+          compactionCheckpoints: [
+            {
+              checkpointId: "checkpoint-child-derived",
+              sessionKey: "agent:main:dashboard:child-derived-source",
+              sessionId: fixture.sessionId,
+              createdAt: Date.now(),
+              reason: "manual",
+              tokensBefore: 123,
+              tokensAfter: 45,
+              preCompaction: {
+                sessionId: fixture.preCompactionSession.getSessionId(),
+                sessionFile: fixture.preCompactionSessionFile,
+                leafId: fixture.preCompactionLeafId,
+              },
+              postCompaction: {
+                sessionId: fixture.sessionId,
+                sessionFile: fixture.sessionFile,
+                leafId: fixture.postCompactionLeafId,
+                entryId: fixture.postCompactionLeafId,
+              },
+            },
+          ],
+        },
+      },
+    });
+    const { ws } = await openClient();
+
+    const branched = await rpcReq<{
+      ok: true;
+      key: string;
+      entry: { parentSessionKey?: string };
+    }>(ws, "sessions.compaction.branch", {
+      key: "agent:main:dashboard:child-derived-source",
+      checkpointId: "checkpoint-child-derived",
+    });
+
+    expect(branched.ok).toBe(true);
+    expect(branched.payload?.entry.parentSessionKey).toBe("agent:main:subagent:overflowed-child");
+    const storeAfterBranch = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
+      string,
+      { parentSessionKey?: string }
+    >;
+    expect(storeAfterBranch[branched.payload!.key]?.parentSessionKey).toBe(
+      "agent:main:subagent:overflowed-child",
+    );
+
+    ws.close();
+  });
+
+  test("sessions.compaction.restore keeps risky child checkpoint route blockers", async () => {
+    const { dir } = await createSessionStoreDir();
+    const fixture = await createCheckpointFixture(dir);
+    const childSessionKey = "agent:main:subagent:restore-risk";
+    await writeSessionStore({
+      entries: {
+        [childSessionKey]: {
+          sessionId: fixture.sessionId,
+          sessionFile: fixture.sessionFile,
+          updatedAt: Date.now(),
+          compactionCheckpoints: [
+            {
+              checkpointId: "checkpoint-restore-risk",
+              sessionKey: childSessionKey,
+              sessionId: fixture.sessionId,
+              createdAt: Date.now(),
+              reason: "overflow-retry",
+              tokensBefore: 123,
+              tokensAfter: 45,
+              preCompaction: {
+                sessionId: fixture.preCompactionSession.getSessionId(),
+                sessionFile: fixture.preCompactionSessionFile,
+                leafId: fixture.preCompactionLeafId,
+              },
+              postCompaction: {
+                sessionId: fixture.sessionId,
+                sessionFile: fixture.sessionFile,
+                leafId: fixture.postCompactionLeafId,
+                entryId: fixture.postCompactionLeafId,
+              },
+            },
+          ],
+        },
+      },
+    });
+    const { ws } = await openClient();
+
+    const restored = await rpcReq<{ ok: true }>(ws, "sessions.compaction.restore", {
+      key: childSessionKey,
+      checkpointId: "checkpoint-restore-risk",
+    });
+
+    expect(restored.ok).toBe(true);
+    await expect(
+      assessChildRouteHealth(childSessionKey, {
+        routeIntent: "followup_reuse",
+        targetMethod: "sessions.send",
+        childTargetKind: "subagent",
+        registryRecord: { childSessionKey, runId: "run-restore-risk" },
+      }),
+    ).resolves.toMatchObject({ status: "unhealthy", codes: ["context_overflow"] });
+
+    ws.close();
+  });
+
+  test("sessions.compaction branch and restore keep child route blockers before follow-up", async () => {
+    const { dir } = await createSessionStoreDir();
+    const fixture = await createCheckpointFixture(dir);
+    const childSessionKey = "agent:main:subagent:checkpoint-repair";
+    await writeSessionStore({
+      entries: {
+        [childSessionKey]: {
+          sessionId: fixture.sessionId,
+          sessionFile: fixture.sessionFile,
+          updatedAt: Date.now(),
+          compactionCheckpoints: [
+            {
+              checkpointId: "checkpoint-child",
+              sessionKey: childSessionKey,
+              sessionId: fixture.sessionId,
+              createdAt: Date.now(),
+              reason: "manual",
+              tokensBefore: 123,
+              tokensAfter: 45,
+              summary: "child checkpoint summary",
+              firstKeptEntryId: fixture.preCompactionLeafId,
+              preCompaction: {
+                sessionId: fixture.preCompactionSession.getSessionId(),
+                sessionFile: fixture.preCompactionSessionFile,
+                leafId: fixture.preCompactionLeafId,
+              },
+              postCompaction: {
+                sessionId: fixture.sessionId,
+                sessionFile: fixture.sessionFile,
+                leafId: fixture.postCompactionLeafId,
+                entryId: fixture.postCompactionLeafId,
+              },
+            },
+          ],
+        },
+      },
+    });
+    await expect(
+      recordChildRouteHealthEvent({
+        code: "context_overflow",
+        status: "active",
+        source: "context_overflow",
+        childSessionKey,
+        runId: "run-checkpoint-repair",
+      }),
+    ).resolves.toEqual(expect.objectContaining({ ok: true }));
+
+    const { ws } = await openClient();
+    const branched = await rpcReq<{
+      ok: true;
+      key: string;
+      entry: { parentSessionKey?: string };
+    }>(ws, "sessions.compaction.branch", {
+      key: childSessionKey,
+      checkpointId: "checkpoint-child",
+    });
+    expect(branched.ok).toBe(true);
+    expect(branched.payload?.entry.parentSessionKey).toBe(childSessionKey);
+
+    const branchFollowup = await rpcReq(ws, "sessions.send", {
+      key: branched.payload?.key,
+      message: "continue on branch",
+      idempotencyKey: "branch-followup",
+    });
+    expect(branchFollowup.ok).toBe(false);
+    expect(branchFollowup.error?.code).toBe("UNAVAILABLE");
+    expect((branchFollowup.error as { details?: unknown } | undefined)?.details).toMatchObject({
+      kind: "child_route_health_unavailable",
+      errorKind: "child_route_untrusted",
+    });
+
+    const restored = await rpcReq<{ ok: true; sessionId: string }>(
+      ws,
+      "sessions.compaction.restore",
+      {
+        key: childSessionKey,
+        checkpointId: "checkpoint-child",
+      },
+    );
+    expect(restored.ok).toBe(true);
+    expect(restored.payload?.sessionId).not.toBe(fixture.sessionId);
+
+    const healthState = JSON.parse(await fs.readFile(resolveChildRouteHealthPath(), "utf-8")) as {
+      events?: Array<{ source?: string; reason?: string; childSessionKey?: string }>;
+    };
+    expect(healthState.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "repair_control",
+          childSessionKey,
+          reason:
+            "Checkpoint branch inherited child-local route blockers from its source transcript.",
+        }),
+        expect.objectContaining({
+          source: "repair_control",
+          childSessionKey,
+          reason:
+            "Checkpoint restore kept child-local route blockers for the restored source transcript.",
+        }),
+      ]),
+    );
+
+    await expect(
+      guardChildRouteForDelivery({
+        childSessionKey,
+        context: {
+          routeIntent: "followup_reuse",
+          targetMethod: "sessions.send",
+          childTargetKind: "subagent",
+          registryRecord: { childSessionKey, runId: "run-checkpoint-repair" },
+        },
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: "child_session_unhealthy",
+      details: { codes: ["context_overflow"], recommendedAction: "spawn_fresh" },
+    });
+
+    ws.close();
+  });
+
+  test("sessions.compaction branch and restore fail closed when route health is unavailable", async () => {
+    const { dir, storePath } = await createSessionStoreDir();
+    const fixture = await createCheckpointFixture(dir);
+    const childSessionKey = "agent:main:subagent:checkpoint-route-unavailable";
+    await writeSessionStore({
+      entries: {
+        [childSessionKey]: {
+          sessionId: fixture.sessionId,
+          sessionFile: fixture.sessionFile,
+          updatedAt: Date.now(),
+          compactionCheckpoints: [
+            {
+              checkpointId: "checkpoint-unavailable",
+              sessionKey: childSessionKey,
+              sessionId: fixture.sessionId,
+              createdAt: Date.now(),
+              reason: "manual",
+              tokensBefore: 123,
+              tokensAfter: 45,
+              preCompaction: {
+                sessionId: fixture.preCompactionSession.getSessionId(),
+                sessionFile: fixture.preCompactionSessionFile,
+                leafId: fixture.preCompactionLeafId,
+              },
+              postCompaction: {
+                sessionId: fixture.sessionId,
+                sessionFile: fixture.sessionFile,
+                leafId: fixture.postCompactionLeafId,
+                entryId: fixture.postCompactionLeafId,
+              },
+            },
+          ],
+        },
+      },
+    });
+    await fs.mkdir(path.dirname(resolveChildRouteHealthPath()), { recursive: true });
+    await fs.writeFile(resolveChildRouteHealthPath(), "{not-json", "utf-8");
+
+    const { ws } = await openClient();
+    const branched = await rpcReq(ws, "sessions.compaction.branch", {
+      key: childSessionKey,
+      checkpointId: "checkpoint-unavailable",
+    });
+    expect(branched.ok).toBe(false);
+    expect(branched.error?.code).toBe("UNAVAILABLE");
+    expect((branched.error as { details?: unknown } | undefined)?.details).toMatchObject({
+      kind: "child_route_health_unavailable",
+      childSessionKey,
+      errorKind: "child_route_health_unavailable",
+      retryable: true,
+    });
+
+    const restored = await rpcReq(ws, "sessions.compaction.restore", {
+      key: childSessionKey,
+      checkpointId: "checkpoint-unavailable",
+    });
+    expect(restored.ok).toBe(false);
+    expect(restored.error?.code).toBe("UNAVAILABLE");
+    expect((restored.error as { details?: unknown } | undefined)?.details).toMatchObject({
+      kind: "child_route_health_unavailable",
+      childSessionKey,
+      errorKind: "child_route_health_unavailable",
+      retryable: true,
+    });
+
+    const storeAfter = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
+      string,
+      { sessionId?: string }
+    >;
+    expect(storeAfter[childSessionKey]?.sessionId).toBe(fixture.sessionId);
+    expect(Object.keys(storeAfter)).toEqual([childSessionKey]);
+
+    ws.close();
+  });
+
   test("sessions.compact without maxLines runs embedded manual compaction for checkpoint-capable flows", async () => {
     const { dir, storePath } = await createSessionStoreDir();
     await fs.writeFile(
@@ -1508,6 +1961,97 @@ describe("gateway server sessions", () => {
     expect(store["agent:main:main"]?.compactionCount).toBe(1);
     expect(store["agent:main:main"]?.totalTokens).toBe(80);
     expect(store["agent:main:main"]?.totalTokensFresh).toBe(true);
+
+    ws.close();
+  });
+
+  test("sessions.compact records safe child-local overflow repair after successful manual compaction", async () => {
+    const { dir } = await createSessionStoreDir();
+    const childSessionKey = "agent:main:subagent:compact-repair";
+    const provider = {
+      providerId: "openai",
+      authProfileKey: "work",
+      requesterSessionKey: "agent:main:main",
+    };
+    await fs.writeFile(
+      path.join(dir, "sess-child-compact.jsonl"),
+      `${JSON.stringify({ role: "user", content: "large child transcript" })}\n`,
+      "utf-8",
+    );
+    await writeSessionStore({
+      entries: {
+        [childSessionKey]: {
+          sessionId: "sess-child-compact",
+          updatedAt: Date.now(),
+        },
+      },
+    });
+    await expect(
+      recordChildRouteHealthEvent({
+        code: "context_overflow",
+        status: "active",
+        source: "context_overflow",
+        childSessionKey,
+        runId: "run-child-compact",
+      }),
+    ).resolves.toEqual(expect.objectContaining({ ok: true }));
+    await expect(
+      recordChildRouteHealthEvent({
+        code: "auth_profile_session_expired",
+        status: "active",
+        source: "provider_error",
+        provider,
+        reason: "provider profile expired",
+      }),
+    ).resolves.toEqual(expect.objectContaining({ ok: true }));
+
+    await expect(
+      assessChildRouteHealth(childSessionKey, {
+        routeIntent: "followup_reuse",
+        targetMethod: "sessions.send",
+        childTargetKind: "subagent",
+        registryRecord: { childSessionKey, runId: "run-child-compact" },
+        provider,
+      }),
+    ).resolves.toMatchObject({
+      status: "unhealthy",
+      codes: ["auth_profile_session_expired", "context_overflow"],
+      recommendedAction: "reauth",
+    });
+
+    const { ws } = await openClient();
+    const compacted = await rpcReq<{ ok: true; compacted: boolean }>(ws, "sessions.compact", {
+      key: childSessionKey,
+    });
+
+    expect(compacted.ok).toBe(true);
+    expect(compacted.payload?.compacted).toBe(true);
+    await expect(
+      assessChildRouteHealth(childSessionKey, {
+        routeIntent: "followup_reuse",
+        targetMethod: "sessions.send",
+        childTargetKind: "subagent",
+        registryRecord: { childSessionKey, runId: "run-child-compact" },
+        provider,
+      }),
+    ).resolves.toMatchObject({
+      status: "unhealthy",
+      codes: ["auth_profile_session_expired"],
+      recommendedAction: "reauth",
+    });
+    await expect(
+      assessChildRouteHealth(childSessionKey, {
+        routeIntent: "followup_reuse",
+        targetMethod: "sessions.send",
+        childTargetKind: "subagent",
+        registryRecord: { childSessionKey, runId: "run-child-compact" },
+        provider,
+      }),
+    ).resolves.toMatchObject({
+      status: "unhealthy",
+      codes: ["auth_profile_session_expired"],
+      recommendedAction: "reauth",
+    });
 
     ws.close();
   });
@@ -2124,6 +2668,91 @@ describe("gateway server sessions", () => {
     ws.close();
   });
 
+  test("sessions.reset records child route repair transition for reset child routes", async () => {
+    const { dir } = await createSessionStoreDir();
+    const childSessionKey = "agent:main:subagent:reset-repair";
+    const childTranscript = path.join(dir, "sess-reset-repair.jsonl");
+    await fs.writeFile(
+      childTranscript,
+      `${JSON.stringify({ role: "user", content: "old child transcript" })}\n`,
+      "utf-8",
+    );
+    await writeSessionStore({
+      entries: {
+        [childSessionKey]: {
+          sessionId: "sess-reset-repair",
+          sessionFile: childTranscript,
+          updatedAt: Date.now(),
+          spawnedBy: "agent:main:main",
+          parentSessionKey: "agent:main:main",
+        },
+      },
+    });
+    await expect(
+      recordChildRouteHealthEvent({
+        code: "context_overflow",
+        status: "active",
+        source: "context_overflow",
+        childSessionKey,
+        runId: "run-reset-repair",
+      }),
+    ).resolves.toEqual(expect.objectContaining({ ok: true }));
+
+    await expect(
+      assessChildRouteHealth(childSessionKey, {
+        routeIntent: "followup_reuse",
+        targetMethod: "sessions.reset-test",
+        childTargetKind: "subagent",
+        registryRecord: { childSessionKey, runId: "run-reset-repair" },
+      }),
+    ).resolves.toMatchObject({
+      status: "unhealthy",
+      codes: ["context_overflow"],
+      recommendedAction: "spawn_fresh",
+    });
+
+    const { ws } = await openClient();
+    const reset = await rpcReq<{ ok: true; key: string; entry: { sessionId: string } }>(
+      ws,
+      "sessions.reset",
+      { key: childSessionKey },
+    );
+    expect(reset.ok).toBe(true);
+    expect(reset.payload?.entry.sessionId).not.toBe("sess-reset-repair");
+
+    const healthState = JSON.parse(await fs.readFile(resolveChildRouteHealthPath(), "utf-8")) as {
+      events?: Array<{
+        code?: string;
+        status?: string;
+        source?: string;
+        reason?: string;
+        childSessionKey?: string;
+      }>;
+    };
+    expect(healthState.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "context_overflow",
+          status: "cleared",
+          source: "repair_control",
+          childSessionKey,
+          reason: "Session reset created a fresh transcript for this child route.",
+        }),
+      ]),
+    );
+
+    await expect(
+      assessChildRouteHealth(childSessionKey, {
+        routeIntent: "followup_reuse",
+        targetMethod: "sessions.reset-test",
+        childTargetKind: "subagent",
+        registryRecord: { childSessionKey, runId: "run-reset-repair" },
+      }),
+    ).resolves.toMatchObject({ status: "ok" });
+
+    ws.close();
+  });
+
   test("sessions.preview resolves legacy mixed-case main alias with custom mainKey", async () => {
     const { dir, storePath } = await createSessionStoreDir();
     testState.agentsConfig = { list: [{ id: "ops", default: true }] };
@@ -2343,14 +2972,19 @@ describe("gateway server sessions", () => {
     );
   });
 
-  test("sessions.delete rejects main and aborts active runs", async () => {
-    const { dir } = await createSessionStoreDir();
+  test("sessions.delete rejects top-level agents and aborts active runs", async () => {
+    const { dir, storePath } = await createSessionStoreDir();
     await writeSingleLineSession(dir, "sess-main", "hello");
+    await writeSingleLineSession(dir, "sess-planner-2", "planner");
     await writeSingleLineSession(dir, "sess-active", "active");
 
     await writeSessionStore({
       entries: {
         main: { sessionId: "sess-main", updatedAt: Date.now() },
+        "agent:planner-2:main": {
+          sessionId: "sess-planner-2",
+          updatedAt: Date.now(),
+        },
         "discord:group:dev": {
           sessionId: "sess-active",
           updatedAt: Date.now(),
@@ -2365,6 +2999,23 @@ describe("gateway server sessions", () => {
 
     const mainDelete = await rpcReq(ws, "sessions.delete", { key: "main" });
     expect(mainDelete.ok).toBe(false);
+
+    const plannerDelete = await rpcReq(ws, "sessions.delete", { key: "agent:planner-2:main" });
+    expect(plannerDelete.ok).toBe(false);
+    expect(plannerDelete.error?.message).toContain(
+      "Cannot delete top-level agent session (agent:planner-2:main)",
+    );
+
+    const storeAfterRejectedDeletes = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
+      string,
+      unknown
+    >;
+    expect(storeAfterRejectedDeletes["agent:planner-2:main"]).toMatchObject({
+      sessionId: "sess-planner-2",
+    });
+    expect(browserSessionTabMocks.closeTrackedBrowserTabsForSessions).not.toHaveBeenCalled();
+    expect(subagentLifecycleHookMocks.runSubagentEnded).not.toHaveBeenCalled();
+    expect(threadBindingMocks.unbindThreadBindingsBySessionKey).not.toHaveBeenCalled();
 
     const deleted = await rpcReq<{ ok: true; deleted: boolean }>(ws, "sessions.delete", {
       key: "discord:group:dev",

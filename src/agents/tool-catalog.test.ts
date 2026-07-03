@@ -13,5 +13,6 @@ describe("tool-catalog", () => {
     expect(policy!.allow).toContain("music_generate");
     expect(policy!.allow).toContain("video_generate");
     expect(policy!.allow).toContain("update_plan");
+    expect(policy!.allow).not.toContain("catalog");
   });
 });

@@ -42,6 +42,8 @@ export type RunEmbeddedPiAgentParams = {
   groupSpace?: string | null;
   /** Parent session key for subagent policy inheritance. */
   spawnedBy?: string | null;
+  /** Child route-health lineage for derived sessions that are not child-shaped. */
+  parentSessionKey?: string | null;
   senderId?: string | null;
   senderName?: string | null;
   senderUsername?: string | null;

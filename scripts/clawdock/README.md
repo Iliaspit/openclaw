@@ -179,10 +179,10 @@ vim ~/.openclaw/.env
 
 See `.env.example` for all supported keys.
 
-The `Dockerfile` supports two optional build args:
+The `Dockerfile` supports these build args:
 
 - `OPENCLAW_DOCKER_APT_PACKAGES` — extra apt packages to install (e.g. `ffmpeg`)
-- `OPENCLAW_INSTALL_BROWSER=1` — pre-install Chromium for browser automation (adds ~300MB, but skips the 60-90s Playwright install on each container start)
+- `OPENCLAW_INSTALL_BROWSER=1` — pre-install Chromium and required Linux shared libraries for browser automation (adds ~300MB; Docker setup enables this by default for local builds)
 
 ### How It Works in Docker
 

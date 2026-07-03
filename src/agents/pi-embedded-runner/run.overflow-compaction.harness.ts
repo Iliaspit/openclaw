@@ -70,8 +70,19 @@ export const mockedEnsureRuntimePluginsLoaded = vi.fn<(params?: unknown) => void
 export const mockedPrepareProviderRuntimeAuth = vi.fn(async () => undefined);
 export const mockedRunEmbeddedAttempt =
   vi.fn<(params: unknown) => Promise<EmbeddedRunAttemptResult>>();
+export const mockedRecordSessionExpiredRouteHealth = vi.fn(async () => ({
+  recorded: true as const,
+  classification: {
+    status: "classified" as const,
+    code: "child_conversation_expired" as const,
+    recommendedAction: "spawn_fresh" as const,
+    stateTransitionRequired: false,
+  },
+  eventId: "event-session-expired",
+}));
 export const mockedRunContextEngineMaintenance = vi.fn(async () => undefined);
 export const mockedSessionLikelyHasOversizedToolResults = vi.fn(() => false);
+export const mockedResolveLiveToolResultMaxChars = vi.fn(() => 32_000);
 type MockTruncateOversizedToolResultsResult = {
   truncated: boolean;
   truncatedCount: number;
@@ -224,10 +235,23 @@ export function resetRunOverflowCompactionHarnessMocks(): void {
   mockedPrepareProviderRuntimeAuth.mockReset();
   mockedPrepareProviderRuntimeAuth.mockResolvedValue(undefined);
   mockedRunEmbeddedAttempt.mockReset();
+  mockedRecordSessionExpiredRouteHealth.mockReset();
+  mockedRecordSessionExpiredRouteHealth.mockResolvedValue({
+    recorded: true,
+    classification: {
+      status: "classified",
+      code: "child_conversation_expired",
+      recommendedAction: "spawn_fresh",
+      stateTransitionRequired: false,
+    },
+    eventId: "event-session-expired",
+  });
   mockedRunContextEngineMaintenance.mockReset();
   mockedRunContextEngineMaintenance.mockResolvedValue(undefined);
   mockedSessionLikelyHasOversizedToolResults.mockReset();
   mockedSessionLikelyHasOversizedToolResults.mockReturnValue(false);
+  mockedResolveLiveToolResultMaxChars.mockReset();
+  mockedResolveLiveToolResultMaxChars.mockReturnValue(32_000);
   mockedTruncateOversizedToolResultsInSession.mockReset();
   mockedTruncateOversizedToolResultsInSession.mockResolvedValue({
     truncated: false,
@@ -356,6 +380,10 @@ export async function loadRunOverflowCompactionHarness(): Promise<{
     ensureRuntimePluginsLoaded: mockedEnsureRuntimePluginsLoaded,
   }));
 
+  vi.doMock("../child-route-health.js", () => ({
+    recordSessionExpiredRouteHealth: mockedRecordSessionExpiredRouteHealth,
+  }));
+
   vi.doMock("../../plugins/provider-runtime.js", () => ({
     prepareProviderRuntimeAuth: mockedPrepareProviderRuntimeAuth,
     resolveProviderCapabilitiesWithPlugin: vi.fn(() => ({})),
@@ -420,6 +448,7 @@ export async function loadRunOverflowCompactionHarness(): Promise<{
   }));
 
   vi.doMock("./tool-result-truncation.js", () => ({
+    resolveLiveToolResultMaxChars: mockedResolveLiveToolResultMaxChars,
     sessionLikelyHasOversizedToolResults: mockedSessionLikelyHasOversizedToolResults,
     truncateOversizedToolResultsInSession: mockedTruncateOversizedToolResultsInSession,
   }));

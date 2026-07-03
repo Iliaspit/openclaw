@@ -6,6 +6,7 @@ import {
   findRunIdsByChildSessionKeyFromRuns,
   listRunsForRequesterFromRuns,
   resolveRequesterForChildSessionFromRuns,
+  shouldIgnorePostCompletionAnnounceForRunFromRuns,
   shouldIgnorePostCompletionAnnounceForSessionFromRuns,
 } from "./subagent-registry-queries.js";
 import { getSubagentRunsSnapshotForRead } from "./subagent-registry-state.js";
@@ -47,6 +48,13 @@ export function shouldIgnorePostCompletionAnnounceForSession(childSessionKey: st
   return shouldIgnorePostCompletionAnnounceForSessionFromRuns(
     getSubagentRunsSnapshotForRead(subagentRuns),
     childSessionKey,
+  );
+}
+
+export function shouldIgnorePostCompletionAnnounceForRun(runId: string): boolean {
+  return shouldIgnorePostCompletionAnnounceForRunFromRuns(
+    getSubagentRunsSnapshotForRead(subagentRuns),
+    runId,
   );
 }
 

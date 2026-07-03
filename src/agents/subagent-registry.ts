@@ -33,6 +33,7 @@ import {
 } from "./subagent-registry-helpers.js";
 import { createSubagentRegistryLifecycleController } from "./subagent-registry-lifecycle.js";
 import { subagentRuns } from "./subagent-registry-memory.js";
+import { isSubagentRunNewer } from "./subagent-registry-ordering.js";
 import {
   countActiveDescendantRunsFromRuns,
   countActiveRunsForSessionFromRuns,
@@ -43,6 +44,7 @@ import {
   listDescendantRunsForRequesterFromRuns,
   listRunsForRequesterFromRuns,
   resolveRequesterForChildSessionFromRuns,
+  shouldIgnorePostCompletionAnnounceForRunFromRuns,
   shouldIgnorePostCompletionAnnounceForSessionFromRuns,
 } from "./subagent-registry-queries.js";
 import { createSubagentRunManager } from "./subagent-registry-run-manager.js";
@@ -299,7 +301,10 @@ async function notifyContextEngineSubagentEnded(params: {
 }
 
 function suppressAnnounceForSteerRestart(entry?: SubagentRunRecord) {
-  return entry?.suppressAnnounceReason === "steer-restart";
+  return (
+    entry?.suppressAnnounceReason === "steer-restart" ||
+    entry?.suppressAnnounceReason === "fresh-reroute"
+  );
 }
 
 function shouldKeepThreadBindingAfterRun(params: {
@@ -834,7 +839,7 @@ export function isSubagentSessionRunActive(childSessionKey: string): boolean {
     if (!entry) {
       continue;
     }
-    if (!latest || entry.createdAt > latest.createdAt) {
+    if (!latest || isSubagentRunNewer(entry, latest)) {
       latest = entry;
     }
   }
@@ -845,6 +850,13 @@ export function shouldIgnorePostCompletionAnnounceForSession(childSessionKey: st
   return shouldIgnorePostCompletionAnnounceForSessionFromRuns(
     subagentRegistryDeps.getSubagentRunsSnapshotForRead(subagentRuns),
     childSessionKey,
+  );
+}
+
+export function shouldIgnorePostCompletionAnnounceForRun(runId: string): boolean {
+  return shouldIgnorePostCompletionAnnounceForRunFromRuns(
+    subagentRegistryDeps.getSubagentRunsSnapshotForRead(subagentRuns),
+    runId,
   );
 }
 
@@ -922,12 +934,12 @@ export function getSubagentRunByChildSessionKey(childSessionKey: string): Subage
       continue;
     }
     if (typeof entry.endedAt !== "number") {
-      if (!latestActive || entry.createdAt > latestActive.createdAt) {
+      if (!latestActive || isSubagentRunNewer(entry, latestActive)) {
         latestActive = entry;
       }
       continue;
     }
-    if (!latestEnded || entry.createdAt > latestEnded.createdAt) {
+    if (!latestEnded || isSubagentRunNewer(entry, latestEnded)) {
       latestEnded = entry;
     }
   }
@@ -948,7 +960,7 @@ export function getLatestSubagentRunByChildSessionKey(
     if (entry.childSessionKey !== key) {
       continue;
     }
-    if (!latest || entry.createdAt > latest.createdAt) {
+    if (!latest || isSubagentRunNewer(entry, latest)) {
       latest = entry;
     }
   }

@@ -10,6 +10,7 @@ import {
   resolveUnauthorizedHandshakeContext,
   shouldAllowSilentLocalPairing,
   shouldSkipLocalBackendSelfPairing,
+  shouldUsePinnedMetadataForLocalSharedAuthClient,
 } from "./handshake-auth-helpers.js";
 
 function createRateLimiter(): AuthRateLimiter {
@@ -265,6 +266,84 @@ describe("handshake auth helpers", () => {
     ).toBe("remote");
   });
 
+  it("classifies shared-auth backend loopback bridge connects as backend-container-local", () => {
+    const connectParams = {
+      client: {
+        id: GATEWAY_CLIENT_IDS.GATEWAY_CLIENT,
+        mode: GATEWAY_CLIENT_MODES.BACKEND,
+      },
+    } as ConnectParams;
+    expect(
+      resolvePairingLocality({
+        connectParams,
+        isLocalClient: false,
+        requestHost: "127.0.0.1:18789",
+        remoteAddress: "172.17.0.1",
+        hasProxyHeaders: false,
+        hasBrowserOriginHeader: false,
+        sharedAuthOk: true,
+        authMethod: "token",
+      }),
+    ).toBe("backend_container_local");
+    expect(
+      resolvePairingLocality({
+        connectParams,
+        isLocalClient: false,
+        requestHost: "localhost:18789",
+        remoteAddress: "172.17.0.1",
+        hasProxyHeaders: false,
+        hasBrowserOriginHeader: false,
+        sharedAuthOk: true,
+        authMethod: "password",
+      }),
+    ).toBe("backend_container_local");
+  });
+
+  it("keeps backend loopback bridge connects remote without shared auth", () => {
+    const connectParams = {
+      client: {
+        id: GATEWAY_CLIENT_IDS.GATEWAY_CLIENT,
+        mode: GATEWAY_CLIENT_MODES.BACKEND,
+      },
+    } as ConnectParams;
+    expect(
+      resolvePairingLocality({
+        connectParams,
+        isLocalClient: false,
+        requestHost: "127.0.0.1:18789",
+        remoteAddress: "172.17.0.1",
+        hasProxyHeaders: false,
+        hasBrowserOriginHeader: false,
+        sharedAuthOk: false,
+        authMethod: "token",
+      }),
+    ).toBe("remote");
+    expect(
+      resolvePairingLocality({
+        connectParams,
+        isLocalClient: false,
+        requestHost: "127.0.0.1:18789",
+        remoteAddress: "172.17.0.1",
+        hasProxyHeaders: true,
+        hasBrowserOriginHeader: false,
+        sharedAuthOk: true,
+        authMethod: "token",
+      }),
+    ).toBe("remote");
+    expect(
+      resolvePairingLocality({
+        connectParams,
+        isLocalClient: false,
+        requestHost: "192.168.1.10:18789",
+        remoteAddress: "172.17.0.1",
+        hasProxyHeaders: false,
+        hasBrowserOriginHeader: false,
+        sharedAuthOk: true,
+        authMethod: "token",
+      }),
+    ).toBe("remote");
+  });
+
   it("classifies CLI loopback/private-host connects as cli_container_local only with shared auth", () => {
     const connectParams = {
       client: {
@@ -343,7 +422,7 @@ describe("handshake auth helpers", () => {
     ).toBe("remote");
   });
 
-  it("skips backend self-pairing only for direct-local backend clients", () => {
+  it("skips backend self-pairing for local and backend container-local clients", () => {
     const connectParams = {
       client: {
         id: GATEWAY_CLIENT_IDS.GATEWAY_CLIENT,
@@ -398,6 +477,33 @@ describe("handshake auth helpers", () => {
     expect(
       shouldSkipLocalBackendSelfPairing({
         connectParams,
+        locality: "backend_container_local",
+        hasBrowserOriginHeader: false,
+        sharedAuthOk: true,
+        authMethod: "token",
+      }),
+    ).toBe(true);
+    expect(
+      shouldSkipLocalBackendSelfPairing({
+        connectParams,
+        locality: "backend_container_local",
+        hasBrowserOriginHeader: false,
+        sharedAuthOk: true,
+        authMethod: "password",
+      }),
+    ).toBe(true);
+    expect(
+      shouldSkipLocalBackendSelfPairing({
+        connectParams,
+        locality: "backend_container_local",
+        hasBrowserOriginHeader: false,
+        sharedAuthOk: false,
+        authMethod: "device-token",
+      }),
+    ).toBe(false);
+    expect(
+      shouldSkipLocalBackendSelfPairing({
+        connectParams,
         locality: "cli_container_local",
         hasBrowserOriginHeader: false,
         sharedAuthOk: true,
@@ -438,6 +544,67 @@ describe("handshake auth helpers", () => {
         hasBrowserOriginHeader: true,
         sharedAuthOk: true,
         authMethod: "token",
+      }),
+    ).toBe(false);
+  });
+
+  it("uses pinned metadata for trusted local shared-auth backend and CLI clients", () => {
+    const backendParams = {
+      client: {
+        id: GATEWAY_CLIENT_IDS.GATEWAY_CLIENT,
+        mode: GATEWAY_CLIENT_MODES.BACKEND,
+      },
+    } as ConnectParams;
+    const cliParams = {
+      client: {
+        id: GATEWAY_CLIENT_IDS.CLI,
+        mode: GATEWAY_CLIENT_MODES.CLI,
+      },
+    } as ConnectParams;
+
+    expect(
+      shouldUsePinnedMetadataForLocalSharedAuthClient({
+        connectParams: backendParams,
+        locality: "backend_container_local",
+        hasBrowserOriginHeader: false,
+        sharedAuthOk: true,
+        authMethod: "token",
+      }),
+    ).toBe(true);
+    expect(
+      shouldUsePinnedMetadataForLocalSharedAuthClient({
+        connectParams: cliParams,
+        locality: "cli_container_local",
+        hasBrowserOriginHeader: false,
+        sharedAuthOk: true,
+        authMethod: "password",
+      }),
+    ).toBe(true);
+    expect(
+      shouldUsePinnedMetadataForLocalSharedAuthClient({
+        connectParams: backendParams,
+        locality: "remote",
+        hasBrowserOriginHeader: false,
+        sharedAuthOk: true,
+        authMethod: "token",
+      }),
+    ).toBe(false);
+    expect(
+      shouldUsePinnedMetadataForLocalSharedAuthClient({
+        connectParams: backendParams,
+        locality: "browser_container_local",
+        hasBrowserOriginHeader: true,
+        sharedAuthOk: true,
+        authMethod: "token",
+      }),
+    ).toBe(false);
+    expect(
+      shouldUsePinnedMetadataForLocalSharedAuthClient({
+        connectParams: backendParams,
+        locality: "backend_container_local",
+        hasBrowserOriginHeader: false,
+        sharedAuthOk: false,
+        authMethod: "device-token",
       }),
     ).toBe(false);
   });

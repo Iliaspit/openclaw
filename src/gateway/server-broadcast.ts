@@ -5,6 +5,7 @@ import {
   READ_SCOPE,
   WRITE_SCOPE,
 } from "./method-scopes.js";
+import { hasGatewayClientCap, type GatewayClientCap } from "./protocol/client-info.js";
 import type {
   GatewayBroadcastFn,
   GatewayBroadcastOpts,
@@ -25,6 +26,7 @@ const EVENT_SCOPE_GUARDS: Record<string, string[]> = {
   "node.pair.requested": [PAIRING_SCOPE],
   "node.pair.resolved": [PAIRING_SCOPE],
   "sessions.changed": [READ_SCOPE],
+  "session.activity": [READ_SCOPE],
   "session.message": [READ_SCOPE],
   "session.tool": [READ_SCOPE],
 };
@@ -53,6 +55,24 @@ function hasEventScope(client: GatewayWsClient, event: string): boolean {
     return scopes.includes(READ_SCOPE) || scopes.includes(WRITE_SCOPE);
   }
   return required.some((scope) => scopes.includes(scope));
+}
+
+export function selectConnIdsWithClientCap(params: {
+  clients: ReadonlySet<GatewayWsClient>;
+  cap: GatewayClientCap;
+  connIds?: ReadonlySet<string>;
+}): ReadonlySet<string> {
+  const selected = new Set<string>();
+  for (const client of params.clients) {
+    if (params.connIds && !params.connIds.has(client.connId)) {
+      continue;
+    }
+    if (!hasGatewayClientCap(client.connect.caps, params.cap)) {
+      continue;
+    }
+    selected.add(client.connId);
+  }
+  return selected;
 }
 
 export function createGatewayBroadcaster(params: { clients: Set<GatewayWsClient> }) {

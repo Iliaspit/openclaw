@@ -35,6 +35,7 @@ import {
   parseSessionKey,
   resolveAssistantAttachmentAuthToken,
   resolveSessionDisplayName,
+  resolveSessionOptionGroups,
   switchChatSession,
 } from "./app-render.helpers.ts";
 import type { AppViewState } from "./app-view-state.ts";
@@ -45,6 +46,135 @@ type SessionRow = SessionsListResult["sessions"][number];
 function row(overrides: Partial<SessionRow> & { key: string }): SessionRow {
   return { kind: "direct", updatedAt: 0, ...overrides };
 }
+
+describe("resolveSessionOptionGroups", () => {
+  it("orders generic agent groups by agents.list and puts primary sessions ahead of subagents", () => {
+    const state = {
+      sessionsHideCron: true,
+      hello: {
+        snapshot: {
+          sessionDefaults: { mainKey: "main" },
+        },
+      },
+      agentsList: {
+        agents: [{ id: "alpha" }, { id: "main" }],
+        defaultId: "alpha",
+      },
+    } as unknown as AppViewState;
+
+    const sessions: SessionsListResult = {
+      ts: 1,
+      path: "/p",
+      count: 3,
+      defaults: { model: null, modelProvider: null, contextTokens: null },
+      sessions: [
+        row({
+          key: "agent:alpha:subagent:aaa",
+          updatedAt: 100,
+        }),
+        row({
+          key: "agent:alpha:main",
+          updatedAt: 50,
+        }),
+        row({
+          key: "agent:main:main",
+          updatedAt: 10,
+        }),
+      ],
+    };
+
+    const groups = resolveSessionOptionGroups(state, "agent:alpha:main", sessions);
+    expect(groups.map((g) => g.id)).toEqual(["top-level-agents", "spawned-and-other-sessions"]);
+    expect(groups[0]?.options.map((o) => o.key)).toEqual(["agent:alpha:main", "agent:main:main"]);
+    expect(groups[1]?.options.map((o) => o.key)).toEqual(["agent:alpha:subagent:aaa"]);
+  });
+
+  it("keeps planner sessions and WhatsApp at the top while grouping support agent sessions", () => {
+    const state = {
+      sessionsHideCron: true,
+      hello: {
+        snapshot: {
+          sessionDefaults: { mainKey: "main" },
+        },
+      },
+      agentsList: {
+        agents: [
+          { id: "planner", name: "Planner 1" },
+          { id: "planner-helper", name: "Planner Helper" },
+          { id: "implementer", name: "Implementer" },
+          { id: "tester", name: "Tester" },
+          { id: "reviewer", name: "Reviewer" },
+          { id: "qa", name: "QA" },
+          { id: "planner-2", name: "Planner 2" },
+          { id: "planner-3", name: "Planner 3" },
+          { id: "planner-4", name: "Planner 4" },
+        ],
+        defaultId: "planner",
+      },
+    } as unknown as AppViewState;
+
+    const sessions: SessionsListResult = {
+      ts: 1,
+      path: "/p",
+      count: 12,
+      defaults: { model: null, modelProvider: null, contextTokens: null },
+      sessions: [
+        row({ key: "agent:planner-helper:main", updatedAt: 100 }),
+        row({ key: "agent:implementer:main", updatedAt: 95 }),
+        row({ key: "agent:tester:main", updatedAt: 90 }),
+        row({ key: "agent:reviewer:main", updatedAt: 85 }),
+        row({ key: "agent:qa:main", updatedAt: 80 }),
+        row({ key: "agent:planner:main", updatedAt: 75 }),
+        row({ key: "agent:planner-2:main", updatedAt: 70 }),
+        row({ key: "agent:planner-3:main", updatedAt: 65 }),
+        row({ key: "agent:planner-4:main", updatedAt: 60 }),
+        row({ key: "whatsapp:g-agent-planner-whatsapp-direct-+447476642296", updatedAt: 55 }),
+        row({
+          key: "agent:implementer:subagent:impl-1",
+          updatedAt: 50,
+          label: "impl-phase3-fixture-migration-1",
+        }),
+        row({
+          key: "agent:planner-helper:subagent:helper-1",
+          updatedAt: 45,
+          label: "helper-phase3-fixture-migration-1",
+        }),
+      ],
+    };
+
+    const groups = resolveSessionOptionGroups(state, "agent:planner:main", sessions);
+    expect(groups.map((g) => g.id)).toEqual([
+      "top-level-agents",
+      "agent:planner-helper",
+      "agent:implementer",
+      "agent:tester",
+      "agent:reviewer",
+      "agent:qa",
+    ]);
+    expect(groups[0]?.options.map((o) => o.key)).toEqual([
+      "agent:planner:main",
+      "agent:planner-2:main",
+      "agent:planner-3:main",
+      "agent:planner-4:main",
+      "whatsapp:g-agent-planner-whatsapp-direct-+447476642296",
+    ]);
+    expect(groups[0]?.options.map((o) => o.label)).toEqual([
+      "Planner 1 (planner)",
+      "Planner 2 (planner-2)",
+      "Planner 3 (planner-3)",
+      "Planner 4 (planner-4)",
+      "WhatsApp · +447476642296",
+    ]);
+    expect(groups[1]?.options.map((o) => o.key)).toEqual([
+      "agent:planner-helper:main",
+      "agent:planner-helper:subagent:helper-1",
+    ]);
+    expect(groups[2]?.options.map((o) => o.key)).toEqual([
+      "agent:implementer:main",
+      "agent:implementer:subagent:impl-1",
+    ]);
+  });
+});
 
 /* ================================================================
  *  parseSessionKey – low-level key → type / fallback mapping

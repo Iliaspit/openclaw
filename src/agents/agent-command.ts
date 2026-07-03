@@ -891,6 +891,7 @@ async function agentCommandInternal(
               opts,
               runContext,
               spawnedBy,
+              parentSessionKey: sessionEntry?.parentSessionKey,
               messageChannel,
               skillsSnapshot,
               resolvedVerboseLevel,
@@ -1042,6 +1043,28 @@ async function agentCommandInternal(
         fallbackModel,
         result,
       });
+      sessionEntry = sessionStore[sessionKey] ?? sessionEntry;
+    }
+
+    if (result.meta.executionTrace?.runner === "cli") {
+      try {
+        sessionEntry = await attemptExecutionRuntime.persistCliTurnTranscript({
+          body,
+          result,
+          sessionId,
+          sessionKey: sessionKey ?? sessionId,
+          sessionEntry,
+          sessionStore,
+          storePath,
+          sessionAgentId,
+          threadId: opts.threadId,
+          sessionCwd: workspaceDir,
+        });
+      } catch (error) {
+        log.warn(
+          `CLI transcript persistence failed for ${sessionKey ?? sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     const payloads = result.payloads ?? [];

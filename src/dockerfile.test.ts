@@ -36,10 +36,20 @@ describe("Dockerfile", () => {
     expect(installIndex).toBeGreaterThan(-1);
     expect(browserArgIndex).toBeGreaterThan(-1);
     expect(browserArgIndex).toBeGreaterThan(installIndex);
+    expect(dockerfile.match(/ARG OPENCLAW_INSTALL_BROWSER="1"/g)).toHaveLength(2);
     expect(dockerfile).toContain(
       "node /app/node_modules/playwright-core/cli.js install --with-deps chromium",
     );
     expect(dockerfile).toContain("apt-get install -y --no-install-recommends xvfb");
+  });
+
+  it("verifies matrix-sdk-crypto native addons without hardcoded pnpm virtual-store paths", async () => {
+    const dockerfile = await readFile(dockerfilePath, "utf8");
+    expect(dockerfile).toContain("Verifying critical native addons");
+    expect(dockerfile).toContain('find /app/node_modules -name "matrix-sdk-crypto*.node"');
+    expect(dockerfile).not.toMatch(
+      /ADDON_DIR=.*node_modules\/\.pnpm\/@matrix-org\+matrix-sdk-crypto-nodejs@/,
+    );
   });
 
   it("prunes runtime dependencies after the build stage", async () => {

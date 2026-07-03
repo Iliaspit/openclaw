@@ -409,6 +409,67 @@ describe("resolveReplyDirectives", () => {
     expect(resolveDefaultReasoningLevel).toHaveBeenCalledOnce();
   });
 
+  it("defaults internal webchat runs to streamed reasoning", async () => {
+    const resolveDefaultThinkingLevel = vi.fn(async () => "low");
+    const resolveDefaultReasoningLevel = vi.fn(async () => "off");
+    mocks.createModelSelectionState.mockResolvedValueOnce({
+      provider: "openai",
+      model: "gpt-4o-mini",
+      allowedModelKeys: new Set<string>(),
+      allowedModelCatalog: [],
+      resetModelOverride: false,
+      resolveDefaultThinkingLevel,
+      resolveDefaultReasoningLevel,
+    });
+    const { resolveReplyDirectives } = await loadResolveReplyDirectivesForTest();
+
+    const result = await resolveReplyDirectives({
+      ctx: buildTestCtx({
+        Body: "hello",
+        CommandBody: "hello",
+      }),
+      cfg: {},
+      agentId: "main",
+      agentDir: "/tmp/main-agent",
+      workspaceDir: "/tmp",
+      agentCfg: {},
+      sessionCtx: {
+        Body: "hello",
+        BodyStripped: "hello",
+        BodyForAgent: "hello",
+        CommandBody: "hello",
+        Provider: "webchat",
+      } as TemplateContext,
+      sessionEntry: makeSessionEntry(),
+      sessionStore: {},
+      sessionKey: "main",
+      storePath: "/tmp/sessions.json",
+      sessionScope: "per-sender",
+      groupResolution: undefined,
+      isGroup: false,
+      triggerBodyNormalized: "hello",
+      commandAuthorized: false,
+      defaultProvider: "openai",
+      defaultModel: "gpt-4o-mini",
+      aliasIndex: { byAlias: new Map(), byKey: new Map() },
+      provider: "openai",
+      model: "gpt-4o-mini",
+      hasResolvedHeartbeatModelOverride: false,
+      typing: makeTypingController(),
+      opts: { typingPolicy: "internal_webchat" },
+      skillFilter: undefined,
+    });
+
+    expect(result).toEqual({
+      kind: "continue",
+      result: expect.objectContaining({
+        resolvedThinkLevel: "low",
+        resolvedReasoningLevel: "stream",
+      }),
+    });
+    expect(resolveDefaultReasoningLevel).not.toHaveBeenCalled();
+  });
+
   it("skips the model reasoning default when thinking is active", async () => {
     const resolveDefaultThinkingLevel = vi.fn(async () => "low");
     const resolveDefaultReasoningLevel = vi.fn(async () => "on");

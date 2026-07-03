@@ -1,5 +1,8 @@
+import fs from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { resolveChildRouteHealthPath } from "./child-route-health.js";
 import {
   createSubagentSpawnTestConfig,
   expectPersistedRuntimeModel,
@@ -324,5 +327,75 @@ describe("spawnSubagentDirect seam flow", () => {
         (call) => (call[0] as { method?: string }).method === "agent",
       ),
     ).toBe(false);
+  });
+
+  it("records failed pending-spawn state when the first child patch is rejected", async () => {
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    const tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-spawn-pending-"));
+    process.env.OPENCLAW_STATE_DIR = tempStateDir;
+    try {
+      hoisted.callGatewayMock.mockImplementation(
+        async (request: { method?: string; params?: unknown }) => {
+          if (request.method === "sessions.patch") {
+            throw new Error("initial patch rejected");
+          }
+          if (request.method === "sessions.delete") {
+            return { ok: true };
+          }
+          if (request.method === "agent") {
+            return { runId: "run-unexpected" };
+          }
+          return {};
+        },
+      );
+
+      const result = await spawnSubagentDirect(
+        {
+          task: "verify pending-spawn before patch",
+        },
+        {
+          agentSessionKey: "agent:main:main",
+          agentChannel: "discord",
+        },
+      );
+
+      expect(result).toMatchObject({
+        status: "error",
+        childSessionKey: expect.stringMatching(/^agent:main:subagent:/),
+      });
+      expect(result.error ?? "").toContain("initial patch rejected");
+      expect(
+        hoisted.callGatewayMock.mock.calls.some(
+          (call) => (call[0] as { method?: string }).method === "agent",
+        ),
+      ).toBe(false);
+
+      const routeHealth = JSON.parse(await fs.readFile(resolveChildRouteHealthPath(), "utf8")) as {
+        pendingSpawns?: Record<
+          string,
+          {
+            childSessionKey?: string;
+            requesterSessionKey?: string;
+            failedAt?: number;
+            cleanupAttemptedAt?: number;
+          }
+        >;
+      };
+      const pending = Object.values(routeHealth.pendingSpawns ?? {});
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toMatchObject({
+        childSessionKey: result.childSessionKey,
+        requesterSessionKey: "agent:main:main",
+        failedAt: expect.any(Number),
+        cleanupAttemptedAt: expect.any(Number),
+      });
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      await fs.rm(tempStateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
   });
 });

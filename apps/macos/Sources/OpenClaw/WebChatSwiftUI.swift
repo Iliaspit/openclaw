@@ -11,9 +11,9 @@ private let webChatSwiftLogger = Logger(subsystem: "ai.openclaw", category: "Web
 private let webChatThinkingLevelDefaultsKey = "openclaw.webchat.thinkingLevel"
 
 private enum WebChatSwiftUILayout {
-    static let windowSize = NSSize(width: 500, height: 840)
-    static let panelSize = NSSize(width: 480, height: 640)
-    static let windowMinSize = NSSize(width: 480, height: 360)
+    static let windowSize = NSSize(width: 1080, height: 860)
+    static let panelSize = NSSize(width: 980, height: 720)
+    static let windowMinSize = NSSize(width: 860, height: 520)
     static let anchorPadding: CGFloat = 8
 }
 

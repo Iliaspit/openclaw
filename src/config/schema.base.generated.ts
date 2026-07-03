@@ -2798,6 +2798,9 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                           supportsStore: {
                             type: "boolean",
                           },
+                          supportsPromptCacheKey: {
+                            type: "boolean",
+                          },
                           supportsDeveloperRole: {
                             type: "boolean",
                           },
@@ -3243,20 +3246,20 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                 description:
                   "Max total characters across all injected workspace bootstrap files (default: 150000).",
               },
-              localModelMode: {
-                anyOf: [
-                  {
-                    type: "string",
-                    const: "default",
+              experimental: {
+                type: "object",
+                properties: {
+                  localModelLean: {
+                    type: "boolean",
+                    title: "Enable Lean Local Model Mode (Experimental)",
+                    description:
+                      "Experimental local-model prompt trim. When enabled, OpenClaw drops heavyweight default tools like browser, cron, and message for weaker or smaller local-model backends.",
                   },
-                  {
-                    type: "string",
-                    const: "lean",
-                  },
-                ],
-                title: "Local Model Mode",
+                },
+                additionalProperties: false,
+                title: "Experimental Agent Flags",
                 description:
-                  'Local-model prompt profile: "default" keeps the standard tool surface, while "lean" drops heavyweight non-essential tools for smaller or weaker models.',
+                  "Experimental agent-default flags. Keep these off unless you are intentionally testing a preview surface.",
               },
               bootstrapPromptTruncationWarning: {
                 anyOf: [
@@ -3329,7 +3332,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                     maximum: 10000,
                     title: "Startup Context Max File Chars",
                     description:
-                      "Maximum characters retained from each loaded daily memory file in the startup prelude (default: 2000).",
+                      "Maximum characters retained from each loaded daily memory file in the startup prelude (default: 1200).",
                   },
                   maxTotalChars: {
                     type: "integer",
@@ -3337,13 +3340,54 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                     maximum: 50000,
                     title: "Startup Context Max Total Chars",
                     description:
-                      "Maximum total characters retained across all loaded daily memory files in the startup prelude (default: 4500). Additional files are truncated from the prelude once this cap is reached.",
+                      "Maximum total characters retained across all loaded daily memory files in the startup prelude (default: 2800). Additional files are truncated from the prelude once this cap is reached.",
                   },
                 },
                 additionalProperties: false,
                 title: "Startup Context",
                 description:
                   'Runtime-owned first-turn prelude for bare "/new" and "/reset". Use this to control whether recent daily memory files are preloaded into the first prompt instead of asking the model to decide what to read.',
+              },
+              contextLimits: {
+                type: "object",
+                properties: {
+                  memoryGetMaxChars: {
+                    type: "integer",
+                    minimum: 1,
+                    maximum: 250000,
+                    title: "Default memory_get Max Chars",
+                    description:
+                      "Default max characters returned by memory_get before truncation metadata and continuation notice are added. Increase to approximate older larger excerpts, but keep it bounded.",
+                  },
+                  memoryGetDefaultLines: {
+                    type: "integer",
+                    minimum: 1,
+                    maximum: 5000,
+                    title: "Default memory_get Line Window",
+                    description:
+                      "Default memory_get line window used when requests omit lines. This controls how many source lines are selected before the max-char cap is applied.",
+                  },
+                  toolResultMaxChars: {
+                    type: "integer",
+                    minimum: 1,
+                    maximum: 250000,
+                    title: "Default Tool Result Max Chars",
+                    description:
+                      "Default max characters kept for a single live tool result before truncation. This affects both persisted live tool-result writes and overflow-recovery truncation heuristics.",
+                  },
+                  postCompactionMaxChars: {
+                    type: "integer",
+                    minimum: 1,
+                    maximum: 50000,
+                    title: "Default Post-compaction Max Chars",
+                    description:
+                      "Default max characters retained from AGENTS.md during post-compaction context refresh injection. Lower this to make compaction recovery cheaper, or raise it for agents that depend on longer startup guidance.",
+                  },
+                },
+                additionalProperties: false,
+                title: "Default Context Limits",
+                description:
+                  "Focused per-agent-context budget defaults for selected high-volume excerpts and injected prompt blocks. Use this to tune bounded read/injection sizes without reopening any unbounded call paths.",
               },
               timeFormat: {
                 anyOf: [
@@ -6067,6 +6111,64 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                     },
                   },
                   additionalProperties: false,
+                },
+                skillsLimits: {
+                  type: "object",
+                  properties: {
+                    maxSkillsPromptChars: {
+                      type: "integer",
+                      minimum: 0,
+                      maximum: 9007199254740991,
+                      title: "Agent Skills Prompt Max Chars",
+                      description:
+                        "Per-agent override for the skills prompt character budget. This extends the existing skills.limits.maxSkillsPromptChars path instead of routing the same budget through contextLimits.",
+                    },
+                  },
+                  additionalProperties: false,
+                  title: "Agent Skills Limits",
+                  description:
+                    "Optional per-agent overrides for skills subsystem budgets. Use this when an agent needs a different skills prompt budget without introducing a second generic context-limits path.",
+                },
+                contextLimits: {
+                  type: "object",
+                  properties: {
+                    memoryGetMaxChars: {
+                      type: "integer",
+                      minimum: 1,
+                      maximum: 250000,
+                      title: "Agent memory_get Max Chars",
+                      description:
+                        "Per-agent override for the default memory_get max character budget.",
+                    },
+                    memoryGetDefaultLines: {
+                      type: "integer",
+                      minimum: 1,
+                      maximum: 5000,
+                      title: "Agent memory_get Line Window",
+                      description:
+                        "Per-agent override for the default memory_get line window when lines is omitted.",
+                    },
+                    toolResultMaxChars: {
+                      type: "integer",
+                      minimum: 1,
+                      maximum: 250000,
+                      title: "Agent Tool Result Max Chars",
+                      description:
+                        "Per-agent override for the live tool-result max character budget.",
+                    },
+                    postCompactionMaxChars: {
+                      type: "integer",
+                      minimum: 1,
+                      maximum: 50000,
+                      title: "Agent Post-compaction Max Chars",
+                      description:
+                        "Per-agent override for the post-compaction AGENTS.md excerpt budget.",
+                    },
+                  },
+                  additionalProperties: false,
+                  title: "Agent Context Limits",
+                  description:
+                    "Optional per-agent overrides for the focused context budget knobs. Omitted fields inherit agents.defaults.contextLimits.",
                 },
                 heartbeat: {
                   type: "object",
@@ -16936,7 +17038,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                 enum: ["self", "tree", "agent", "all"],
                 title: "Session Tools Visibility",
                 description:
-                  'Controls which sessions can be targeted by sessions_list/sessions_history/sessions_send. ("tree" default = current session + spawned subagent sessions; "self" = only current; "agent" = any session in the current agent id; "all" = any session; cross-agent still requires tools.agentToAgent).',
+                  'Controls which sessions can be targeted by sessions_list/sessions_history/sessions_send. ("all" default = any session; "self" = only current; "tree" = current session + spawned subagent sessions; "agent" = any session in the current agent id; cross-agent still requires tools.agentToAgent).',
               },
             },
             additionalProperties: false,
@@ -17084,7 +17186,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                 type: "boolean",
                 title: "Enable Agent-to-Agent Tool",
                 description:
-                  "Enables the agent_to_agent tool surface so one agent can invoke another agent at runtime. Keep off in simple deployments and enable only when orchestration value outweighs complexity.",
+                  "Enables the agent-to-agent tool surface so one agent can invoke another agent at runtime. Defaults to enabled so trusted PM1–PM4 coordination works without local config drift.",
               },
               allow: {
                 type: "array",
@@ -17093,13 +17195,13 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                 },
                 title: "Agent-to-Agent Target Allowlist",
                 description:
-                  "Allowlist of target agent IDs permitted for agent_to_agent calls when orchestration is enabled. Use explicit allowlists to avoid uncontrolled cross-agent call graphs.",
+                  "Allowlist of agent IDs or patterns permitted for agent-to-agent calls when orchestration is enabled. Defaults to PM1, PM2, PM3, and PM4.",
               },
             },
             additionalProperties: false,
             title: "Agent-to-Agent Tool Access",
             description:
-              "Policy for allowing agent-to-agent tool calls and constraining which target agents can be reached. Keep disabled or tightly scoped unless cross-agent orchestration is intentionally enabled.",
+              "Policy for allowing agent-to-agent tool calls and constraining which target agents can be reached. Defaults allow PM1–PM4 orchestration; tighten or disable this in shared deployments.",
           },
           elevated: {
             type: "object",
@@ -17407,6 +17509,21 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
               },
             },
             additionalProperties: false,
+          },
+          catalog: {
+            type: "object",
+            properties: {
+              enabled: {
+                type: "boolean",
+                title: "Enable Catalog Tool",
+                description:
+                  "Enables the built-in `catalog` tool when the active workspace contains the catalog CLI entrypoint. Leave this off in non-Astino workspaces so the tool is not advertised where the backing script is absent.",
+              },
+            },
+            additionalProperties: false,
+            title: "Catalog Tool",
+            description:
+              "Native catalog tool registration for repo file-summary lookups backed by the workspace catalog CLI. Enable this only in workspaces that provide `scripts/openclaw-catalog/catalog.mjs`.",
           },
           experimental: {
             type: "object",
@@ -23095,6 +23212,31 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       help: "Shared default settings inherited by agents unless overridden per entry in agents.list. Use defaults to enforce consistent baseline behavior and reduce duplicated per-agent configuration.",
       tags: ["advanced"],
     },
+    "agents.defaults.contextLimits": {
+      label: "Default Context Limits",
+      help: "Focused per-agent-context budget defaults for selected high-volume excerpts and injected prompt blocks. Use this to tune bounded read/injection sizes without reopening any unbounded call paths.",
+      tags: ["performance"],
+    },
+    "agents.defaults.contextLimits.memoryGetMaxChars": {
+      label: "Default memory_get Max Chars",
+      help: "Default max characters returned by memory_get before truncation metadata and continuation notice are added. Increase to approximate older larger excerpts, but keep it bounded.",
+      tags: ["performance"],
+    },
+    "agents.defaults.contextLimits.memoryGetDefaultLines": {
+      label: "Default memory_get Line Window",
+      help: "Default memory_get line window used when requests omit lines. This controls how many source lines are selected before the max-char cap is applied.",
+      tags: ["performance"],
+    },
+    "agents.defaults.contextLimits.toolResultMaxChars": {
+      label: "Default Tool Result Max Chars",
+      help: "Default max characters kept for a single live tool result before truncation. This affects both persisted live tool-result writes and overflow-recovery truncation heuristics.",
+      tags: ["performance"],
+    },
+    "agents.defaults.contextLimits.postCompactionMaxChars": {
+      label: "Default Post-compaction Max Chars",
+      help: "Default max characters retained from AGENTS.md during post-compaction context refresh injection. Lower this to make compaction recovery cheaper, or raise it for agents that depend on longer startup guidance.",
+      tags: ["performance"],
+    },
     "agents.defaults.embeddedHarness": {
       label: "Default Embedded Harness",
       help: "Default embedded agent harness policy. Use runtime=auto for plugin harness selection, runtime=pi for built-in PI, or a registered harness id such as codex.",
@@ -23114,6 +23256,41 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       label: "Agent List",
       help: "Explicit list of configured agents with IDs and optional overrides for model, tools, identity, and workspace. Keep IDs stable over time so bindings, approvals, and session routing remain deterministic.",
       tags: ["advanced"],
+    },
+    "agents.list[].skillsLimits": {
+      label: "Agent Skills Limits",
+      help: "Optional per-agent overrides for skills subsystem budgets. Use this when an agent needs a different skills prompt budget without introducing a second generic context-limits path.",
+      tags: ["performance"],
+    },
+    "agents.list[].skillsLimits.maxSkillsPromptChars": {
+      label: "Agent Skills Prompt Max Chars",
+      help: "Per-agent override for the skills prompt character budget. This extends the existing skills.limits.maxSkillsPromptChars path instead of routing the same budget through contextLimits.",
+      tags: ["performance"],
+    },
+    "agents.list[].contextLimits": {
+      label: "Agent Context Limits",
+      help: "Optional per-agent overrides for the focused context budget knobs. Omitted fields inherit agents.defaults.contextLimits.",
+      tags: ["performance"],
+    },
+    "agents.list[].contextLimits.memoryGetMaxChars": {
+      label: "Agent memory_get Max Chars",
+      help: "Per-agent override for the default memory_get max character budget.",
+      tags: ["performance"],
+    },
+    "agents.list[].contextLimits.memoryGetDefaultLines": {
+      label: "Agent memory_get Line Window",
+      help: "Per-agent override for the default memory_get line window when lines is omitted.",
+      tags: ["performance"],
+    },
+    "agents.list[].contextLimits.toolResultMaxChars": {
+      label: "Agent Tool Result Max Chars",
+      help: "Per-agent override for the live tool-result max character budget.",
+      tags: ["performance"],
+    },
+    "agents.list[].contextLimits.postCompactionMaxChars": {
+      label: "Agent Post-compaction Max Chars",
+      help: "Per-agent override for the post-compaction AGENTS.md excerpt budget.",
+      tags: ["performance"],
     },
     "agents.list.*.embeddedHarness": {
       label: "Agent Embedded Harness",
@@ -23739,6 +23916,16 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       help: 'Optional allowlist of model ids (e.g. "gpt-5.4" or "openai/gpt-5.4").',
       tags: ["access", "tools"],
     },
+    "tools.catalog": {
+      label: "Catalog Tool",
+      help: "Native catalog tool registration for repo file-summary lookups backed by the workspace catalog CLI. Enable this only in workspaces that provide `scripts/openclaw-catalog/catalog.mjs`.",
+      tags: ["tools"],
+    },
+    "tools.catalog.enabled": {
+      label: "Enable Catalog Tool",
+      help: "Enables the built-in `catalog` tool when the active workspace contains the catalog CLI entrypoint. Leave this off in non-Astino workspaces so the tool is not advertised where the backing script is absent.",
+      tags: ["tools"],
+    },
     "tools.loopDetection.enabled": {
       label: "Tool-loop Detection",
       help: "Enable repetitive tool-call loop detection and backoff safety checks (default: false).",
@@ -23791,7 +23978,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "tools.sessions.visibility": {
       label: "Session Tools Visibility",
-      help: 'Controls which sessions can be targeted by sessions_list/sessions_history/sessions_send. ("tree" default = current session + spawned subagent sessions; "self" = only current; "agent" = any session in the current agent id; "all" = any session; cross-agent still requires tools.agentToAgent).',
+      help: 'Controls which sessions can be targeted by sessions_list/sessions_history/sessions_send. ("all" default = any session; "self" = only current; "tree" = current session + spawned subagent sessions; "agent" = any session in the current agent id; cross-agent still requires tools.agentToAgent).',
       tags: ["storage", "tools"],
     },
     "tools.exec.notifyOnExit": {
@@ -23831,17 +24018,17 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "tools.agentToAgent": {
       label: "Agent-to-Agent Tool Access",
-      help: "Policy for allowing agent-to-agent tool calls and constraining which target agents can be reached. Keep disabled or tightly scoped unless cross-agent orchestration is intentionally enabled.",
+      help: "Policy for allowing agent-to-agent tool calls and constraining which target agents can be reached. Defaults allow PM1–PM4 orchestration; tighten or disable this in shared deployments.",
       tags: ["tools"],
     },
     "tools.agentToAgent.enabled": {
       label: "Enable Agent-to-Agent Tool",
-      help: "Enables the agent_to_agent tool surface so one agent can invoke another agent at runtime. Keep off in simple deployments and enable only when orchestration value outweighs complexity.",
+      help: "Enables the agent-to-agent tool surface so one agent can invoke another agent at runtime. Defaults to enabled so trusted PM1–PM4 coordination works without local config drift.",
       tags: ["tools"],
     },
     "tools.agentToAgent.allow": {
       label: "Agent-to-Agent Target Allowlist",
-      help: "Allowlist of target agent IDs permitted for agent_to_agent calls when orchestration is enabled. Use explicit allowlists to avoid uncontrolled cross-agent call graphs.",
+      help: "Allowlist of agent IDs or patterns permitted for agent-to-agent calls when orchestration is enabled. Defaults to PM1, PM2, PM3, and PM4.",
       tags: ["access", "tools"],
     },
     "tools.experimental": {
@@ -24528,10 +24715,15 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       help: "Max total characters across all injected workspace bootstrap files (default: 150000).",
       tags: ["performance"],
     },
-    "agents.defaults.localModelMode": {
-      label: "Local Model Mode",
-      help: 'Local-model prompt profile: "default" keeps the standard tool surface, while "lean" drops heavyweight non-essential tools for smaller or weaker models.',
-      tags: ["advanced"],
+    "agents.defaults.experimental": {
+      label: "Experimental Agent Flags",
+      help: "Experimental agent-default flags. Keep these off unless you are intentionally testing a preview surface.",
+      tags: ["security", "advanced"],
+    },
+    "agents.defaults.experimental.localModelLean": {
+      label: "Enable Lean Local Model Mode (Experimental)",
+      help: "Experimental local-model prompt trim. When enabled, OpenClaw drops heavyweight default tools like browser, cron, and message for weaker or smaller local-model backends.",
+      tags: ["security", "advanced"],
     },
     "agents.defaults.bootstrapPromptTruncationWarning": {
       label: "Bootstrap Prompt Truncation Warning",
@@ -24565,12 +24757,12 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "agents.defaults.startupContext.maxFileChars": {
       label: "Startup Context Max File Chars",
-      help: "Maximum characters retained from each loaded daily memory file in the startup prelude (default: 2000).",
+      help: "Maximum characters retained from each loaded daily memory file in the startup prelude (default: 1200).",
       tags: ["performance", "storage"],
     },
     "agents.defaults.startupContext.maxTotalChars": {
       label: "Startup Context Max Total Chars",
-      help: "Maximum total characters retained across all loaded daily memory files in the startup prelude (default: 4500). Additional files are truncated from the prelude once this cap is reached.",
+      help: "Maximum total characters retained across all loaded daily memory files in the startup prelude (default: 2800). Additional files are truncated from the prelude once this cap is reached.",
       tags: ["performance"],
     },
     "agents.defaults.envelopeTimezone": {

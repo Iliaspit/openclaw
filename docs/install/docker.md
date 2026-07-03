@@ -99,7 +99,7 @@ Docker is **optional**. Use it only if you want a containerized gateway or to va
 If you prefer to run each step yourself instead of using the setup script:
 
 ```bash
-docker build -t openclaw:local -f Dockerfile .
+docker build --build-arg OPENCLAW_INSTALL_BROWSER=1 -t openclaw:local -f Dockerfile .
 docker compose run --rm --no-deps --entrypoint node openclaw-gateway \
   dist/index.js onboard --mode local --no-install-daemon
 docker compose run --rm --no-deps --entrypoint node openclaw-gateway \
@@ -120,6 +120,67 @@ and setup-time config writes through `openclaw-gateway` with
 `--no-deps --entrypoint node`.
 </Note>
 
+### Which rebuild path am I using?
+
+If you are coming back to an existing Docker install and are not sure whether it
+uses a locally built image or a pre-built registry image, check the configured
+image first from the repo root:
+
+```bash
+grep '^OPENCLAW_IMAGE=' .env
+docker compose ps --format json
+```
+
+How to interpret it:
+
+- If `.env` sets `OPENCLAW_IMAGE=openclaw:local` or the running container image
+  is `openclaw:local`, you are using the local-image flow. Rebuild with:
+
+  ```bash
+  docker build --build-arg OPENCLAW_INSTALL_BROWSER=1 -t openclaw:local -f Dockerfile .
+  docker compose -f docker-compose.yml -f docker-compose.extra.yml up -d --force-recreate openclaw-gateway
+  ```
+
+- If `.env` sets `OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:<tag>` (or another
+  remote image reference), you are using the pre-built image flow. Update with:
+
+  ```bash
+  docker compose -f docker-compose.yml -f docker-compose.extra.yml pull openclaw-gateway openclaw-cli
+  docker compose -f docker-compose.yml -f docker-compose.extra.yml up -d --force-recreate openclaw-gateway
+  ```
+
+If `OPENCLAW_IMAGE` is unset, `docker-compose.yml` falls back to
+`openclaw:local`.
+
+If `.env` contains `OPENCLAW_EXTRA_MOUNTS` or `OPENCLAW_HOME_VOLUME`, also check
+whether `docker-compose.extra.yml` exists. When it does, include it in rebuild
+and restart commands.
+
+Recommended pattern:
+
+```bash
+openclaw_compose() {
+  docker compose -f docker-compose.yml -f docker-compose.extra.yml "$@"
+}
+
+openclaw_compose up -d --force-recreate openclaw-gateway
+openclaw_compose logs -f openclaw-gateway
+openclaw_compose exec openclaw-gateway node dist/index.js health --token "$OPENCLAW_GATEWAY_TOKEN"
+```
+
+Do not store the full `docker compose ...` command in a plain string variable and
+run it as `$COMPOSE`; shells such as `zsh` treat that as one command name and
+fail with `command not found`.
+
+If you forget the extra compose file, the gateway may still look healthy while
+plugin sidecars or agent workspaces fail because expected mounts (for example
+`/workspace/...`) are missing from the running container.
+
+This is especially important when your OpenClaw config points agents at mounted
+repo paths such as `/workspace/astino`. Without the extra compose file, those
+paths do not exist in the container even though the gateway itself may still
+start and pass basic health checks.
+
 ### Environment variables
 
 The setup script accepts these optional environment variables:
@@ -129,6 +190,7 @@ The setup script accepts these optional environment variables:
 | `OPENCLAW_IMAGE`               | Use a remote image instead of building locally                   |
 | `OPENCLAW_DOCKER_APT_PACKAGES` | Install extra apt packages during build (space-separated)        |
 | `OPENCLAW_EXTENSIONS`          | Pre-install extension deps at build time (space-separated names) |
+| `OPENCLAW_INSTALL_BROWSER`     | Bake Chromium and Linux browser deps into local builds (default `1`; set `0` to skip) |
 | `OPENCLAW_EXTRA_MOUNTS`        | Extra host bind mounts (comma-separated `source:target[:opts]`)  |
 | `OPENCLAW_HOME_VOLUME`         | Persist `/home/node` in a named Docker volume                    |
 | `OPENCLAW_SANDBOX`             | Opt in to sandbox bootstrap (`1`, `true`, `yes`, `on`)           |
@@ -278,14 +340,14 @@ See [ClawDock](/install/clawdock) for the full helper guide.
 
     1. **Persist `/home/node`**: `export OPENCLAW_HOME_VOLUME="openclaw_home"`
     2. **Bake system deps**: `export OPENCLAW_DOCKER_APT_PACKAGES="git curl jq"`
-    3. **Install Playwright browsers**:
+    3. **Bake browser automation deps**: Docker setup does this by default for
+       local builds. For manual builds, pass the same build arg:
        ```bash
-       docker compose run --rm openclaw-cli \
-         node /app/node_modules/playwright-core/cli.js install chromium
+       docker build --build-arg OPENCLAW_INSTALL_BROWSER=1 -t openclaw:local -f Dockerfile .
        ```
-    4. **Persist browser downloads**: set
-       `PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright` and use
-       `OPENCLAW_HOME_VOLUME` or `OPENCLAW_EXTRA_MOUNTS`.
+       The image uses the repo-pinned `playwright-core` installer with
+       `install --with-deps chromium`, so Chromium and required Linux shared
+       libraries are installed together.
 
   </Accordion>
 
