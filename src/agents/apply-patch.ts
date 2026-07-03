@@ -11,6 +11,7 @@ import {
 } from "../infra/fs-safe.js";
 import { PATH_ALIAS_POLICIES, type PathAliasPolicy } from "../infra/path-alias-guards.js";
 import { applyUpdateHunk } from "./apply-patch-update.js";
+import { recordChildRouteEditFailure, recordChildRouteEditSuccess } from "./child-route-health.js";
 import { toRelativeSandboxPath, resolvePathFromInput } from "./path-policy.js";
 import { assertSandboxPath } from "./sandbox-paths.js";
 import type { SandboxFsBridge } from "./sandbox/fs-bridge.js";
@@ -80,6 +81,11 @@ type ApplyPatchOptions = {
   signal?: AbortSignal;
 };
 
+type ApplyPatchRouteHealthContext = {
+  childSessionKey?: string;
+  runId?: string;
+};
+
 const applyPatchSchema = Type.Object({
   input: Type.String({
     description: "Patch content using the *** Begin Patch/End Patch format.",
@@ -87,7 +93,12 @@ const applyPatchSchema = Type.Object({
 });
 
 export function createApplyPatchTool(
-  options: { cwd?: string; sandbox?: SandboxApplyPatchConfig; workspaceOnly?: boolean } = {},
+  options: {
+    cwd?: string;
+    sandbox?: SandboxApplyPatchConfig;
+    workspaceOnly?: boolean;
+    routeHealth?: ApplyPatchRouteHealthContext;
+  } = {},
 ): AgentTool<typeof applyPatchSchema, ApplyPatchToolDetails> {
   const cwd = options.cwd ?? process.cwd();
   const sandbox = options.sandbox;
@@ -111,11 +122,28 @@ export function createApplyPatchTool(
         throw err;
       }
 
-      const result = await applyPatch(input, {
+      let result: ApplyPatchResult;
+      try {
+        result = await applyPatch(input, {
+          cwd,
+          sandbox,
+          workspaceOnly,
+          signal,
+        });
+      } catch (err) {
+        await recordApplyPatchFailureSignal({
+          routeHealth: options.routeHealth,
+          cwd,
+          input,
+          error: err,
+        });
+        throw err;
+      }
+
+      await recordApplyPatchSuccessSignal({
+        routeHealth: options.routeHealth,
         cwd,
-        sandbox,
-        workspaceOnly,
-        signal,
+        result,
       });
 
       return {
@@ -124,6 +152,135 @@ export function createApplyPatchTool(
       };
     },
   };
+}
+
+function extractPatchTargetPaths(input: string, cwd: string): string[] {
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  for (const rawLine of input.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const marker = line.startsWith(UPDATE_FILE_MARKER)
+      ? UPDATE_FILE_MARKER
+      : line.startsWith(ADD_FILE_MARKER)
+        ? ADD_FILE_MARKER
+        : line.startsWith(DELETE_FILE_MARKER)
+          ? DELETE_FILE_MARKER
+          : undefined;
+    if (!marker) {
+      continue;
+    }
+    const rawPath = line.slice(marker.length).trim();
+    if (!rawPath) {
+      continue;
+    }
+    const resolved = path.isAbsolute(rawPath) ? path.resolve(rawPath) : path.resolve(cwd, rawPath);
+    if (!seen.has(resolved)) {
+      seen.add(resolved);
+      paths.push(resolved);
+    }
+  }
+  return paths;
+}
+
+function extractFailurePathFromError(error: unknown, cwd: string): string | undefined {
+  if (!(error instanceof Error)) {
+    return undefined;
+  }
+  const match =
+    /^Failed to find expected lines in (.*?):\n/s.exec(error.message) ??
+    /^Failed to find context '.*' in (.*)$/s.exec(error.message);
+  const rawPath = match?.[1]?.trim();
+  if (!rawPath) {
+    return undefined;
+  }
+  return path.isAbsolute(rawPath) ? path.resolve(rawPath) : path.resolve(cwd, rawPath);
+}
+
+function classifyApplyPatchFailure(
+  error: unknown,
+): "old_text_mismatch" | "ambiguous_old_text" | "mechanical_edit_failure" | undefined {
+  if (!(error instanceof Error)) {
+    return undefined;
+  }
+  const message = error.message;
+  if (/Failed to find (expected lines|context)/.test(message)) {
+    return "old_text_mismatch";
+  }
+  if (/\b(multiple|ambiguous|not unique)\b/i.test(message)) {
+    return "ambiguous_old_text";
+  }
+  if (
+    message.startsWith("Invalid patch") ||
+    message === "No files were modified." ||
+    message === "Provide a patch input." ||
+    message.includes("The first line of the patch must be") ||
+    message.includes("The last line of the patch must be")
+  ) {
+    return "mechanical_edit_failure";
+  }
+  return undefined;
+}
+
+async function recordApplyPatchFailureSignal(params: {
+  routeHealth?: ApplyPatchRouteHealthContext;
+  cwd: string;
+  input: string;
+  error: unknown;
+}) {
+  if (!params.routeHealth?.childSessionKey) {
+    return;
+  }
+  const { childSessionKey, runId } = params.routeHealth;
+  const failureKind = classifyApplyPatchFailure(params.error);
+  if (!failureKind) {
+    return;
+  }
+  const errorPath = extractFailurePathFromError(params.error, params.cwd);
+  const targetPaths = errorPath ? [errorPath] : extractPatchTargetPaths(params.input, params.cwd);
+  const paths = targetPaths.length > 0 ? targetPaths : [undefined];
+  await Promise.all(
+    paths.map((filePath) =>
+      recordChildRouteEditFailure({
+        childSessionKey,
+        runId,
+        ...(filePath ? { filePath } : {}),
+        toolKind: "apply_patch",
+        failureKind,
+      }),
+    ),
+  );
+}
+
+async function recordApplyPatchSuccessSignal(params: {
+  routeHealth?: ApplyPatchRouteHealthContext;
+  cwd: string;
+  result: ApplyPatchResult;
+}) {
+  if (!params.routeHealth?.childSessionKey) {
+    return;
+  }
+  const { childSessionKey, runId } = params.routeHealth;
+  const summaryPaths = [
+    ...params.result.summary.modified,
+    ...params.result.summary.added,
+    ...params.result.summary.deleted,
+  ];
+  const paths =
+    summaryPaths.length > 0
+      ? summaryPaths.map((filePath) =>
+          path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(params.cwd, filePath),
+        )
+      : [undefined];
+  await Promise.all(
+    paths.map((filePath) =>
+      recordChildRouteEditSuccess({
+        childSessionKey,
+        runId,
+        ...(filePath ? { filePath } : {}),
+        toolKind: "apply_patch",
+      }),
+    ),
+  );
 }
 
 export async function applyPatch(

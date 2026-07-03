@@ -181,6 +181,9 @@ Check Docker/runtime logs and visibility summaries first:
   is attempted again.
 - `auth_profile_session_expired`, `child_conversation_expired`, `child_session_unhealthy`,
   and plain `session_expired` indicate session/route expiry patterns.
+- `edit_failure_threshold` means repeated mechanical edits, such as missing or
+  non-unique edit anchors, crossed the bounded threshold. Inspect nearby file
+  context and use unique `oldText`/patch anchors before retrying.
 - `recommendedAction` or `sessions_send` records with
   `spawn_fresh` usually indicate unsafe child reuse for that request path.
 
@@ -200,6 +203,8 @@ Safe recovery rules:
   automatically.
 - Use a healthy configured fallback profile only when the failing provider scope is
   blocked and fallback is explicitly healthy for this route.
+- A single edit or patch miss is normal tool feedback. Repeated misses may block
+  the child until a successful edit/patch, reset, replacement, or signal expiry.
 
 Decision rule for manual child replacement:
 

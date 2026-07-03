@@ -1074,10 +1074,17 @@ function isEditFailureBlockerScopeMatch(
     return true;
   }
   if (!scope) {
-    return true;
+    return (
+      !normalizeOptionalString(blocker.runId) &&
+      !normalizeOptionalString(blocker.filePath) &&
+      !normalizeOptionalString(blocker.toolKind)
+    );
   }
   const scopeRunId = normalizeOptionalString(scope.runId);
   const blockerRunId = normalizeOptionalString(blocker.runId);
+  if (blockerRunId && !scopeRunId) {
+    return false;
+  }
   if (scopeRunId && blockerRunId && blockerRunId !== scopeRunId) {
     return false;
   }
@@ -1085,11 +1092,21 @@ function isEditFailureBlockerScopeMatch(
     | "edit"
     | "apply_patch"
     | undefined;
-  if (scopeToolKind && blocker.toolKind && blocker.toolKind !== scopeToolKind) {
+  const blockerToolKind = normalizeOptionalString(blocker.toolKind) as
+    | "edit"
+    | "apply_patch"
+    | undefined;
+  if (blockerToolKind && !scopeToolKind) {
+    return false;
+  }
+  if (scopeToolKind && blockerToolKind && blockerToolKind !== scopeToolKind) {
     return false;
   }
   const scopeFilePath = normalizeOptionalString(scope.filePath);
   const blockerFilePath = normalizeOptionalString(blocker.filePath);
+  if (blockerFilePath && !scopeFilePath) {
+    return false;
+  }
   if (scopeFilePath && blockerFilePath && blockerFilePath !== scopeFilePath) {
     return false;
   }
@@ -2163,7 +2180,9 @@ export async function assessChildRouteHealth(
   }
 
   const editFailureScope = {
-    runId: normalizeOptionalString(context.editFailureScope?.runId),
+    runId:
+      normalizeOptionalString(context.editFailureScope?.runId) ??
+      normalizeOptionalString(context.registryRecord?.runId),
     filePath: normalizeOptionalString(context.editFailureScope?.filePath),
     toolKind: context.editFailureScope?.toolKind,
   };

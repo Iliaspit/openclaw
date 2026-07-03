@@ -1,12 +1,13 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createRebindableDirectoryAlias,
   withRealpathSymlinkRebindRace,
 } from "../test-utils/symlink-rebind-race.js";
-import { applyPatch } from "./apply-patch.js";
+import { applyPatch, createApplyPatchTool } from "./apply-patch.js";
+import { assessChildRouteHealth, resetChildRouteHealthForTest } from "./child-route-health.js";
 import type { SandboxFsBridge } from "./sandbox/fs-bridge.js";
 
 const pinnedPathHelper = vi.hoisted(() => {
@@ -114,6 +115,17 @@ vi.mock("../infra/fs-pinned-write-helper.js", () => ({
   runPinnedWriteHelper: pinnedPathHelper.runPinnedWriteHelper,
 }));
 
+const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+
+afterEach(() => {
+  resetChildRouteHealthForTest();
+  if (previousStateDir === undefined) {
+    delete process.env.OPENCLAW_STATE_DIR;
+  } else {
+    process.env.OPENCLAW_STATE_DIR = previousStateDir;
+  }
+});
+
 async function withTempDir<T>(fn: (dir: string) => Promise<T>) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-patch-"));
   try {
@@ -204,6 +216,134 @@ describe("applyPatch", () => {
 
     expect(memory.files.get("/sandbox/hello.txt")).toBe("hello\n");
     expect(result.summary.added).toEqual(["hello.txt"]);
+  });
+
+  it("records repeated child apply_patch misses as route-health edit_failure_threshold", async () => {
+    await withTempDir(async (dir) => {
+      process.env.OPENCLAW_STATE_DIR = path.join(dir, "state");
+      resetChildRouteHealthForTest();
+      const childSessionKey = "agent:main:subagent:patcher";
+      const runId = "run-patcher-1";
+      const sourcePath = path.join(dir, "source.txt");
+      await fs.writeFile(sourcePath, "actual\n", "utf8");
+      const tool = createApplyPatchTool({
+        cwd: dir,
+        routeHealth: { childSessionKey, runId },
+      });
+      const badPatch = `*** Begin Patch
+*** Update File: source.txt
+@@
+-missing
++replacement
+*** End Patch`;
+
+      for (const attempt of [1, 2]) {
+        await expect(
+          tool.execute(`patch-miss-${attempt}`, { input: badPatch }, undefined),
+        ).rejects.toThrow(/Failed to find expected lines/);
+      }
+
+      await expect(
+        assessChildRouteHealth(childSessionKey, {
+          routeIntent: "followup_reuse",
+          targetMethod: "sessions_send",
+          requesterSessionKey: "agent:main:main",
+          childTargetKind: "subagent",
+          editFailureScope: {
+            runId,
+            filePath: sourcePath,
+            toolKind: "apply_patch",
+          },
+          registryRecord: { childSessionKey, runId },
+        }),
+      ).resolves.toMatchObject({ status: "ok" });
+
+      await expect(tool.execute("patch-miss-3", { input: badPatch }, undefined)).rejects.toThrow(
+        /Failed to find expected lines/,
+      );
+
+      await expect(
+        assessChildRouteHealth(childSessionKey, {
+          routeIntent: "followup_reuse",
+          targetMethod: "sessions_send",
+          requesterSessionKey: "agent:main:main",
+          childTargetKind: "subagent",
+          editFailureScope: {
+            runId,
+            filePath: sourcePath,
+            toolKind: "apply_patch",
+          },
+          registryRecord: { childSessionKey, runId },
+        }),
+      ).resolves.toMatchObject({
+        status: "unhealthy",
+        codes: ["edit_failure_threshold"],
+        recommendedAction: "spawn_fresh",
+      });
+
+      const goodPatch = `*** Begin Patch
+*** Update File: source.txt
+@@
+-actual
++updated
+*** End Patch`;
+      await expect(
+        tool.execute("patch-success", { input: goodPatch }, undefined),
+      ).resolves.toMatchObject({
+        details: { summary: { modified: ["source.txt"] } },
+      });
+
+      await expect(
+        assessChildRouteHealth(childSessionKey, {
+          routeIntent: "followup_reuse",
+          targetMethod: "sessions_send",
+          requesterSessionKey: "agent:main:main",
+          childTargetKind: "subagent",
+          editFailureScope: {
+            runId,
+            filePath: sourcePath,
+            toolKind: "apply_patch",
+          },
+          registryRecord: { childSessionKey, runId },
+        }),
+      ).resolves.toMatchObject({ status: "ok" });
+    });
+  });
+
+  it("does not count apply_patch path-policy failures as mechanical edit misses", async () => {
+    await withTempDir(async (dir) => {
+      process.env.OPENCLAW_STATE_DIR = path.join(dir, "state");
+      resetChildRouteHealthForTest();
+      const childSessionKey = "agent:main:subagent:patch-policy";
+      const runId = "run-patch-policy-1";
+      const outsidePath = path.join(path.dirname(dir), `outside-${Date.now()}.txt`);
+      const relativeEscape = path.relative(dir, outsidePath);
+      const tool = createApplyPatchTool({
+        cwd: dir,
+        routeHealth: { childSessionKey, runId },
+      });
+      const escapingPatch = buildAddFilePatch(relativeEscape);
+
+      try {
+        for (const attempt of [1, 2, 3]) {
+          await expect(
+            tool.execute(`patch-escape-${attempt}`, { input: escapingPatch }, undefined),
+          ).rejects.toThrow(/Path escapes sandbox root/);
+        }
+
+        await expect(
+          assessChildRouteHealth(childSessionKey, {
+            routeIntent: "followup_reuse",
+            targetMethod: "sessions_send",
+            requesterSessionKey: "agent:main:main",
+            childTargetKind: "subagent",
+            registryRecord: { childSessionKey, runId },
+          }),
+        ).resolves.toMatchObject({ status: "ok" });
+      } finally {
+        await fs.rm(outsidePath, { force: true });
+      }
+    });
   });
 
   it("updates and moves a file", async () => {
