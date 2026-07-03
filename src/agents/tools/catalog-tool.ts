@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { execFileUtf8 } from "../../daemon/exec-file.js";
 import { optionalStringEnum } from "../schema/typebox.js";
 import { CATALOG_TOOL_DISPLAY_SUMMARY } from "../tool-description-presets.js";

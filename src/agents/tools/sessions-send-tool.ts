@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { loadSessionStore, resolveStorePath, type SessionEntry } from "../../config/sessions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { callGateway } from "../../gateway/call.js";

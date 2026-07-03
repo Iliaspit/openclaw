@@ -1,4 +1,4 @@
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 
 export const CHILD_ROUTE_HEALTH_CODES = [
   "child_conversation_expired",
