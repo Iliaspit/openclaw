@@ -159,6 +159,11 @@ describe("edit tool recovery hardening", () => {
         targetMethod: "sessions_send",
         requesterSessionKey: "agent:main:main",
         childTargetKind: "subagent",
+        editFailureScope: {
+          runId,
+          filePath,
+          toolKind: "edit",
+        },
         registryRecord: { childSessionKey, runId },
       }),
     ).resolves.toMatchObject({ status: "ok" });
@@ -177,6 +182,11 @@ describe("edit tool recovery hardening", () => {
         targetMethod: "sessions_send",
         requesterSessionKey: "agent:main:main",
         childTargetKind: "subagent",
+        editFailureScope: {
+          runId,
+          filePath,
+          toolKind: "edit",
+        },
         registryRecord: { childSessionKey, runId },
       }),
     ).resolves.toMatchObject({
@@ -215,6 +225,11 @@ describe("edit tool recovery hardening", () => {
         targetMethod: "sessions_send",
         requesterSessionKey: "agent:main:main",
         childTargetKind: "subagent",
+        editFailureScope: {
+          runId,
+          filePath,
+          toolKind: "edit",
+        },
         registryRecord: { childSessionKey, runId },
       }),
     ).resolves.toMatchObject({ status: "ok" });
@@ -233,6 +248,11 @@ describe("edit tool recovery hardening", () => {
         targetMethod: "sessions_send",
         requesterSessionKey: "agent:main:main",
         childTargetKind: "subagent",
+        editFailureScope: {
+          runId,
+          filePath,
+          toolKind: "edit",
+        },
         registryRecord: { childSessionKey, runId },
       }),
     ).resolves.toMatchObject({

@@ -451,6 +451,21 @@ describe("child route health", () => {
         targetMethod: "sessions_send",
         requesterSessionKey: "agent:main:main",
         childTargetKind: "subagent",
+        registryRecord: { ...trackedRun(childSessionKey), runId },
+      }),
+    ).resolves.toMatchObject({ status: "ok" });
+
+    await expect(
+      assessChildRouteHealth(childSessionKey, {
+        routeIntent: "followup_reuse",
+        targetMethod: "sessions_send",
+        requesterSessionKey: "agent:main:main",
+        childTargetKind: "subagent",
+        editFailureScope: {
+          runId,
+          filePath: "/workspace/demo.ts",
+          toolKind: "edit",
+        },
         registryRecord: trackedRun(childSessionKey),
       }),
     ).resolves.toMatchObject({ status: "ok" });
@@ -477,6 +492,11 @@ describe("child route health", () => {
         targetMethod: "sessions_send",
         requesterSessionKey: "agent:main:main",
         childTargetKind: "subagent",
+        editFailureScope: {
+          runId,
+          filePath: "/workspace/demo.ts",
+          toolKind: "edit",
+        },
         registryRecord: trackedRun(childSessionKey),
       }),
     ).resolves.toMatchObject({
@@ -538,11 +558,36 @@ describe("child route health", () => {
         childTargetKind: "subagent",
         registryRecord: { ...trackedRun(childSessionKey), runId: `${runPrefix}-first` },
       }),
+    ).resolves.toMatchObject({ status: "ok" });
+
+    await expect(
+      assessChildRouteHealth(childSessionKey, {
+        routeIntent: "followup_reuse",
+        targetMethod: "sessions_send",
+        requesterSessionKey: "agent:main:main",
+        childTargetKind: "subagent",
+        editFailureScope: {
+          runId: `${runPrefix}-first`,
+          filePath: "/workspace/demo-a.ts",
+          toolKind: "edit",
+        },
+        registryRecord: { ...trackedRun(childSessionKey), runId: `${runPrefix}-first` },
+      }),
     ).resolves.toMatchObject({
       status: "unhealthy",
       codes: ["edit_failure_threshold"],
       recommendedAction: "spawn_fresh",
     });
+
+    await expect(
+      assessChildRouteHealth(childSessionKey, {
+        routeIntent: "followup_reuse",
+        targetMethod: "sessions_send",
+        requesterSessionKey: "agent:main:main",
+        childTargetKind: "subagent",
+        registryRecord: { ...trackedRun(childSessionKey), runId: `${runPrefix}-second` },
+      }),
+    ).resolves.toMatchObject({ status: "ok" });
 
     await expect(
       assessChildRouteHealth(childSessionKey, {
@@ -608,6 +653,7 @@ describe("child route health", () => {
         editFailureScope: {
           runId: `${runPrefix}-first`,
           filePath: "/workspace/demo-a.ts",
+          toolKind: "edit",
         },
         registryRecord: { ...trackedRun(childSessionKey), runId: `${runPrefix}-first` },
       }),
@@ -622,6 +668,7 @@ describe("child route health", () => {
         editFailureScope: {
           runId: `${runPrefix}-first`,
           filePath: "/workspace/demo-b.ts",
+          toolKind: "edit",
         },
         registryRecord: { ...trackedRun(childSessionKey), runId: `${runPrefix}-first` },
       }),
