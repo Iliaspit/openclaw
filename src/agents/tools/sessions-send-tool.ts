@@ -122,6 +122,8 @@ type FreshChildRerouteMarker =
       key: string;
       createdAt: number;
       error: string;
+      oldChildSessionKey?: string;
+      oldRunId?: string;
       childSessionKey?: string;
       runId?: string;
       reroute?: FreshChildReroute;
@@ -434,11 +436,17 @@ function markFreshChildRerouteError(params: {
   marker: Extract<FreshChildRerouteMarker, { status: "accepted" }>;
   error: string;
 }) {
+  const rejectedOld =
+    params.marker.reroute.status === "fresh_child_spawned"
+      ? params.marker.reroute.rejectedOldChild
+      : undefined;
   freshChildReroutes.set(params.marker.key, {
     status: "error",
     key: params.marker.key,
     createdAt: Date.now(),
     error: params.error,
+    ...(rejectedOld?.childSessionKey ? { oldChildSessionKey: rejectedOld.childSessionKey } : {}),
+    ...(rejectedOld?.generation ? { oldRunId: rejectedOld.generation } : {}),
     childSessionKey: params.marker.childSessionKey,
     runId: params.marker.runId,
     reroute: params.marker.reroute,
@@ -452,6 +460,13 @@ function freshChildRerouteMatchesOldGeneration(
     oldRunId?: string;
   },
 ): boolean {
+  if (marker.status === "error" && marker.oldChildSessionKey) {
+    const oldRunId = normalizeOptionalString(params.oldRunId);
+    return (
+      marker.oldChildSessionKey === params.oldChildSessionKey.trim() &&
+      !(oldRunId && marker.oldRunId !== oldRunId)
+    );
+  }
   const reroute = marker.reroute;
   if (!reroute || reroute.status !== "fresh_child_spawned") {
     return false;
@@ -720,6 +735,7 @@ async function rerouteToFreshChild(params: {
     provider: params.targetProvider,
     childSessionKey: params.resolvedKey,
     runId: params.registryRecord?.runId,
+    includeProviderDefaultCredentialBlockers: true,
   });
   if (!authBlockers.ok) {
     return jsonResult({
@@ -887,6 +903,9 @@ async function rerouteToFreshChild(params: {
     (params.targetProvider.providerId && params.targetProvider.modelId
       ? `${params.targetProvider.providerId}/${params.targetProvider.modelId}`
       : params.targetProvider.modelId);
+  if (params.registryRecord?.runId) {
+    markSubagentRunForFreshReroute(params.registryRecord.runId);
+  }
   const spawn = await spawnSubagentDirect(
     {
       task: formatChildHandoffTask({ message: params.message, packet: handoffPacket }),
@@ -909,6 +928,7 @@ async function rerouteToFreshChild(params: {
       agentAccountId: params.registryRecord?.requesterOrigin?.accountId,
       agentTo: params.registryRecord?.requesterOrigin?.to,
       agentThreadId: params.registryRecord?.requesterOrigin?.threadId,
+      workspaceDir: params.registryRecord?.workspaceDir,
     },
   );
   if (spawn.status !== "accepted" || !spawn.childSessionKey || !spawn.runId) {
@@ -917,6 +937,8 @@ async function rerouteToFreshChild(params: {
       key: rerouteKey,
       createdAt: Date.now(),
       error: spawn.error ?? "failed to spawn fresh tracked child",
+      oldChildSessionKey: params.resolvedKey,
+      ...(params.registryRecord?.runId ? { oldRunId: params.registryRecord.runId } : {}),
       childSessionKey: spawn.childSessionKey,
       runId: spawn.runId,
     });
@@ -933,10 +955,6 @@ async function rerouteToFreshChild(params: {
         runId: spawn.runId,
       },
     });
-  }
-
-  if (params.registryRecord?.runId) {
-    markSubagentRunForFreshReroute(params.registryRecord.runId);
   }
   const reroute = decideFreshChildReroute({
     failure: params.details,

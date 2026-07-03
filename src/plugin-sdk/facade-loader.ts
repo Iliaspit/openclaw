@@ -198,6 +198,19 @@ export function createLazyFacadeArrayValue<T extends readonly unknown[]>(load: (
   return createLazyFacadeProxyValue({ load, target: [] });
 }
 
+export function createLazyFacadeValue<TFacade extends object, K extends keyof TFacade>(
+  loadFacadeModule: () => TFacade,
+  key: K,
+): TFacade[K] {
+  return ((...args: unknown[]) => {
+    const value = loadFacadeModule()[key];
+    if (typeof value !== "function") {
+      return value;
+    }
+    return (value as (...fnArgs: unknown[]) => unknown)(...args);
+  }) as TFacade[K];
+}
+
 export type FacadeModuleLocation = {
   modulePath: string;
   boundaryRoot: string;

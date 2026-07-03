@@ -1921,6 +1921,7 @@ describe("sessions tools", () => {
       let freshSpawnStartCount = 0;
       const attachmentsRootDir = path.join(stateDir, "attachments");
       const attachmentsDir = path.join(attachmentsRootDir, "old-slice");
+      const oldWorkspaceDir = path.join(stateDir, "workspaces", "old-slice");
       await fs.mkdir(attachmentsDir, { recursive: true });
       await fs.writeFile(path.join(attachmentsDir, "input.txt"), "retained input", "utf8");
       addSubagentRunForTests({
@@ -1944,6 +1945,7 @@ describe("sessions tools", () => {
         attachmentsRootDir,
         attachmentsDir,
         retainAttachmentsOnKeep: true,
+        workspaceDir: oldWorkspaceDir,
       });
       await recordChildRouteHealthEvent({
         code: "context_overflow",
@@ -2017,6 +2019,9 @@ describe("sessions tools", () => {
           if (!isFreshSpawnStart) {
             return { runId: "run-non-reroute-agent", status: "accepted" };
           }
+          expect(getLatestSubagentRunByChildSessionKey(oldChildKey)?.suppressAnnounceReason).toBe(
+            "fresh-reroute",
+          );
           freshChildKey = typeof params.sessionKey === "string" ? params.sessionKey : freshChildKey;
           freshSpawnStartCount += 1;
           return {
@@ -2159,6 +2164,7 @@ describe("sessions tools", () => {
               fastMode: true,
               execNode: "node-22",
               responseUsage: "full",
+              spawnedWorkspaceDir: oldWorkspaceDir,
             }),
           }),
         ]),
@@ -2210,6 +2216,9 @@ describe("sessions tools", () => {
       expect(taskMessage).toContain("input.txt");
       expect(getLatestSubagentRunByChildSessionKey(freshChildKey)?.resultReceiptId).toMatch(
         /^scr_/,
+      );
+      expect(getLatestSubagentRunByChildSessionKey(freshChildKey)?.workspaceDir).toBe(
+        oldWorkspaceDir,
       );
       expect(calls.some((call) => call.method === "send")).toBe(false);
       const attemptsAfterFirstSpawn = JSON.parse(
@@ -2430,6 +2439,13 @@ describe("sessions tools", () => {
       error: "fresh child failed",
     });
     expect(freshSpawnStartCount).toBe(1);
+    await recordChildRouteHealthEvent({
+      code: "agent_lifecycle_error",
+      status: "active",
+      source: "agent_lifecycle",
+      childSessionKey: oldChildKey,
+      runId: "run-old-fresh-error",
+    });
 
     const second = await tool.execute("call-spawn-fresh-reroute-error-again", {
       sessionKey: oldChildKey,
@@ -2451,6 +2467,96 @@ describe("sessions tools", () => {
       },
     });
     expect(freshSpawnStartCount).toBe(1);
+    expect(calls.some((call) => call.method === "send")).toBe(false);
+  });
+
+  it("sessions_send blocks fresh reroute on provider default credential-source auth expiry", async () => {
+    const calls: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+    const requesterKey = "agent:implementer:main";
+    const oldChildKey = "agent:implementer:subagent:default-source-auth-blocked";
+    addSubagentRunForTests({
+      runId: "run-default-source-auth-blocked",
+      childSessionKey: oldChildKey,
+      controllerSessionKey: requesterKey,
+      requesterSessionKey: requesterKey,
+      requesterDisplayKey: requesterKey,
+      task: "finish with default credential auth blocker present",
+      cleanup: "keep",
+      label: "implementer",
+      spawnMode: "run",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+    });
+    await writeSessionToolStore("implementer", {
+      [oldChildKey]: {
+        sessionId: "sess-default-source-auth-blocked",
+        updatedAt: Date.now(),
+        modelProvider: "openai",
+        model: "gpt-5.4",
+      },
+    });
+    await recordChildRouteHealthEvent({
+      code: "context_overflow",
+      status: "active",
+      source: "context_overflow",
+      childSessionKey: oldChildKey,
+      runId: "run-default-source-auth-blocked",
+    });
+    await recordChildRouteHealthEvent({
+      code: "auth_profile_session_expired",
+      status: "active",
+      source: "provider_error",
+      provider: {
+        providerId: "openai",
+        credentialSource: "env: OPENAI_API_KEY",
+      },
+    });
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      calls.push(request);
+      if (request.method === "agent") {
+        throw new Error("default-source-auth-blocked reroute must not spawn a fresh child");
+      }
+      if (request.method === "agent.wait") {
+        throw new Error("default-source-auth-blocked reroute must not wait on old or fresh runs");
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "discord",
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const result = await tool.execute("call-default-source-auth-blocked-reroute", {
+      sessionKey: oldChildKey,
+      message: "continue with the next implementation slice",
+      timeoutSeconds: 1,
+      handoff: {
+        originalTask: "finish with default credential auth blocker present",
+        currentNextStep: "continue with the next implementation slice",
+      },
+    });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      status: "no_delivery",
+      code: "child_session_unhealthy",
+      details: {
+        kind: "child_route_unhealthy",
+        codes: ["auth_profile_session_expired", "context_overflow"],
+        recommendedAction: "reauth",
+        stateTransitionRequired: true,
+      },
+      delivery: { status: "rejected", mode: "child_route_guard" },
+    });
+    expect(calls.some((call) => call.method === "agent")).toBe(false);
+    expect(calls.some((call) => call.method === "agent.wait")).toBe(false);
     expect(calls.some((call) => call.method === "send")).toBe(false);
   });
 

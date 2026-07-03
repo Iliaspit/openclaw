@@ -23,6 +23,7 @@ import {
 } from "./facade-loader.js";
 export {
   createLazyFacadeArrayValue,
+  createLazyFacadeValue,
   createLazyFacadeObjectValue,
   listImportedBundledPluginFacadeIds,
 } from "./facade-loader.js";
