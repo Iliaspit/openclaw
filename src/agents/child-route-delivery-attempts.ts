@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -16,6 +17,7 @@ const DELIVERY_ATTEMPTS_VERSION = 1 as const;
 const JSON_FILE_MODE = 0o600;
 const MAX_ATTEMPTS_TOTAL = 5_000;
 const ATTEMPT_RETENTION_MS = 24 * 60 * 60_000;
+const testStateDirContext = new AsyncLocalStorage<string>();
 
 export type ChildRouteRejectedDeliveryAttempt = {
   version: typeof DELIVERY_ATTEMPTS_VERSION;
@@ -62,6 +64,10 @@ export type RejectedAttemptInput = {
 };
 
 function resolveSubagentStateDir(env: NodeJS.ProcessEnv = process.env): string {
+  const testStateDir = testStateDirContext.getStore();
+  if (testStateDir) {
+    return path.join(testStateDir, "subagents");
+  }
   const explicit = env.OPENCLAW_STATE_DIR?.trim();
   if (explicit) {
     return path.join(resolveStateDir(env), "subagents");
@@ -74,6 +80,13 @@ function resolveSubagentStateDir(env: NodeJS.ProcessEnv = process.env): string {
 
 export function resolveChildRouteDeliveryAttemptsPath(): string {
   return path.join(resolveSubagentStateDir(process.env), "delivery-attempts.json");
+}
+
+export async function withChildRouteDeliveryAttemptsStateDirForTest<T>(
+  stateDir: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return await testStateDirContext.run(stateDir, fn);
 }
 
 function emptyState(): PersistedDeliveryAttemptState {
@@ -324,7 +337,6 @@ export async function recordRejectedChildRouteDeliveryAttempt(
       sessionFile: pathname,
       timeoutMs: 10_000,
       staleMs: 30 * 60_000,
-      allowReentrant: true,
     });
     const state = applyRetention(await readStateFromPath(pathname), Date.now());
     const fingerprint = buildFingerprint(input);

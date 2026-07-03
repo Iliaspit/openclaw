@@ -85,7 +85,16 @@ export const ChildRouteUnhealthyDetailsSchema = Type.Object(
   { additionalProperties: false },
 );
 
-export type ChildRouteUnhealthyDetails = Static<typeof ChildRouteUnhealthyDetailsSchema>;
+export type ChildRouteUnhealthyDetails = {
+  kind: "child_route_unhealthy";
+  childSessionKey: string;
+  requesterSessionKey?: string;
+  deliveryAttemptId: string;
+  codes: ChildRouteHealthCode[];
+  recommendedAction: ChildRouteRecommendedAction;
+  stateTransitionRequired: boolean;
+  plannerInstruction: string;
+};
 
 export const ChildRouteHealthUnavailableDetailsSchema = Type.Object(
   {

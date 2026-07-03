@@ -50,11 +50,15 @@ vi.mock("../config/config.js", async () => {
 
 import "./test-helpers/fast-openclaw-tools-sessions.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
-import { resolveChildRouteDeliveryAttemptsPath } from "./child-route-delivery-attempts.js";
+import {
+  resolveChildRouteDeliveryAttemptsPath,
+  withChildRouteDeliveryAttemptsStateDirForTest,
+} from "./child-route-delivery-attempts.js";
 import {
   recordChildRouteContextHeadroomSnapshot,
   recordChildRouteHealthEvent,
   resetChildRouteHealthForTest,
+  withChildRouteHealthStateDirForTest,
 } from "./child-route-health.js";
 import { __testing as agentStepTesting } from "./tools/agent-step.js";
 import { createSessionsHistoryTool } from "./tools/sessions-history-tool.js";
@@ -214,6 +218,7 @@ describe("sessions tools", () => {
   beforeEach(async () => {
     tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-tools-"));
     process.env.OPENCLAW_STATE_DIR = tempStateDir;
+    resetSubagentRegistryForTests({ persist: false });
     resetChildRouteHealthForTest();
     sessionsSendTesting.resetFreshChildReroutesForTest();
     callGatewayMock.mockClear();
@@ -229,6 +234,15 @@ describe("sessions tools", () => {
     });
     hookRunnerState.current = null;
   });
+
+  async function withPinnedSessionToolState<T>(fn: () => Promise<T>): Promise<T> {
+    if (!tempStateDir) {
+      return await fn();
+    }
+    return await withChildRouteHealthStateDirForTest(tempStateDir, () =>
+      withChildRouteDeliveryAttemptsStateDirForTest(tempStateDir!, fn),
+    );
+  }
 
   afterEach(async () => {
     resetSubagentRegistryForTests({ persist: false });
@@ -849,10 +863,10 @@ describe("sessions tools", () => {
     expect(agentCalls).toHaveLength(8);
     for (const call of agentCalls) {
       expect(call.params).toMatchObject({
-        lane: "nested",
         channel: "webchat",
         inputProvenance: { kind: "inter_session" },
       });
+      expect((call.params as { lane?: string }).lane).toMatch(/^nested(?::|$)/u);
     }
     expect(
       agentCalls.some(
@@ -1133,10 +1147,10 @@ describe("sessions tools", () => {
     expect(agentCalls).toHaveLength(4);
     for (const call of agentCalls) {
       expect(call.params).toMatchObject({
-        lane: "nested",
         channel: "webchat",
         inputProvenance: { kind: "inter_session" },
       });
+      expect((call.params as { lane?: string }).lane).toMatch(/^nested(?::|$)/u);
     }
 
     const replySteps = calls.filter(
@@ -1904,6 +1918,10 @@ describe("sessions tools", () => {
     const previousStateDir = process.env.OPENCLAW_STATE_DIR;
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-send-reroute-"));
     process.env.OPENCLAW_STATE_DIR = stateDir;
+    const withRerouteState = async <T>(fn: () => Promise<T>): Promise<T> =>
+      await withChildRouteHealthStateDirForTest(stateDir, () =>
+        withChildRouteDeliveryAttemptsStateDirForTest(stateDir, fn),
+      );
     resetChildRouteHealthForTest();
     const calls: Array<{ method?: string; params?: Record<string, unknown> }> = [];
     const requesterKey = "agent:implementer:main";
@@ -1947,22 +1965,26 @@ describe("sessions tools", () => {
         retainAttachmentsOnKeep: true,
         workspaceDir: oldWorkspaceDir,
       });
-      await recordChildRouteHealthEvent({
-        code: "context_overflow",
-        status: "active",
-        source: "context_overflow",
-        childSessionKey: oldChildKey,
-        runId: "run-old-implementer",
-      });
-      await recordChildRouteHealthEvent({
-        code: "auth_profile_session_expired",
-        status: "active",
-        source: "provider_error",
-        provider: {
-          providerId: "openai",
-          authProfileKey: "other-profile",
-        },
-      });
+      await withRerouteState(() =>
+        recordChildRouteHealthEvent({
+          code: "context_overflow",
+          status: "active",
+          source: "context_overflow",
+          childSessionKey: oldChildKey,
+          runId: "run-old-implementer",
+        }),
+      );
+      await withRerouteState(() =>
+        recordChildRouteHealthEvent({
+          code: "auth_profile_session_expired",
+          status: "active",
+          source: "provider_error",
+          provider: {
+            providerId: "openai",
+            authProfileKey: "other-profile",
+          },
+        }),
+      );
       await writeSessionToolStore("implementer", {
         [oldChildKey]: {
           sessionId: "sess-old-slice",
@@ -1984,15 +2006,17 @@ describe("sessions tools", () => {
           responseUsage: "full",
         },
       });
-      await recordChildRouteHealthEvent({
-        code: "auth_profile_session_expired",
-        status: "active",
-        source: "provider_error",
-        provider: {
-          providerId: "anthropic",
-          authProfileKey: "other-profile",
-        },
-      });
+      await withRerouteState(() =>
+        recordChildRouteHealthEvent({
+          code: "auth_profile_session_expired",
+          status: "active",
+          source: "provider_error",
+          provider: {
+            providerId: "anthropic",
+            authProfileKey: "other-profile",
+          },
+        }),
+      );
 
       let freshChildKey = "";
       callGatewayMock.mockImplementation(async (opts: unknown) => {
@@ -2072,11 +2096,13 @@ describe("sessions tools", () => {
             call.params.bootstrapContextMode === "lightweight",
         );
 
-      const missingHandoff = await tool.execute("call-spawn-fresh-reroute-missing-handoff", {
-        sessionKey: oldChildKey,
-        message: "continue with the next implementation slice",
-        timeoutSeconds: 1,
-      });
+      const missingHandoff = await withRerouteState(() =>
+        tool.execute("call-spawn-fresh-reroute-missing-handoff", {
+          sessionKey: oldChildKey,
+          message: "continue with the next implementation slice",
+          timeoutSeconds: 1,
+        }),
+      );
       expect(missingHandoff.details).toMatchObject({
         ok: false,
         status: "no_delivery",
@@ -2090,20 +2116,22 @@ describe("sessions tools", () => {
         getLatestSubagentRunByChildSessionKey(oldChildKey)?.suppressAnnounceReason,
       ).toBeUndefined();
 
-      const result = await tool.execute("call-spawn-fresh-reroute", {
-        sessionKey: oldChildKey,
-        message: "continue with the next implementation slice",
-        timeoutSeconds: 1,
-        handoff: {
-          originalTask: "finish the unhealthy-child handoff implementation",
-          acceptanceCriteria: ["fresh child completes the next implementation slice"],
-          constraints: ["Do not reuse the old child session."],
-          findings: ["The previous child route was rejected for context_overflow."],
-          currentNextStep: "continue with the next implementation slice",
-          nonGoals: ["Do not ask the old child to summarize."],
-          degradedContext: true,
-        },
-      });
+      const result = await withRerouteState(() =>
+        tool.execute("call-spawn-fresh-reroute", {
+          sessionKey: oldChildKey,
+          message: "continue with the next implementation slice",
+          timeoutSeconds: 1,
+          handoff: {
+            originalTask: "finish the unhealthy-child handoff implementation",
+            acceptanceCriteria: ["fresh child completes the next implementation slice"],
+            constraints: ["Do not reuse the old child session."],
+            findings: ["The previous child route was rejected for context_overflow."],
+            currentNextStep: "continue with the next implementation slice",
+            nonGoals: ["Do not ask the old child to summarize."],
+            degradedContext: true,
+          },
+        }),
+      );
 
       expect(result.details).toMatchObject({
         status: "ok",
@@ -2221,23 +2249,26 @@ describe("sessions tools", () => {
         oldWorkspaceDir,
       );
       expect(calls.some((call) => call.method === "send")).toBe(false);
-      const attemptsAfterFirstSpawn = JSON.parse(
-        await fs.readFile(resolveChildRouteDeliveryAttemptsPath(), "utf8"),
-      ) as {
-        attempts?: Record<string, unknown>;
-      };
+      const attemptsAfterFirstSpawn = await withRerouteState(
+        async () =>
+          JSON.parse(await fs.readFile(resolveChildRouteDeliveryAttemptsPath(), "utf8")) as {
+            attempts?: Record<string, unknown>;
+          },
+      );
       expect(Object.keys(attemptsAfterFirstSpawn.attempts ?? {})).toHaveLength(1);
 
-      const duplicate = await tool.execute("call-spawn-fresh-reroute-duplicate", {
-        sessionKey: oldChildKey,
-        message: "continue with the next implementation slice",
-        timeoutSeconds: 0,
-        handoff: {
-          originalTask: "finish the unhealthy-child handoff implementation",
-          currentNextStep: "continue with the next implementation slice",
-          degradedContext: true,
-        },
-      });
+      const duplicate = await withRerouteState(() =>
+        tool.execute("call-spawn-fresh-reroute-duplicate", {
+          sessionKey: oldChildKey,
+          message: "continue with the next implementation slice",
+          timeoutSeconds: 0,
+          handoff: {
+            originalTask: "finish the unhealthy-child handoff implementation",
+            currentNextStep: "continue with the next implementation slice",
+            degradedContext: true,
+          },
+        }),
+      );
       expect(duplicate.details).toMatchObject({
         status: "accepted",
         runId: "run-fresh-implementer",
@@ -2247,9 +2278,8 @@ describe("sessions tools", () => {
       });
       expect(freshSpawnAgentCalls()).toHaveLength(1);
 
-      const duplicateWithChangedWording = await tool.execute(
-        "call-spawn-fresh-reroute-duplicate-changed-message",
-        {
+      const duplicateWithChangedWording = await withRerouteState(() =>
+        tool.execute("call-spawn-fresh-reroute-duplicate-changed-message", {
           sessionKey: oldChildKey,
           message: "please continue this implementation slice with the same feature goal",
           timeoutSeconds: 0,
@@ -2258,7 +2288,7 @@ describe("sessions tools", () => {
             currentNextStep: "continue with the next implementation slice",
             degradedContext: true,
           },
-        },
+        }),
       );
       expect(duplicateWithChangedWording.details).toMatchObject({
         status: "accepted",
@@ -2269,18 +2299,22 @@ describe("sessions tools", () => {
       });
       expect(freshSpawnAgentCalls()).toHaveLength(1);
 
-      await recordChildRouteHealthEvent({
-        code: "context_overflow",
-        status: "success",
-        source: "manual",
-        childSessionKey: oldChildKey,
-        runId: "run-old-implementer",
-      });
-      const afterLateOldSuccess = await tool.execute("call-spawn-fresh-reroute-after-old-success", {
-        sessionKey: oldChildKey,
-        message: "continue after the old child reported success late",
-        timeoutSeconds: 0,
-      });
+      await withRerouteState(() =>
+        recordChildRouteHealthEvent({
+          code: "context_overflow",
+          status: "success",
+          source: "manual",
+          childSessionKey: oldChildKey,
+          runId: "run-old-implementer",
+        }),
+      );
+      const afterLateOldSuccess = await withRerouteState(() =>
+        tool.execute("call-spawn-fresh-reroute-after-old-success", {
+          sessionKey: oldChildKey,
+          message: "continue after the old child reported success late",
+          timeoutSeconds: 0,
+        }),
+      );
       expect(afterLateOldSuccess.details).toMatchObject({
         status: "accepted",
         runId: "run-fresh-implementer",
@@ -2304,24 +2338,28 @@ describe("sessions tools", () => {
         createdAt: Date.now(),
         startedAt: Date.now(),
       });
-      await recordChildRouteHealthEvent({
-        code: "context_overflow",
-        status: "active",
-        source: "context_overflow",
-        childSessionKey: oldChildKey,
-        runId: "run-old-implementer-next",
-      });
+      await withRerouteState(() =>
+        recordChildRouteHealthEvent({
+          code: "context_overflow",
+          status: "active",
+          source: "context_overflow",
+          childSessionKey: oldChildKey,
+          runId: "run-old-implementer-next",
+        }),
+      );
 
-      const nextGeneration = await tool.execute("call-spawn-fresh-reroute-next-generation", {
-        sessionKey: oldChildKey,
-        message: "continue with the next implementation slice",
-        timeoutSeconds: 0,
-        handoff: {
-          originalTask: "finish the unhealthy-child handoff implementation",
-          currentNextStep: "continue with the next implementation slice",
-          degradedContext: true,
-        },
-      });
+      const nextGeneration = await withRerouteState(() =>
+        tool.execute("call-spawn-fresh-reroute-next-generation", {
+          sessionKey: oldChildKey,
+          message: "continue with the next implementation slice",
+          timeoutSeconds: 0,
+          handoff: {
+            originalTask: "finish the unhealthy-child handoff implementation",
+            currentNextStep: "continue with the next implementation slice",
+            degradedContext: true,
+          },
+        }),
+      );
       expect(nextGeneration.details).toMatchObject({
         status: "accepted",
         runId: "run-fresh-implementer-next",
@@ -2366,22 +2404,26 @@ describe("sessions tools", () => {
       createdAt: Date.now() - 5_000,
       startedAt: Date.now() - 4_000,
     });
-    await recordChildRouteHealthEvent({
-      code: "context_overflow",
-      status: "active",
-      source: "context_overflow",
-      childSessionKey: oldChildKey,
-      runId: "run-old-fresh-error",
-    });
-    await recordChildRouteHealthEvent({
-      code: "auth_profile_session_expired",
-      status: "active",
-      source: "provider_error",
-      provider: {
-        providerId: "openai",
-        authProfileKey: "other-profile",
-      },
-    });
+    await withPinnedSessionToolState(() =>
+      recordChildRouteHealthEvent({
+        code: "context_overflow",
+        status: "active",
+        source: "context_overflow",
+        childSessionKey: oldChildKey,
+        runId: "run-old-fresh-error",
+      }),
+    );
+    await withPinnedSessionToolState(() =>
+      recordChildRouteHealthEvent({
+        code: "auth_profile_session_expired",
+        status: "active",
+        source: "provider_error",
+        provider: {
+          providerId: "openai",
+          authProfileKey: "other-profile",
+        },
+      }),
+    );
     await writeSessionToolStore("implementer", {
       [oldChildKey]: {
         sessionId: "sess-fresh-error",
@@ -2424,38 +2466,44 @@ describe("sessions tools", () => {
       throw new Error("missing sessions_send tool");
     }
 
-    const first = await tool.execute("call-spawn-fresh-reroute-error", {
-      sessionKey: oldChildKey,
-      message: "continue with the error slice",
-      timeoutSeconds: 1,
-      handoff: {
-        originalTask: "finish the reroute error slice",
-        currentNextStep: "continue with the error slice",
-      },
-    });
+    const first = await withPinnedSessionToolState(() =>
+      tool.execute("call-spawn-fresh-reroute-error", {
+        sessionKey: oldChildKey,
+        message: "continue with the error slice",
+        timeoutSeconds: 1,
+        handoff: {
+          originalTask: "finish the reroute error slice",
+          currentNextStep: "continue with the error slice",
+        },
+      }),
+    );
     expect(first.details).toMatchObject({
       status: "error",
       runId: "run-fresh-error",
       error: "fresh child failed",
     });
     expect(freshSpawnStartCount).toBe(1);
-    await recordChildRouteHealthEvent({
-      code: "agent_lifecycle_error",
-      status: "active",
-      source: "agent_lifecycle",
-      childSessionKey: oldChildKey,
-      runId: "run-old-fresh-error",
-    });
+    await withPinnedSessionToolState(() =>
+      recordChildRouteHealthEvent({
+        code: "agent_lifecycle_error",
+        status: "active",
+        source: "agent_lifecycle",
+        childSessionKey: oldChildKey,
+        runId: "run-old-fresh-error",
+      }),
+    );
 
-    const second = await tool.execute("call-spawn-fresh-reroute-error-again", {
-      sessionKey: oldChildKey,
-      message: "retry that same feature with slightly different wording",
-      timeoutSeconds: 1,
-      handoff: {
-        originalTask: "finish the reroute error slice",
-        currentNextStep: "retry the same feature",
-      },
-    });
+    const second = await withPinnedSessionToolState(() =>
+      tool.execute("call-spawn-fresh-reroute-error-again", {
+        sessionKey: oldChildKey,
+        message: "retry that same feature with slightly different wording",
+        timeoutSeconds: 1,
+        handoff: {
+          originalTask: "finish the reroute error slice",
+          currentNextStep: "retry the same feature",
+        },
+      }),
+    );
     expect(second.details).toMatchObject({
       ok: false,
       status: "no_delivery",

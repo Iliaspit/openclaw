@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -265,11 +266,16 @@ export type ChildRouteHealthEventInput = {
 };
 
 const unavailableScopes = new Map<string, { reason: string; observedAt: number }>();
+const testStateDirContext = new AsyncLocalStorage<string>();
 
 const EDIT_FAILURE_THRESHOLD = 3;
 const EDIT_FAILURE_WINDOW_MS = 30 * 60_000;
 
 function resolveSubagentStateDir(env: NodeJS.ProcessEnv = process.env): string {
+  const testStateDir = testStateDirContext.getStore();
+  if (testStateDir) {
+    return path.join(testStateDir, "subagents");
+  }
   if (env.OPENCLAW_STATE_DIR?.trim()) {
     return path.join(resolveStateDir(env), "subagents");
   }
@@ -864,7 +870,6 @@ async function mutateUnavailableScopes(
       sessionFile: pathname,
       timeoutMs: 10_000,
       staleMs: 30 * 60_000,
-      allowReentrant: true,
     });
     const scopes = await readUnavailableScopesFromPath();
     apply(scopes);
@@ -1480,7 +1485,6 @@ async function mutateStore<T>(
       sessionFile: pathname,
       timeoutMs: 10_000,
       staleMs: 30 * 60_000,
-      allowReentrant: true,
     });
     const state = applyRetention(await readStateFromPath(pathname), Date.now());
     const value = apply(state);
@@ -2534,4 +2538,11 @@ export async function recordSessionExpiredRouteHealth(params: {
 
 export function resetChildRouteHealthForTest(): void {
   unavailableScopes.clear();
+}
+
+export async function withChildRouteHealthStateDirForTest<T>(
+  stateDir: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return await testStateDirContext.run(stateDir, fn);
 }

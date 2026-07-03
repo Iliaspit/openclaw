@@ -32,6 +32,7 @@ import {
   preflightChildRouteAssignment,
   readActiveChildRouteAuthBlockersForRoute,
   resolveChildTargetKind,
+  type ChildRouteActiveAuthBlockerSummary,
   type ChildRouteAssignmentKind,
 } from "../child-route-health.js";
 import { resolveChildRouteProviderContextFromSession } from "../child-route-provider-context.js";
@@ -693,6 +694,26 @@ function buildSessionRuntimeReplay(entry: SessionEntry | undefined): {
   };
 }
 
+function mergeAuthBlockersIntoUnhealthyDetails(
+  details: ChildRouteUnhealthyDetails,
+  blockers: ChildRouteActiveAuthBlockerSummary[],
+): ChildRouteUnhealthyDetails {
+  const codes = [
+    ...new Set([...blockers.flatMap((blocker) => blocker.codes), ...details.codes]),
+  ] as ChildRouteHealthCode[];
+  if (!codes.includes("auth_profile_session_expired")) {
+    return { ...details, codes };
+  }
+  return {
+    ...details,
+    codes,
+    recommendedAction: "reauth",
+    stateTransitionRequired: true,
+    plannerInstruction:
+      "Re-authenticate or select a healthy fallback provider profile before retrying this child route.",
+  };
+}
+
 async function rerouteToFreshChild(params: {
   code: "child_session_unhealthy" | "child_route_assignment_blocked";
   deliveryMode: "child_route_guard" | "child_route_preflight";
@@ -755,11 +776,15 @@ async function rerouteToFreshChild(params: {
     });
   }
   if (authBlockersPreventFreshSpawn(authBlockers.blockers)) {
+    const blockedDetails = mergeAuthBlockersIntoUnhealthyDetails(
+      params.details,
+      authBlockers.blockers,
+    );
     return jsonResult({
       ok: false,
       status: "no_delivery",
       code: params.code,
-      details: params.details,
+      details: blockedDetails,
       delivery: { status: "rejected", mode: params.deliveryMode },
       reroute: {
         status: "blocked",

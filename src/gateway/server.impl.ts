@@ -10,7 +10,9 @@ import {
   getRuntimeConfig,
   isNixMode,
   loadConfig,
+  promoteConfigSnapshotToLastKnownGood,
   readConfigFileSnapshot,
+  recoverConfigFromLastKnownGood,
   registerConfigWriteListener,
   writeConfigFile,
 } from "../config/config.js";
@@ -221,10 +223,11 @@ export async function startGatewayServer(
     description: "raw stream log path override",
   });
 
-  const configSnapshot = await loadGatewayStartupConfigSnapshot({
+  const startupConfigLoad = await loadGatewayStartupConfigSnapshot({
     minimalTestGateway,
     log,
   });
+  const configSnapshot = startupConfigLoad.snapshot;
 
   const emitSecretsStateEvent = (
     code: "SECRETS_RELOADER_DEGRADED" | "SECRETS_RELOADER_RECOVERED",
@@ -432,6 +435,7 @@ export async function startGatewayServer(
     httpServer,
     httpServers,
     httpBindHosts,
+    startListening,
     wss,
     preauthConnectionBudget,
     clients,
@@ -744,6 +748,7 @@ export async function startGatewayServer(
       broadcast,
       context: gatewayRequestContext,
     });
+    await startListening();
     ({
       stopGatewayUpdateCheck: runtimeState.stopGatewayUpdateCheck,
       tailscaleCleanup: runtimeState.tailscaleCleanup,
@@ -789,6 +794,8 @@ export async function startGatewayServer(
       initialInternalWriteHash: startupInternalWriteHash,
       watchPath: configSnapshot.path,
       readSnapshot: readConfigFileSnapshot,
+      recoverSnapshot: recoverConfigFromLastKnownGood,
+      promoteSnapshot: promoteConfigSnapshotToLastKnownGood,
       subscribeToWrites: registerConfigWriteListener,
       deps,
       broadcast,

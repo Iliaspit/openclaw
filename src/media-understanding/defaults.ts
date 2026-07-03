@@ -1,5 +1,10 @@
 import type { OpenClawConfig } from "../config/types.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
+import {
+  bundledProviderSupportsNativePdfDocument,
+  resolveBundledAutoMediaKeyProviders,
+  resolveBundledDefaultMediaModel,
+} from "./bundled-defaults.js";
 import { buildMediaUnderstandingManifestMetadataRegistry } from "./manifest-metadata.js";
 import { normalizeMediaProviderId } from "./provider-registry.js";
 import { providerSupportsCapability } from "./provider-supports.js";
@@ -125,6 +130,13 @@ export function resolveDefaultMediaModel(params: {
     if (configuredImageModel) {
       return configuredImageModel;
     }
+    const bundledDefault = resolveBundledDefaultMediaModel({
+      providerId: params.providerId,
+      capability: params.capability,
+    });
+    if (bundledDefault) {
+      return bundledDefault;
+    }
   }
   const registry = params.providerRegistry ?? resolveDefaultRegistry(params.cfg);
   const provider = registry.get(normalizeMediaProviderId(params.providerId));
@@ -158,10 +170,13 @@ export function resolveAutoMediaKeyProviders(params: {
     })
     .map((entry) => normalizeMediaProviderId(entry.provider.id))
     .filter(Boolean);
+  const withBundledProviders = params.providerRegistry
+    ? prioritized
+    : [...new Set([...prioritized, ...resolveBundledAutoMediaKeyProviders(params.capability)])];
   if (params.providerRegistry || params.capability !== "image") {
-    return prioritized;
+    return withBundledProviders;
   }
-  return [...new Set([...prioritized, ...resolveConfiguredImageProviderIds(params.cfg)])];
+  return [...new Set([...withBundledProviders, ...resolveConfiguredImageProviderIds(params.cfg)])];
 }
 
 export function providerSupportsNativePdfDocument(params: {
@@ -169,6 +184,9 @@ export function providerSupportsNativePdfDocument(params: {
   cfg?: OpenClawConfig;
   providerRegistry?: Map<string, MediaUnderstandingProvider>;
 }): boolean {
+  if (!params.providerRegistry && bundledProviderSupportsNativePdfDocument(params.providerId)) {
+    return true;
+  }
   const registry = params.providerRegistry ?? resolveDefaultRegistry(params.cfg);
   const provider = registry.get(normalizeMediaProviderId(params.providerId));
   return provider?.nativeDocumentInputs?.includes("pdf") ?? false;
