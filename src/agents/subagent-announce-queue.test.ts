@@ -50,6 +50,43 @@ describe("subagent-announce-queue", () => {
     expect(sender.prompts).toEqual(["subagent completed", "subagent completed"]);
   });
 
+  it("coalesces duplicate announce ids while the first item is pending", async () => {
+    const prompts: string[] = [];
+    const send = vi.fn(async (item: { prompt: string }) => {
+      prompts.push(item.prompt);
+    });
+
+    const first = enqueueAnnounce({
+      key: "announce:test:dedupe",
+      item: {
+        announceId: "announce-1",
+        prompt: "first result",
+        enqueuedAt: Date.now(),
+        sessionKey: "agent:main:telegram:dm:u1",
+      },
+      settings: { mode: "followup", debounceMs: 0 },
+      send,
+    });
+    const second = enqueueAnnounce({
+      key: "announce:test:dedupe",
+      item: {
+        announceId: "announce-1",
+        prompt: "second result",
+        enqueuedAt: Date.now() + 1,
+        sessionKey: "agent:main:telegram:dm:u1",
+      },
+      settings: { mode: "followup", debounceMs: 0 },
+      send,
+    });
+
+    expect(first).toBe(true);
+    expect(second).toBe(true);
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+    expect(prompts).toEqual(["second result"]);
+  });
+
   it("preserves queue summary state across failed summary delivery retries", async () => {
     const sender = createRetryingSend();
 

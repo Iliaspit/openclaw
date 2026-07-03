@@ -34,6 +34,7 @@ import type {
   ModelCatalogEntry,
   NostrProfile,
   PresenceEntry,
+  QueueHealthResult,
   SessionsUsageResult,
   CostUsageSummary,
   SessionUsageTimeSeries,
@@ -100,6 +101,9 @@ export type AppViewState = {
   chatManualRefreshInFlight: boolean;
   nodesLoading: boolean;
   nodes: Array<Record<string, unknown>>;
+  queueHealthLoading: boolean;
+  queueHealthError: string | null;
+  queueHealthResult: QueueHealthResult | null;
   chatNewMessagesBelow: boolean;
   navDrawerOpen: boolean;
   sidebarOpen: boolean;

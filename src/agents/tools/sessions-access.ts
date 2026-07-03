@@ -24,7 +24,8 @@ export type SessionAccessResult =
   | { allowed: true }
   | { allowed: false; error: string; status: "forbidden" };
 
-const DEFAULT_A2A_ALLOW = ["main", "planner"];
+/** Default cross-agent orchestration allowlist when `tools.agentToAgent.allow` is unset. */
+const DEFAULT_A2A_ALLOW = ["PM1", "PM2", "PM3", "PM4"];
 
 export function resolveSessionToolsVisibility(cfg: OpenClawConfig): SessionToolsVisibility {
   const raw = (cfg.tools as { sessions?: { visibility?: unknown } } | undefined)?.sessions

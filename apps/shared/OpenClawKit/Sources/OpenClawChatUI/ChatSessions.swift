@@ -68,6 +68,11 @@ public struct OpenClawChatSessionEntry: Codable, Identifiable, Sendable, Hashabl
     public let modelProvider: String?
     public let model: String?
     public let contextTokens: Int?
+    public var parentSessionKey: String? = nil
+    public var childSessions: [String]? = nil
+    public var subagentRole: String? = nil
+    public var label: String? = nil
+    public var status: String? = nil
 }
 
 public struct OpenClawChatSessionsListResponse: Codable, Sendable {

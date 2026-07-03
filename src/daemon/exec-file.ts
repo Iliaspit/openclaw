@@ -1,14 +1,18 @@
 import { execFile, type ExecFileOptionsWithStringEncoding } from "node:child_process";
 
 export type ExecResult = { stdout: string; stderr: string; code: number };
+type ExecFileUtf8Options = Omit<ExecFileOptionsWithStringEncoding, "encoding"> & {
+  input?: string;
+};
 
 export async function execFileUtf8(
   command: string,
   args: string[],
-  options: Omit<ExecFileOptionsWithStringEncoding, "encoding"> = {},
+  options: ExecFileUtf8Options = {},
 ): Promise<ExecResult> {
   return await new Promise<ExecResult>((resolve) => {
-    execFile(command, args, { ...options, encoding: "utf8" }, (error, stdout, stderr) => {
+    const { input, ...execOptions } = options;
+    const child = execFile(command, args, { ...execOptions, encoding: "utf8" }, (error, stdout, stderr) => {
       if (!error) {
         resolve({
           stdout: stdout ?? "",
@@ -28,5 +32,9 @@ export async function execFileUtf8(
         code: typeof e.code === "number" ? e.code : 1,
       });
     });
+
+    if (child.stdin) {
+      child.stdin.end(input ?? "");
+    }
   });
 }

@@ -1,41 +1,70 @@
-import fs from "node:fs";
+import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelMessagingAdapter } from "../channels/plugins/types.js";
 import type { OpenClawConfig } from "../config/config.js";
+import { loadSessionStore, resolveStorePath } from "../config/sessions.js";
 import { createTestRegistry } from "../test-utils/channel-plugins.js";
-import { addSubagentRunForTests, resetSubagentRegistryForTests } from "./subagent-registry.js";
+import {
+  addSubagentRunForTests,
+  getLatestSubagentRunByChildSessionKey,
+  resetSubagentRegistryForTests,
+} from "./subagent-registry.js";
 
 const callGatewayMock = vi.fn();
+const hookRunnerState = vi.hoisted(() => ({ current: null as null | Record<string, unknown> }));
 vi.mock("../gateway/call.js", () => ({
   callGateway: (opts: unknown) => callGatewayMock(opts),
 }));
 
-vi.mock("../config/config.js", () => ({
-  loadConfig: () => ({
-    session: {
-      mainKey: "main",
-      scope: "per-sender",
-      agentToAgent: { maxPingPongTurns: 2 },
-    },
-    tools: {
-      // Keep sessions tools permissive in this suite; dedicated visibility tests cover defaults.
-      sessions: { visibility: "all" },
-      agentToAgent: { enabled: true },
-    },
-  }),
-  resolveGatewayPort: () => 18789,
-}));
+vi.mock("../plugins/hook-runner-global.js", async () => {
+  const actual = await vi.importActual<typeof import("../plugins/hook-runner-global.js")>(
+    "../plugins/hook-runner-global.js",
+  );
+  return {
+    ...actual,
+    getGlobalHookRunner: () => hookRunnerState.current,
+  };
+});
+
+vi.mock("../config/config.js", async () => {
+  const actual = await vi.importActual<typeof import("../config/config.js")>("../config/config.js");
+  return {
+    ...actual,
+    loadConfig: () => ({
+      session: {
+        mainKey: "main",
+        scope: "per-sender",
+        agentToAgent: { maxPingPongTurns: 2 },
+      },
+      tools: {
+        // Keep sessions tools permissive in this suite; dedicated visibility tests cover defaults.
+        sessions: { visibility: "all" },
+        agentToAgent: { enabled: true },
+      },
+    }),
+    resolveGatewayPort: () => 18789,
+  };
+});
 
 import "./test-helpers/fast-openclaw-tools-sessions.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
+import { resolveChildRouteDeliveryAttemptsPath } from "./child-route-delivery-attempts.js";
+import {
+  recordChildRouteContextHeadroomSnapshot,
+  recordChildRouteHealthEvent,
+  resetChildRouteHealthForTest,
+} from "./child-route-health.js";
 import { __testing as agentStepTesting } from "./tools/agent-step.js";
 import { createSessionsHistoryTool } from "./tools/sessions-history-tool.js";
 import { createSessionsListTool } from "./tools/sessions-list-tool.js";
 import { __testing as sessionsResolutionTesting } from "./tools/sessions-resolution.js";
 import { __testing as sessionsSendA2ATesting } from "./tools/sessions-send-tool.a2a.js";
-import { createSessionsSendTool } from "./tools/sessions-send-tool.js";
+import {
+  __testing as sessionsSendTesting,
+  createSessionsSendTool,
+} from "./tools/sessions-send-tool.js";
 
 const TEST_CONFIG = {
   session: {
@@ -154,8 +183,39 @@ const waitForCalls = async (getCount: () => number, count: number, timeoutMs = 2
   );
 };
 
+async function recordHealthyChildHeadroom(childSessionKey: string, runId: string) {
+  await expect(
+    recordChildRouteContextHeadroomSnapshot({
+      childSessionKey,
+      runId,
+      estimatedPromptTokens: 10_000,
+      modelContextLimitTokens: 100_000,
+      headroomTokens: 90_000,
+      headroomPercent: 90,
+      estimateSource: "actual_request",
+      lastCompactionStatus: "none",
+    }),
+  ).resolves.toEqual({ ok: true });
+}
+
+async function writeSessionToolStore(
+  agentId: string,
+  entries: Record<string, Record<string, unknown>>,
+) {
+  const storePath = resolveStorePath(TEST_CONFIG.session?.store, { agentId });
+  await fs.mkdir(path.dirname(storePath), { recursive: true });
+  await fs.writeFile(storePath, `${JSON.stringify(entries, null, 2)}\n`, "utf8");
+}
+
 describe("sessions tools", () => {
-  beforeEach(() => {
+  const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+  let tempStateDir: string | undefined;
+
+  beforeEach(async () => {
+    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-tools-"));
+    process.env.OPENCLAW_STATE_DIR = tempStateDir;
+    resetChildRouteHealthForTest();
+    sessionsSendTesting.resetFreshChildReroutesForTest();
     callGatewayMock.mockClear();
     installMessagingTestRegistry();
     agentStepTesting.setDepsForTest({
@@ -167,10 +227,34 @@ describe("sessions tools", () => {
     sessionsSendA2ATesting.setDepsForTest({
       callGateway: (opts: unknown) => callGatewayMock(opts),
     });
+    hookRunnerState.current = null;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     resetSubagentRegistryForTests({ persist: false });
+    resetChildRouteHealthForTest();
+    sessionsSendTesting.resetFreshChildReroutesForTest();
+    hookRunnerState.current = null;
+    if (previousStateDir === undefined) {
+      delete process.env.OPENCLAW_STATE_DIR;
+    } else {
+      process.env.OPENCLAW_STATE_DIR = previousStateDir;
+    }
+    if (tempStateDir) {
+      await fs.rm(tempStateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      tempStateDir = undefined;
+    }
+  });
+
+  it("describes sessions_list as discovery/debugging instead of subagent closeout", () => {
+    const tool = createOpenClawTools().find((candidate) => candidate.name === "sessions_list");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_list tool");
+    }
+
+    expect(tool.description).toContain("debugging/intervention");
+    expect(tool.description).toContain("targeted sessions_history over broad session listings");
   });
 
   it("uses number (not integer) in tool schemas for Gemini compatibility", () => {
@@ -207,15 +291,10 @@ describe("sessions tools", () => {
     expect(schemaProp("sessions_list", "limit").type).toBe("number");
     expect(schemaProp("sessions_list", "activeMinutes").type).toBe("number");
     expect(schemaProp("sessions_list", "messageLimit").type).toBe("number");
-    expect(schemaProp("sessions_list", "label").type).toBe("string");
-    expect(schemaProp("sessions_list", "agentId").type).toBe("string");
-    expect(schemaProp("sessions_list", "search").type).toBe("string");
-    expect(schemaProp("sessions_list", "includeDerivedTitles").type).toBe("boolean");
-    expect(schemaProp("sessions_list", "includeLastMessage").type).toBe("boolean");
     expect(schemaProp("sessions_send", "timeoutSeconds").type).toBe("number");
   });
 
-  it("sessions_list forwards mailbox filters and includes messages", async () => {
+  it("sessions_list filters kinds and includes messages", async () => {
     callGatewayMock.mockImplementation(async (opts: unknown) => {
       const request = opts as { method?: string };
       if (request.method === "sessions.list") {
@@ -228,8 +307,6 @@ describe("sessions tools", () => {
               sessionId: "s-main",
               updatedAt: 10,
               lastChannel: "whatsapp",
-              derivedTitle: "Main mailbox",
-              lastMessagePreview: "Latest assistant update",
             },
             {
               key: "discord:group:dev",
@@ -243,8 +320,6 @@ describe("sessions tools", () => {
               runtimeMs: 42,
               estimatedCostUsd: 0.0042,
               childSessions: ["agent:main:subagent:worker"],
-              derivedTitle: "Dev room",
-              lastMessagePreview: "Need review on the patch",
             },
             {
               key: "agent:main:dashboard:child",
@@ -291,34 +366,11 @@ describe("sessions tools", () => {
       throw new Error("missing sessions_list tool");
     }
 
-    const result = await tool.execute("call1", {
-      agentId: "main",
-      label: "mailbox",
-      search: "review",
-      includeDerivedTitles: true,
-      includeLastMessage: true,
-      messageLimit: 1,
-    });
-    expect(callGatewayMock).toHaveBeenNthCalledWith(1, {
-      method: "sessions.list",
-      params: {
-        activeMinutes: undefined,
-        agentId: "main",
-        includeGlobal: true,
-        includeUnknown: true,
-        label: "mailbox",
-        limit: undefined,
-        search: "review",
-        spawnedBy: undefined,
-      },
-    });
+    const result = await tool.execute("call1", { messageLimit: 1 });
     const details = result.details as {
       sessions?: Array<{
         key?: string;
-        agentId?: string;
         channel?: string;
-        derivedTitle?: string;
-        lastMessagePreview?: string;
         spawnedBy?: string;
         status?: string;
         startedAt?: number;
@@ -331,10 +383,7 @@ describe("sessions tools", () => {
     };
     expect(details.sessions).toHaveLength(5);
     const main = details.sessions?.find((s) => s.key === "main");
-    expect(main?.agentId).toBe("main");
     expect(main?.channel).toBe("whatsapp");
-    expect(main?.derivedTitle).toBe("Main mailbox");
-    expect(main?.lastMessagePreview).toBe("Latest assistant update");
     expect(main?.messages?.length).toBe(1);
     expect(main?.messages?.[0]?.role).toBe("assistant");
 
@@ -344,8 +393,6 @@ describe("sessions tools", () => {
     expect(group?.runtimeMs).toBe(42);
     expect(group?.estimatedCostUsd).toBe(0.0042);
     expect(group?.childSessions).toEqual(["agent:main:subagent:worker"]);
-    expect(group?.derivedTitle).toBe("Dev room");
-    expect(group?.lastMessagePreview).toBe("Need review on the patch");
 
     const dashboardChild = details.sessions?.find((s) => s.key === "agent:main:dashboard:child");
     expect(dashboardChild?.parentSessionKey).toBe("agent:main:main");
@@ -359,93 +406,6 @@ describe("sessions tools", () => {
     };
     expect(cronDetails.sessions).toHaveLength(1);
     expect(cronDetails.sessions?.[0]?.kind).toBe("cron");
-  });
-
-  it("derives mailbox previews only after agent visibility filtering", async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-sessions-list-preview-"));
-    const storePath = path.join(tmpDir, "sessions.json");
-    try {
-      fs.writeFileSync(
-        path.join(tmpDir, "visible.jsonl"),
-        [
-          JSON.stringify({ type: "session", id: "visible" }),
-          JSON.stringify({ message: { role: "user", content: "Visible project kickoff" } }),
-          JSON.stringify({ message: { role: "assistant", content: "Visible latest reply" } }),
-        ].join("\n"),
-        "utf-8",
-      );
-      fs.writeFileSync(
-        path.join(tmpDir, "hidden.jsonl"),
-        [
-          JSON.stringify({ type: "session", id: "hidden" }),
-          JSON.stringify({ message: { role: "user", content: "Hidden cross-agent topic" } }),
-          JSON.stringify({ message: { role: "assistant", content: "Hidden latest reply" } }),
-        ].join("\n"),
-        "utf-8",
-      );
-
-      callGatewayMock.mockImplementation(async (opts: unknown) => {
-        const request = opts as { method?: string; params?: Record<string, unknown> };
-        if (request.method === "sessions.list") {
-          expect(request.params?.includeDerivedTitles).toBeUndefined();
-          expect(request.params?.includeLastMessage).toBeUndefined();
-          return {
-            path: storePath,
-            sessions: [
-              {
-                key: "agent:main:main",
-                kind: "direct",
-                sessionId: "visible",
-                updatedAt: 20,
-              },
-              {
-                key: "agent:other:main",
-                kind: "direct",
-                sessionId: "hidden",
-                updatedAt: 21,
-              },
-            ],
-          };
-        }
-        return {};
-      });
-
-      const tool = createOpenClawTools({
-        agentSessionKey: "agent:main:main",
-        config: {
-          ...TEST_CONFIG,
-          tools: {
-            sessions: { visibility: "agent" },
-            agentToAgent: { enabled: false },
-          },
-        } as OpenClawConfig,
-      }).find((candidate) => candidate.name === "sessions_list");
-      expect(tool).toBeDefined();
-      if (!tool) {
-        throw new Error("missing sessions_list tool");
-      }
-
-      const result = await tool.execute("call-preview", {
-        includeDerivedTitles: true,
-        includeLastMessage: true,
-      });
-      const details = result.details as {
-        sessions?: Array<{
-          key?: string;
-          derivedTitle?: string;
-          lastMessagePreview?: string;
-        }>;
-      };
-      expect(details.sessions).toHaveLength(1);
-      expect(details.sessions?.[0]).toMatchObject({
-        key: "agent:main:main",
-        derivedTitle: "Visible project kickoff",
-        lastMessagePreview: "Visible latest reply",
-      });
-      expect(JSON.stringify(details.sessions)).not.toContain("Hidden");
-    } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    }
   });
 
   it("sessions_list resolves transcriptPath from agent state dir for multi-store listings", async () => {
@@ -889,7 +849,7 @@ describe("sessions tools", () => {
     expect(agentCalls).toHaveLength(8);
     for (const call of agentCalls) {
       expect(call.params).toMatchObject({
-        lane: expect.stringMatching(/^nested(?::|$)/),
+        lane: "nested",
         channel: "webchat",
         inputProvenance: { kind: "inter_session" },
       });
@@ -917,7 +877,25 @@ describe("sessions tools", () => {
         (call) =>
           typeof (call.params as { extraSystemPrompt?: string })?.extraSystemPrompt === "string" &&
           (call.params as { extraSystemPrompt?: string })?.extraSystemPrompt?.includes(
+            "contains no new information",
+          ),
+      ),
+    ).toBe(true);
+    expect(
+      agentCalls.some(
+        (call) =>
+          typeof (call.params as { extraSystemPrompt?: string })?.extraSystemPrompt === "string" &&
+          (call.params as { extraSystemPrompt?: string })?.extraSystemPrompt?.includes(
             "Agent-to-agent announce step",
+          ),
+      ),
+    ).toBe(true);
+    expect(
+      agentCalls.some(
+        (call) =>
+          typeof (call.params as { extraSystemPrompt?: string })?.extraSystemPrompt === "string" &&
+          (call.params as { extraSystemPrompt?: string })?.extraSystemPrompt?.includes(
+            "no user-visible new information",
           ),
       ),
     ).toBe(true);
@@ -1155,7 +1133,7 @@ describe("sessions tools", () => {
     expect(agentCalls).toHaveLength(4);
     for (const call of agentCalls) {
       expect(call.params).toMatchObject({
-        lane: expect.stringMatching(/^nested(?::|$)/),
+        lane: "nested",
         channel: "webchat",
         inputProvenance: { kind: "inter_session" },
       });
@@ -1323,7 +1301,9 @@ describe("sessions tools", () => {
       startedAt: Date.now() - 4_000,
       endedAt: Date.now() - 1_000,
       outcome: { status: "ok" },
+      resultReceiptId: "receipt-finished-child",
     });
+    await recordHealthyChildHeadroom(childKey, "run-finished-child");
 
     callGatewayMock.mockImplementation(async (opts: unknown) => {
       const request = opts as { method?: string; params?: unknown };
@@ -1385,6 +1365,1440 @@ describe("sessions tools", () => {
     expect(calls.some((call) => call.method === "send")).toBe(false);
   });
 
+  it("sessions_send blocks substantial pinned-child reuse when headroom telemetry is missing", async () => {
+    const calls: Array<{ method?: string; params?: unknown }> = [];
+    const requesterKey = "agent:main:main";
+    const childKey = "agent:main:subagent:missing-headroom";
+    addSubagentRunForTests({
+      runId: "run-missing-headroom-child",
+      childSessionKey: childKey,
+      controllerSessionKey: requesterKey,
+      requesterSessionKey: requesterKey,
+      requesterDisplayKey: "main",
+      task: "finished child task",
+      cleanup: "keep",
+      spawnMode: "session",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+      endedAt: Date.now() - 1_000,
+      outcome: { status: "ok" },
+      resultReceiptId: "receipt-missing-headroom-child",
+    });
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: unknown };
+      calls.push(request);
+      if (request.method === "agent") {
+        throw new Error("substantial pinned-child reuse must preflight before restart");
+      }
+      if (request.method === "send") {
+        throw new Error("substantial pinned-child reuse must not fall through to send");
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "discord",
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const result = await tool.execute("call-missing-headroom-child", {
+      sessionKey: childKey,
+      message: "continue with the next implementation slice",
+      timeoutSeconds: 0,
+      assignmentKind: "implementation",
+    });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      status: "no_delivery",
+      code: "child_route_assignment_unavailable",
+      details: {
+        kind: "child_route_assignment_preflight",
+        assignmentKind: "implementation",
+        status: "unavailable",
+        reason: "context_headroom",
+      },
+      delivery: { status: "rejected", mode: "child_route_preflight" },
+    });
+    expect(calls.some((call) => call.method === "agent")).toBe(false);
+    expect(calls.some((call) => call.method === "send")).toBe(false);
+  });
+
+  it("sessions_send allows healthy small clarification reuse without a headroom decision", async () => {
+    const calls: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+    const requesterKey = "agent:main:main";
+    const childKey = "agent:main:subagent:clarification";
+    addSubagentRunForTests({
+      runId: "run-clarification-child",
+      childSessionKey: childKey,
+      controllerSessionKey: requesterKey,
+      requesterSessionKey: requesterKey,
+      requesterDisplayKey: "main",
+      task: "finished child task",
+      cleanup: "keep",
+      spawnMode: "session",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+      endedAt: Date.now() - 1_000,
+      outcome: { status: "ok" },
+      resultReceiptId: "receipt-clarification-child",
+    });
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      calls.push(request);
+      if (request.method === "agent") {
+        return { runId: "run-clarification-followup", status: "accepted" };
+      }
+      if (request.method === "agent.wait") {
+        return { runId: "run-clarification-followup", status: "pending" };
+      }
+      if (request.method === "send") {
+        throw new Error("healthy controlled child should use tracked restart");
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "discord",
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const result = await tool.execute("call-small-clarification-child", {
+      sessionKey: childKey,
+      message: "Can you clarify the final file list?",
+      timeoutSeconds: 0,
+      assignmentKind: "small_clarification",
+    });
+
+    expect(result.details).toMatchObject({
+      status: "accepted",
+      runId: "run-clarification-followup",
+      sessionKey: childKey,
+      delivery: { status: "tracked", mode: "completion_event" },
+      mode: "restart",
+    });
+    expect(calls.filter((call) => call.method === "agent")).toHaveLength(1);
+  });
+
+  it("sessions_send spawns a fresh child when assignment preflight rejects a no-final old generation", async () => {
+    const calls: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+    const requesterKey = "agent:main:main";
+    const oldChildKey = "agent:main:subagent:preflight-lifecycle";
+    let freshChildKey = "";
+    addSubagentRunForTests({
+      runId: "run-preflight-lifecycle-old",
+      childSessionKey: oldChildKey,
+      controllerSessionKey: requesterKey,
+      requesterSessionKey: requesterKey,
+      requesterDisplayKey: "main",
+      task: "finish lifecycle preflight task",
+      cleanup: "keep",
+      label: "reviewer",
+      spawnMode: "run",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+      endedAt: Date.now() - 1_000,
+      outcome: { status: "ok" },
+    });
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      calls.push(request);
+      if (request.method === "sessions.patch") {
+        freshChildKey =
+          typeof request.params?.key === "string" ? request.params.key : freshChildKey;
+        return {};
+      }
+      if (request.method === "agent") {
+        if (request.params?.sessionKey === oldChildKey) {
+          throw new Error("preflight reroute must not restart the old child");
+        }
+        if (request.params?.message === "Agent-to-agent announce step.") {
+          throw new Error("preflight reroute must not use announce delivery");
+        }
+        freshChildKey =
+          typeof request.params?.sessionKey === "string"
+            ? request.params.sessionKey
+            : freshChildKey;
+        return { runId: "run-preflight-lifecycle-fresh", status: "accepted" };
+      }
+      if (request.method === "agent.wait") {
+        if (request.params?.runId === "run-preflight-lifecycle-old") {
+          throw new Error("preflight reroute must wait on the fresh child");
+        }
+        return { runId: request.params?.runId, status: "ok" };
+      }
+      if (request.method === "chat.history") {
+        if (request.params?.sessionKey === oldChildKey) {
+          throw new Error("preflight reroute must not read old child history");
+        }
+        return {
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "text", text: "fresh lifecycle child finished" }],
+              timestamp: 20,
+            },
+          ],
+        };
+      }
+      if (request.method === "send") {
+        throw new Error("preflight reroute must not fall through to send delivery");
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "discord",
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const result = await tool.execute("call-preflight-lifecycle-reroute", {
+      sessionKey: oldChildKey,
+      message: "continue with bounded fresh context",
+      timeoutSeconds: 1,
+      assignmentKind: "review",
+      handoff: {
+        originalTask: "finish lifecycle preflight task",
+        currentNextStep: "continue with bounded fresh context",
+      },
+    });
+
+    expect(result.details).toMatchObject({
+      status: "ok",
+      runId: "run-preflight-lifecycle-fresh",
+      reply: "fresh lifecycle child finished",
+      sessionKey: freshChildKey,
+      delivery: { status: "tracked", mode: "completion_event" },
+      reroute: {
+        status: "fresh_child_spawned",
+        rejectedOldChild: {
+          childSessionKey: oldChildKey,
+          deliveryAttemptId: expect.stringMatching(/^child_route_preflight:/),
+          generation: "run-preflight-lifecycle-old",
+        },
+        freshChild: {
+          role: "main",
+          runId: "run-preflight-lifecycle-fresh",
+        },
+      },
+    });
+    expect(freshChildKey).toMatch(/^agent:main:subagent:/);
+    expect(freshChildKey).not.toBe(oldChildKey);
+    expect(
+      calls.filter(
+        (call) =>
+          call.method === "agent" &&
+          call.params?.lane === "subagent" &&
+          call.params.bootstrapContextMode === "lightweight",
+      ),
+    ).toHaveLength(1);
+    const taskMessage = String(
+      calls.find((call) => call.method === "agent")?.params?.message ?? "",
+    );
+    expect(taskMessage).toContain("agent_lifecycle_abandoned");
+    expect(taskMessage).toContain("child_route_preflight");
+    expect(getLatestSubagentRunByChildSessionKey(oldChildKey)?.suppressAnnounceReason).toBe(
+      "fresh-reroute",
+    );
+    expect(getLatestSubagentRunByChildSessionKey(freshChildKey)?.resultReceiptId).toMatch(/^scr_/);
+  });
+
+  it("sessions_send does not suppress an old generation when assignment preflight reroute lacks handoff", async () => {
+    const calls: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+    const requesterKey = "agent:main:main";
+    const oldChildKey = "agent:main:subagent:preflight-missing-handoff";
+    addSubagentRunForTests({
+      runId: "run-preflight-missing-handoff-old",
+      childSessionKey: oldChildKey,
+      controllerSessionKey: requesterKey,
+      requesterSessionKey: requesterKey,
+      requesterDisplayKey: "main",
+      task: "finish missing handoff preflight task",
+      cleanup: "keep",
+      label: "reviewer",
+      spawnMode: "run",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+      endedAt: Date.now() - 1_000,
+      outcome: { status: "ok" },
+    });
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      calls.push(request);
+      if (request.method === "agent") {
+        throw new Error("preflight missing handoff must stop before spawning");
+      }
+      if (request.method === "send") {
+        throw new Error("preflight missing handoff must not fall through to send");
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "discord",
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const result = await tool.execute("call-preflight-missing-handoff-reroute", {
+      sessionKey: oldChildKey,
+      message: "continue with bounded fresh context",
+      timeoutSeconds: 0,
+      assignmentKind: "review",
+    });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      status: "no_delivery",
+      delivery: { status: "rejected", mode: "child_route_preflight" },
+      reroute: {
+        status: "handoff_required",
+      },
+    });
+    expect(calls.some((call) => call.method === "agent")).toBe(false);
+    expect(
+      getLatestSubagentRunByChildSessionKey(oldChildKey)?.suppressAnnounceReason,
+    ).toBeUndefined();
+  });
+
+  it("sessions_send spawns a fresh child when assignment preflight sees hard low headroom", async () => {
+    const calls: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+    const requesterKey = "agent:main:main";
+    const oldChildKey = "agent:main:subagent:preflight-headroom";
+    let freshChildKey = "";
+    addSubagentRunForTests({
+      runId: "run-preflight-headroom-old",
+      childSessionKey: oldChildKey,
+      controllerSessionKey: requesterKey,
+      requesterSessionKey: requesterKey,
+      requesterDisplayKey: "main",
+      task: "finish headroom preflight task",
+      cleanup: "keep",
+      label: "implementer",
+      spawnMode: "run",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+      endedAt: Date.now() - 1_000,
+      outcome: { status: "ok" },
+      resultReceiptId: "receipt-preflight-headroom-old",
+    });
+    await recordChildRouteContextHeadroomSnapshot({
+      childSessionKey: oldChildKey,
+      runId: "run-preflight-headroom-old",
+      estimatedPromptTokens: 99_000,
+      modelContextLimitTokens: 100_000,
+      headroomTokens: 1_000,
+      headroomPercent: 1,
+      estimateSource: "actual_request",
+      lastCompactionStatus: "none",
+    });
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      calls.push(request);
+      if (request.method === "sessions.patch") {
+        freshChildKey =
+          typeof request.params?.key === "string" ? request.params.key : freshChildKey;
+        return {};
+      }
+      if (request.method === "agent") {
+        if (request.params?.sessionKey === oldChildKey) {
+          throw new Error("low-headroom preflight must not restart the old child");
+        }
+        freshChildKey =
+          typeof request.params?.sessionKey === "string"
+            ? request.params.sessionKey
+            : freshChildKey;
+        return { runId: "run-preflight-headroom-fresh", status: "accepted" };
+      }
+      if (request.method === "agent.wait") {
+        return { runId: request.params?.runId, status: "ok" };
+      }
+      if (request.method === "chat.history") {
+        if (request.params?.sessionKey === oldChildKey) {
+          throw new Error("low-headroom preflight must not read old child history");
+        }
+        return {
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "text", text: "fresh headroom child finished" }],
+              timestamp: 20,
+            },
+          ],
+        };
+      }
+      if (request.method === "send") {
+        throw new Error("low-headroom preflight must not fall through to send delivery");
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "discord",
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const result = await tool.execute("call-preflight-headroom-reroute", {
+      sessionKey: oldChildKey,
+      message: "continue after low context headroom",
+      timeoutSeconds: 1,
+      assignmentKind: "implementation",
+      handoff: {
+        originalTask: "finish headroom preflight task",
+        currentNextStep: "continue after low context headroom",
+      },
+    });
+
+    expect(result.details).toMatchObject({
+      status: "ok",
+      runId: "run-preflight-headroom-fresh",
+      reply: "fresh headroom child finished",
+      sessionKey: freshChildKey,
+      delivery: { status: "tracked", mode: "completion_event" },
+      reroute: {
+        status: "fresh_child_spawned",
+        rejectedOldChild: {
+          childSessionKey: oldChildKey,
+          deliveryAttemptId: expect.stringMatching(/^child_route_preflight:/),
+          generation: "run-preflight-headroom-old",
+        },
+        freshChild: {
+          role: "main",
+          runId: "run-preflight-headroom-fresh",
+        },
+      },
+    });
+    expect(freshChildKey).toMatch(/^agent:main:subagent:/);
+    expect(freshChildKey).not.toBe(oldChildKey);
+    const taskMessage = String(
+      calls.find((call) => call.method === "agent")?.params?.message ?? "",
+    );
+    expect(taskMessage).toContain("context_overflow");
+    expect(taskMessage).toContain("child_route_preflight");
+    expect(
+      calls.filter(
+        (call) =>
+          call.method === "agent" &&
+          call.params?.lane === "subagent" &&
+          call.params.bootstrapContextMode === "lightweight",
+      ),
+    ).toHaveLength(1);
+    expect(getLatestSubagentRunByChildSessionKey(oldChildKey)?.suppressAnnounceReason).toBe(
+      "fresh-reroute",
+    );
+    expect(getLatestSubagentRunByChildSessionKey(freshChildKey)?.resultReceiptId).toMatch(/^scr_/);
+  });
+
+  it("sessions_send requires degradedContext before rerouting with missing cleaned-up attachments", async () => {
+    const calls: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+    const requesterKey = "agent:main:main";
+    const oldChildKey = "agent:main:subagent:missing-cleaned-attachments";
+    const missingAttachmentsDir = path.join(tempStateDir ?? os.tmpdir(), "deleted-attachments");
+    addSubagentRunForTests({
+      runId: "run-missing-cleaned-attachments-old",
+      childSessionKey: oldChildKey,
+      controllerSessionKey: requesterKey,
+      requesterSessionKey: requesterKey,
+      requesterDisplayKey: "main",
+      task: "finish missing attachment task",
+      cleanup: "delete",
+      label: "implementer",
+      spawnMode: "run",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+      attachmentsDir: missingAttachmentsDir,
+      retainAttachmentsOnKeep: false,
+    });
+    await recordChildRouteHealthEvent({
+      code: "context_overflow",
+      status: "active",
+      source: "context_overflow",
+      childSessionKey: oldChildKey,
+      runId: "run-missing-cleaned-attachments-old",
+    });
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      calls.push(request);
+      if (request.method === "agent") {
+        throw new Error("missing attachment reroute must stop before spawning");
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "discord",
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const result = await tool.execute("call-missing-cleaned-attachments", {
+      sessionKey: oldChildKey,
+      message: "continue without the deleted file",
+      timeoutSeconds: 0,
+      handoff: {
+        originalTask: "finish missing attachment task",
+        currentNextStep: "continue without the deleted file",
+      },
+    });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      status: "no_delivery",
+      delivery: { status: "rejected", mode: "child_route_guard" },
+      reroute: {
+        status: "attachment_degradation_required",
+        attachments: {
+          retainedAttachmentPolicy: "cleanup",
+          attachmentRoots: expect.arrayContaining([
+            expect.objectContaining({
+              path: missingAttachmentsDir,
+              available: false,
+              retained: false,
+            }),
+          ]),
+          attachmentReferences: expect.arrayContaining([
+            expect.objectContaining({
+              name: "(attachment directory)",
+              available: false,
+              rootPath: missingAttachmentsDir,
+            }),
+          ]),
+        },
+      },
+    });
+    expect(calls.some((call) => call.method === "agent")).toBe(false);
+    expect(
+      getLatestSubagentRunByChildSessionKey(oldChildKey)?.suppressAnnounceReason,
+    ).toBeUndefined();
+  });
+
+  it("sessions_send spawns a fresh tracked child after spawn_fresh route-health rejection", async () => {
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-send-reroute-"));
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    resetChildRouteHealthForTest();
+    const calls: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+    const requesterKey = "agent:implementer:main";
+    const oldChildKey = "agent:implementer:subagent:old-slice";
+
+    try {
+      const runSubagentSpawning = vi.fn(async () => ({
+        status: "ok" as const,
+        threadBindingReady: true,
+      }));
+      hookRunnerState.current = {
+        hasHooks: (hookName: string) => hookName === "subagent_spawning",
+        runSubagentSpawning,
+      };
+      let freshSpawnStartCount = 0;
+      const attachmentsRootDir = path.join(stateDir, "attachments");
+      const attachmentsDir = path.join(attachmentsRootDir, "old-slice");
+      await fs.mkdir(attachmentsDir, { recursive: true });
+      await fs.writeFile(path.join(attachmentsDir, "input.txt"), "retained input", "utf8");
+      addSubagentRunForTests({
+        runId: "run-old-implementer",
+        childSessionKey: oldChildKey,
+        controllerSessionKey: requesterKey,
+        requesterSessionKey: requesterKey,
+        requesterDisplayKey: requesterKey,
+        task: "finish the unhealthy-child handoff implementation",
+        cleanup: "keep",
+        label: "implementer",
+        spawnMode: "session",
+        requesterOrigin: {
+          channel: "discord",
+          accountId: "acct-1",
+          to: "channel-1",
+          threadId: "thread-9",
+        },
+        createdAt: Date.now() - 5_000,
+        startedAt: Date.now() - 4_000,
+        attachmentsRootDir,
+        attachmentsDir,
+        retainAttachmentsOnKeep: true,
+      });
+      await recordChildRouteHealthEvent({
+        code: "context_overflow",
+        status: "active",
+        source: "context_overflow",
+        childSessionKey: oldChildKey,
+        runId: "run-old-implementer",
+      });
+      await recordChildRouteHealthEvent({
+        code: "auth_profile_session_expired",
+        status: "active",
+        source: "provider_error",
+        provider: {
+          providerId: "openai",
+          authProfileKey: "other-profile",
+        },
+      });
+      await writeSessionToolStore("implementer", {
+        [oldChildKey]: {
+          sessionId: "sess-old-slice",
+          updatedAt: Date.now(),
+          modelProvider: "openai",
+          model: "gpt-5.4",
+          authProfileOverride: "handoff-profile",
+          authProfileOverrideSource: "user",
+          thinkingLevel: "high",
+          fastMode: true,
+          reasoningLevel: "xhigh",
+          verboseLevel: "detailed",
+          traceLevel: "debug",
+          elevatedLevel: "admin",
+          execHost: "host",
+          execSecurity: "workspace-write",
+          execAsk: "never",
+          execNode: "node-22",
+          responseUsage: "full",
+        },
+      });
+      await recordChildRouteHealthEvent({
+        code: "auth_profile_session_expired",
+        status: "active",
+        source: "provider_error",
+        provider: {
+          providerId: "anthropic",
+          authProfileKey: "other-profile",
+        },
+      });
+
+      let freshChildKey = "";
+      callGatewayMock.mockImplementation(async (opts: unknown) => {
+        const request = opts as { method?: string; params?: Record<string, unknown> };
+        calls.push(request);
+        if (request.method === "sessions.patch") {
+          const key = typeof request.params?.key === "string" ? request.params.key : "";
+          if (key === oldChildKey) {
+            throw new Error("old unhealthy child must not be patched or restarted");
+          }
+          freshChildKey = key;
+          return {};
+        }
+        if (request.method === "agent") {
+          const params = request.params ?? {};
+          if (params.sessionKey === oldChildKey) {
+            throw new Error("old unhealthy child must not receive follow-up work");
+          }
+          if (params.message === "Agent-to-agent announce step.") {
+            throw new Error("fresh reroute must not start generic A2A announce delivery");
+          }
+          const isFreshSpawnStart =
+            params.lane === "subagent" && params.bootstrapContextMode === "lightweight";
+          if (!isFreshSpawnStart) {
+            return { runId: "run-non-reroute-agent", status: "accepted" };
+          }
+          freshChildKey = typeof params.sessionKey === "string" ? params.sessionKey : freshChildKey;
+          freshSpawnStartCount += 1;
+          return {
+            runId:
+              freshSpawnStartCount === 1 ? "run-fresh-implementer" : "run-fresh-implementer-next",
+            status: "accepted",
+          };
+        }
+        if (request.method === "agent.wait") {
+          if (request.params?.runId === "run-old-implementer") {
+            throw new Error("parent must not wait for the old stale generation");
+          }
+          return { runId: request.params?.runId, status: "ok" };
+        }
+        if (request.method === "chat.history") {
+          if (request.params?.sessionKey === oldChildKey) {
+            throw new Error("parent must not read completion from the old stale generation");
+          }
+          return {
+            messages: [
+              {
+                role: "assistant",
+                content: [{ type: "text", text: "fresh child finished" }],
+                timestamp: 20,
+              },
+            ],
+          };
+        }
+        if (request.method === "send") {
+          throw new Error("fresh reroute must not fall through to send delivery");
+        }
+        return {};
+      });
+
+      const tool = createOpenClawTools({
+        agentSessionKey: requesterKey,
+        agentChannel: "discord",
+      }).find((candidate) => candidate.name === "sessions_send");
+      expect(tool).toBeDefined();
+      if (!tool) {
+        throw new Error("missing sessions_send tool");
+      }
+      const freshSpawnAgentCalls = () =>
+        calls.filter(
+          (call) =>
+            call.method === "agent" &&
+            call.params?.lane === "subagent" &&
+            call.params.bootstrapContextMode === "lightweight",
+        );
+
+      const missingHandoff = await tool.execute("call-spawn-fresh-reroute-missing-handoff", {
+        sessionKey: oldChildKey,
+        message: "continue with the next implementation slice",
+        timeoutSeconds: 1,
+      });
+      expect(missingHandoff.details).toMatchObject({
+        ok: false,
+        status: "no_delivery",
+        delivery: { status: "rejected", mode: "child_route_guard" },
+        reroute: {
+          status: "handoff_required",
+        },
+      });
+      expect(freshSpawnAgentCalls()).toHaveLength(0);
+      expect(
+        getLatestSubagentRunByChildSessionKey(oldChildKey)?.suppressAnnounceReason,
+      ).toBeUndefined();
+
+      const result = await tool.execute("call-spawn-fresh-reroute", {
+        sessionKey: oldChildKey,
+        message: "continue with the next implementation slice",
+        timeoutSeconds: 1,
+        handoff: {
+          originalTask: "finish the unhealthy-child handoff implementation",
+          acceptanceCriteria: ["fresh child completes the next implementation slice"],
+          constraints: ["Do not reuse the old child session."],
+          findings: ["The previous child route was rejected for context_overflow."],
+          currentNextStep: "continue with the next implementation slice",
+          nonGoals: ["Do not ask the old child to summarize."],
+          degradedContext: true,
+        },
+      });
+
+      expect(result.details).toMatchObject({
+        status: "ok",
+        runId: "run-fresh-implementer",
+        reply: "fresh child finished",
+        delivery: { status: "tracked", mode: "completion_event" },
+        reroute: {
+          status: "fresh_child_spawned",
+          rejectedOldChild: {
+            childSessionKey: oldChildKey,
+            generation: "run-old-implementer",
+          },
+          freshChild: {
+            role: "implementer",
+            runId: "run-fresh-implementer",
+          },
+        },
+      });
+      expect((result.details as { sessionKey?: string }).sessionKey).toBe(freshChildKey);
+      expect(freshChildKey).toMatch(/^agent:implementer:subagent:/);
+      expect(freshChildKey).not.toBe(oldChildKey);
+
+      const agentCalls = freshSpawnAgentCalls();
+      expect(agentCalls).toHaveLength(1);
+      expect(runSubagentSpawning).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mode: "session",
+          requester: expect.objectContaining({
+            accountId: "acct-1",
+            channel: "discord",
+            threadId: "thread-9",
+            to: "channel-1",
+          }),
+          threadRequested: true,
+        }),
+        expect.objectContaining({
+          requesterSessionKey: requesterKey,
+        }),
+      );
+      expect(getLatestSubagentRunByChildSessionKey(oldChildKey)?.suppressAnnounceReason).toBe(
+        "fresh-reroute",
+      );
+      expect(agentCalls[0]?.params).toMatchObject({
+        sessionKey: freshChildKey,
+        deliver: false,
+        thinking: "high",
+        lane: "subagent",
+        bootstrapContextMode: "lightweight",
+      });
+      const runtimePatchCalls = calls.filter(
+        (call) => call.method === "sessions.patch" && call.params?.key === freshChildKey,
+      );
+      expect(runtimePatchCalls).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            params: expect.objectContaining({
+              thinkingLevel: "high",
+              fastMode: true,
+              execNode: "node-22",
+              responseUsage: "full",
+            }),
+          }),
+        ]),
+      );
+      expect(runtimePatchCalls).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            params: expect.objectContaining({
+              authProfileOverride: expect.anything(),
+            }),
+          }),
+        ]),
+      );
+      for (const call of runtimePatchCalls) {
+        const params = call.params ?? {};
+        expect(params).not.toHaveProperty("reasoningLevel");
+        expect(params).not.toHaveProperty("verboseLevel");
+        expect(params).not.toHaveProperty("traceLevel");
+        expect(params).not.toHaveProperty("elevatedLevel");
+        expect(params).not.toHaveProperty("execHost");
+        expect(params).not.toHaveProperty("execSecurity");
+        expect(params).not.toHaveProperty("execAsk");
+        expect(params).not.toHaveProperty("ttsAuto");
+      }
+      const freshStore = loadSessionStore(
+        resolveStorePath(TEST_CONFIG.session?.store, {
+          agentId: "implementer",
+        }),
+        {
+          skipCache: true,
+        },
+      );
+      expect(freshStore[freshChildKey]).toMatchObject({
+        authProfileOverride: "handoff-profile",
+        authProfileOverrideSource: "user",
+      });
+      expect(agentCalls[0]?.params).not.toHaveProperty("sessionId");
+      expect(agentCalls[0]?.params).not.toHaveProperty("restartSessionId");
+      const taskMessage =
+        typeof agentCalls[0]?.params?.message === "string" ? agentCalls[0].params.message : "";
+      expect(taskMessage).toContain("[Child handoff packet]");
+      expect(taskMessage).toContain(oldChildKey);
+      expect(taskMessage).toContain("context_overflow");
+      expect(taskMessage).toContain("handoff-profile");
+      expect(taskMessage).toContain("gpt-5.4");
+      expect(taskMessage).toContain("thinking");
+      expect(taskMessage).toContain("workspace-write");
+      expect(taskMessage).toContain("retainedAttachmentPolicy");
+      expect(taskMessage).toContain("input.txt");
+      expect(getLatestSubagentRunByChildSessionKey(freshChildKey)?.resultReceiptId).toMatch(
+        /^scr_/,
+      );
+      expect(calls.some((call) => call.method === "send")).toBe(false);
+      const attemptsAfterFirstSpawn = JSON.parse(
+        await fs.readFile(resolveChildRouteDeliveryAttemptsPath(), "utf8"),
+      ) as {
+        attempts?: Record<string, unknown>;
+      };
+      expect(Object.keys(attemptsAfterFirstSpawn.attempts ?? {})).toHaveLength(1);
+
+      const duplicate = await tool.execute("call-spawn-fresh-reroute-duplicate", {
+        sessionKey: oldChildKey,
+        message: "continue with the next implementation slice",
+        timeoutSeconds: 0,
+        handoff: {
+          originalTask: "finish the unhealthy-child handoff implementation",
+          currentNextStep: "continue with the next implementation slice",
+          degradedContext: true,
+        },
+      });
+      expect(duplicate.details).toMatchObject({
+        status: "accepted",
+        runId: "run-fresh-implementer",
+        sessionKey: freshChildKey,
+        mode: "session",
+        delivery: { status: "tracked", mode: "completion_event" },
+      });
+      expect(freshSpawnAgentCalls()).toHaveLength(1);
+
+      const duplicateWithChangedWording = await tool.execute(
+        "call-spawn-fresh-reroute-duplicate-changed-message",
+        {
+          sessionKey: oldChildKey,
+          message: "please continue this implementation slice with the same feature goal",
+          timeoutSeconds: 0,
+          handoff: {
+            originalTask: "finish the unhealthy-child handoff implementation",
+            currentNextStep: "continue with the next implementation slice",
+            degradedContext: true,
+          },
+        },
+      );
+      expect(duplicateWithChangedWording.details).toMatchObject({
+        status: "accepted",
+        runId: "run-fresh-implementer",
+        sessionKey: freshChildKey,
+        mode: "session",
+        delivery: { status: "tracked", mode: "completion_event" },
+      });
+      expect(freshSpawnAgentCalls()).toHaveLength(1);
+
+      await recordChildRouteHealthEvent({
+        code: "context_overflow",
+        status: "success",
+        source: "manual",
+        childSessionKey: oldChildKey,
+        runId: "run-old-implementer",
+      });
+      const afterLateOldSuccess = await tool.execute("call-spawn-fresh-reroute-after-old-success", {
+        sessionKey: oldChildKey,
+        message: "continue after the old child reported success late",
+        timeoutSeconds: 0,
+      });
+      expect(afterLateOldSuccess.details).toMatchObject({
+        status: "accepted",
+        runId: "run-fresh-implementer",
+        sessionKey: freshChildKey,
+        mode: "session",
+        delivery: { status: "tracked", mode: "completion_event" },
+      });
+      expect(freshSpawnAgentCalls()).toHaveLength(1);
+
+      const firstFreshChildKey = freshChildKey;
+      addSubagentRunForTests({
+        runId: "run-old-implementer-next",
+        childSessionKey: oldChildKey,
+        controllerSessionKey: requesterKey,
+        requesterSessionKey: requesterKey,
+        requesterDisplayKey: requesterKey,
+        task: "finish the unhealthy-child handoff implementation",
+        cleanup: "keep",
+        label: "implementer",
+        spawnMode: "run",
+        createdAt: Date.now(),
+        startedAt: Date.now(),
+      });
+      await recordChildRouteHealthEvent({
+        code: "context_overflow",
+        status: "active",
+        source: "context_overflow",
+        childSessionKey: oldChildKey,
+        runId: "run-old-implementer-next",
+      });
+
+      const nextGeneration = await tool.execute("call-spawn-fresh-reroute-next-generation", {
+        sessionKey: oldChildKey,
+        message: "continue with the next implementation slice",
+        timeoutSeconds: 0,
+        handoff: {
+          originalTask: "finish the unhealthy-child handoff implementation",
+          currentNextStep: "continue with the next implementation slice",
+          degradedContext: true,
+        },
+      });
+      expect(nextGeneration.details).toMatchObject({
+        status: "accepted",
+        runId: "run-fresh-implementer-next",
+        delivery: { status: "tracked", mode: "completion_event" },
+        reroute: {
+          status: "fresh_child_spawned",
+          rejectedOldChild: {
+            childSessionKey: oldChildKey,
+            generation: "run-old-implementer-next",
+          },
+        },
+      });
+      expect((nextGeneration.details as { sessionKey?: string }).sessionKey).toBe(freshChildKey);
+      expect(freshChildKey).not.toBe(firstFreshChildKey);
+      expect(freshSpawnAgentCalls()).toHaveLength(2);
+    } finally {
+      resetChildRouteHealthForTest();
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      await fs.rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      callGatewayMock.mockReset();
+    }
+  });
+
+  it("sessions_send keeps fresh reroute run errors terminal for the same feature", async () => {
+    const calls: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+    const requesterKey = "agent:implementer:main";
+    const oldChildKey = "agent:implementer:subagent:fresh-error";
+    addSubagentRunForTests({
+      runId: "run-old-fresh-error",
+      childSessionKey: oldChildKey,
+      controllerSessionKey: requesterKey,
+      requesterSessionKey: requesterKey,
+      requesterDisplayKey: requesterKey,
+      task: "finish the reroute error slice",
+      cleanup: "keep",
+      label: "implementer",
+      spawnMode: "run",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+    });
+    await recordChildRouteHealthEvent({
+      code: "context_overflow",
+      status: "active",
+      source: "context_overflow",
+      childSessionKey: oldChildKey,
+      runId: "run-old-fresh-error",
+    });
+    await recordChildRouteHealthEvent({
+      code: "auth_profile_session_expired",
+      status: "active",
+      source: "provider_error",
+      provider: {
+        providerId: "openai",
+        authProfileKey: "other-profile",
+      },
+    });
+    await writeSessionToolStore("implementer", {
+      [oldChildKey]: {
+        sessionId: "sess-fresh-error",
+        updatedAt: Date.now(),
+        modelProvider: "openai",
+        model: "gpt-5.4",
+      },
+    });
+
+    let freshSpawnStartCount = 0;
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      calls.push(request);
+      if (request.method === "sessions.patch") {
+        return {};
+      }
+      if (request.method === "agent") {
+        const params = request.params ?? {};
+        if (params.sessionKey === oldChildKey) {
+          throw new Error("old unhealthy child must not receive follow-up work");
+        }
+        freshSpawnStartCount += 1;
+        return { runId: "run-fresh-error", status: "accepted" };
+      }
+      if (request.method === "agent.wait") {
+        return { runId: request.params?.runId, status: "error", error: "fresh child failed" };
+      }
+      if (request.method === "send") {
+        throw new Error("fresh error reroute must not fall through to send delivery");
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "discord",
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const first = await tool.execute("call-spawn-fresh-reroute-error", {
+      sessionKey: oldChildKey,
+      message: "continue with the error slice",
+      timeoutSeconds: 1,
+      handoff: {
+        originalTask: "finish the reroute error slice",
+        currentNextStep: "continue with the error slice",
+      },
+    });
+    expect(first.details).toMatchObject({
+      status: "error",
+      runId: "run-fresh-error",
+      error: "fresh child failed",
+    });
+    expect(freshSpawnStartCount).toBe(1);
+
+    const second = await tool.execute("call-spawn-fresh-reroute-error-again", {
+      sessionKey: oldChildKey,
+      message: "retry that same feature with slightly different wording",
+      timeoutSeconds: 1,
+      handoff: {
+        originalTask: "finish the reroute error slice",
+        currentNextStep: "retry the same feature",
+      },
+    });
+    expect(second.details).toMatchObject({
+      ok: false,
+      status: "no_delivery",
+      delivery: { status: "rejected", mode: "child_route_guard" },
+      reroute: {
+        status: "error",
+        error: "fresh child failed",
+        runId: "run-fresh-error",
+      },
+    });
+    expect(freshSpawnStartCount).toBe(1);
+    expect(calls.some((call) => call.method === "send")).toBe(false);
+  });
+
+  it("sessions_send does not apply unrelated auth blockers to the target route", async () => {
+    const calls: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+    const requesterKey = "agent:implementer:main";
+    const childKey = "agent:implementer:subagent:auth-unrelated";
+    addSubagentRunForTests({
+      runId: "run-auth-unrelated-implementer",
+      childSessionKey: childKey,
+      controllerSessionKey: requesterKey,
+      requesterSessionKey: requesterKey,
+      requesterDisplayKey: requesterKey,
+      task: "answer a small clarification",
+      cleanup: "keep",
+      label: "implementer",
+      spawnMode: "run",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+    });
+    await writeSessionToolStore("implementer", {
+      [childKey]: {
+        sessionId: "sess-auth-unrelated",
+        updatedAt: Date.now(),
+        modelProvider: "openai",
+        model: "gpt-5.4",
+        authProfileOverride: "target-profile",
+        authProfileOverrideSource: "user",
+      },
+    });
+    await recordChildRouteHealthEvent({
+      code: "auth_profile_session_expired",
+      status: "active",
+      source: "provider_error",
+      provider: {
+        providerId: "openai",
+        authProfileKey: "other-profile",
+      },
+    });
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      calls.push(request);
+      if (request.method === "agent") {
+        return { runId: "run-auth-unrelated-send" };
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "discord",
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const result = await tool.execute("call-auth-unrelated", {
+      sessionKey: childKey,
+      message: "quick status?",
+      timeoutSeconds: 0,
+      assignmentKind: "small_clarification",
+    });
+
+    expect(result.details).toMatchObject({
+      status: "accepted",
+      runId: "run-auth-unrelated-send",
+      sessionKey: childKey,
+      delivery: { status: "tracked", mode: "completion_event" },
+      mode: "restart",
+    });
+    expect(calls.some((call) => call.method === "agent")).toBe(true);
+  });
+
+  it("sessions_send does not deliver or spawn fresh while an auth route blocker is active", async () => {
+    const calls: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+    const requesterKey = "agent:implementer:main";
+    const oldChildKey = "agent:implementer:subagent:auth-blocked";
+    addSubagentRunForTests({
+      runId: "run-auth-blocked-implementer",
+      childSessionKey: oldChildKey,
+      controllerSessionKey: requesterKey,
+      requesterSessionKey: requesterKey,
+      requesterDisplayKey: requesterKey,
+      task: "finish with auth blocker present",
+      cleanup: "keep",
+      label: "implementer",
+      spawnMode: "run",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+    });
+    await writeSessionToolStore("implementer", {
+      [oldChildKey]: {
+        sessionId: "sess-auth-blocked",
+        updatedAt: Date.now(),
+        modelProvider: "openai",
+        model: "gpt-5.4",
+        authProfileOverride: "expired-profile",
+        authProfileOverrideSource: "user",
+      },
+    });
+    await recordChildRouteHealthEvent({
+      code: "auth_profile_session_expired",
+      status: "active",
+      source: "provider_error",
+      provider: {
+        providerId: "openai",
+        authProfileKey: "expired-profile",
+      },
+    });
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      calls.push(request);
+      if (request.method === "agent") {
+        throw new Error("auth-blocked reroute must not spawn a fresh child");
+      }
+      if (request.method === "agent.wait") {
+        throw new Error("auth-blocked reroute must not wait on old or fresh runs");
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "discord",
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const result = await tool.execute("call-auth-blocked-reroute", {
+      sessionKey: oldChildKey,
+      message: "continue with the next implementation slice",
+      timeoutSeconds: 1,
+    });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      status: "no_delivery",
+      code: "child_session_unhealthy",
+      details: {
+        kind: "child_route_unhealthy",
+        codes: ["auth_profile_session_expired"],
+        recommendedAction: "reauth",
+        stateTransitionRequired: true,
+      },
+      delivery: { status: "rejected", mode: "child_route_guard" },
+    });
+    expect(calls.some((call) => call.method === "agent")).toBe(false);
+    expect(calls.some((call) => call.method === "agent.wait")).toBe(false);
+    expect(calls.some((call) => call.method === "send")).toBe(false);
+  });
+
+  it("sessions_send blocks fresh reroute on source-scoped auth expiry from the same child run", async () => {
+    const calls: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+    const requesterKey = "agent:implementer:main";
+    const oldChildKey = "agent:implementer:subagent:source-auth-blocked";
+    addSubagentRunForTests({
+      runId: "run-source-auth-blocked",
+      childSessionKey: oldChildKey,
+      controllerSessionKey: requesterKey,
+      requesterSessionKey: requesterKey,
+      requesterDisplayKey: requesterKey,
+      task: "finish with source auth blocker present",
+      cleanup: "keep",
+      label: "implementer",
+      spawnMode: "run",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+    });
+    await writeSessionToolStore("implementer", {
+      [oldChildKey]: {
+        sessionId: "sess-source-auth-blocked",
+        updatedAt: Date.now(),
+        modelProvider: "openai",
+        model: "gpt-5.4",
+      },
+    });
+    await recordChildRouteHealthEvent({
+      code: "context_overflow",
+      status: "active",
+      source: "context_overflow",
+      childSessionKey: oldChildKey,
+      runId: "run-source-auth-blocked",
+    });
+    await recordChildRouteHealthEvent({
+      code: "auth_profile_session_expired",
+      status: "active",
+      source: "provider_error",
+      childSessionKey: oldChildKey,
+      runId: "run-source-auth-blocked",
+      provider: {
+        providerId: "openai",
+        modelId: "gpt-5.4",
+        credentialSource: "env: OPENAI_API_KEY",
+      },
+    });
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      calls.push(request);
+      if (request.method === "agent") {
+        throw new Error("source-auth-blocked reroute must not spawn a fresh child");
+      }
+      if (request.method === "agent.wait") {
+        throw new Error("source-auth-blocked reroute must not wait on old or fresh runs");
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "discord",
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const result = await tool.execute("call-source-auth-blocked-reroute", {
+      sessionKey: oldChildKey,
+      message: "continue with the next implementation slice",
+      timeoutSeconds: 1,
+      handoff: {
+        originalTask: "finish with source auth blocker present",
+        currentNextStep: "continue with the next implementation slice",
+      },
+    });
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      status: "no_delivery",
+      code: "child_session_unhealthy",
+      details: {
+        kind: "child_route_unhealthy",
+        codes: ["auth_profile_session_expired", "context_overflow"],
+        recommendedAction: "reauth",
+        stateTransitionRequired: true,
+      },
+      delivery: { status: "rejected", mode: "child_route_guard" },
+    });
+    expect(calls.some((call) => call.method === "agent")).toBe(false);
+    expect(calls.some((call) => call.method === "agent.wait")).toBe(false);
+    expect(calls.some((call) => call.method === "send")).toBe(false);
+  });
+
+  it("sessions_send rejects fire-and-forget delivery to stale untracked subagent sessions across timeout variants", async () => {
+    const calls: Array<{ method?: string; params?: unknown }> = [];
+    const requesterKey = "agent:planner:main";
+    const staleChildKey = "agent:tester:subagent:legacy-boundary-delete";
+
+    try {
+      callGatewayMock.mockImplementation(async (opts: unknown) => {
+        const request = opts as { method?: string; params?: unknown };
+        calls.push(request);
+        if (request.method === "sessions.list") {
+          return {
+            path: "/tmp/sessions.json",
+            sessions: [
+              { key: requesterKey, kind: "direct" },
+              { key: staleChildKey, kind: "direct", spawnedBy: requesterKey },
+            ],
+          };
+        }
+        if (request.method === "agent") {
+          throw new Error("stale untracked subagent should not be restarted through A2A announce");
+        }
+        if (request.method === "agent.wait") {
+          throw new Error("stale untracked subagent should not enter tracked completion wait");
+        }
+        if (request.method === "send") {
+          throw new Error("stale untracked subagent should not reach send fallback");
+        }
+        return {};
+      });
+
+      const tool = createOpenClawTools({
+        agentSessionKey: requesterKey,
+        agentChannel: "discord",
+        config: {
+          ...TEST_CONFIG,
+          tools: {
+            ...TEST_CONFIG.tools,
+            agentToAgent: { enabled: true, allow: ["*"] },
+          },
+        },
+      }).find((candidate) => candidate.name === "sessions_send");
+      expect(tool).toBeDefined();
+      if (!tool) {
+        throw new Error("missing sessions_send tool");
+      }
+
+      const cases: Array<{ callId: string; timeoutSeconds?: number }> = [
+        {
+          callId: "call-stale-untracked-child-timeout-zero",
+          timeoutSeconds: 0,
+        },
+        {
+          callId: "call-stale-untracked-child-timeout-one",
+          timeoutSeconds: 1,
+        },
+        {
+          callId: "call-stale-untracked-child-default-timeout",
+        },
+        {
+          callId: "call-stale-untracked-child-bounded-timeout",
+          timeoutSeconds: 5,
+        },
+      ] as const;
+
+      for (const { callId, timeoutSeconds } of cases) {
+        calls.length = 0;
+        const result = await tool.execute(callId, {
+          sessionKey: staleChildKey,
+          message: "Task T4: rerun verification",
+          ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+        });
+
+        expect(result.details).toMatchObject({
+          ok: false,
+          status: "no_delivery",
+          code: "child_route_health_unavailable",
+          details: {
+            kind: "child_route_health_unavailable",
+            childSessionKey: staleChildKey,
+            requesterSessionKey: requesterKey,
+            errorKind: "child_route_untrusted",
+            retryable: false,
+            plannerInstruction:
+              "Child-shaped targets require tracked child ownership before follow-up delivery.",
+          },
+          delivery: { status: "rejected", mode: "child_route_guard" },
+        });
+        expect(result.details).not.toMatchObject({
+          delivery: { status: "pending", mode: "announce" },
+        });
+        expect(calls.some((call) => call.method === "agent")).toBe(false);
+        expect(calls.some((call) => call.method === "agent.wait")).toBe(false);
+        expect(calls.some((call) => call.method === "send")).toBe(false);
+      }
+    } finally {
+      callGatewayMock.mockReset();
+    }
+  });
+
   it("sessions_send lets a requester message its own cross-agent child despite agentToAgent allowlist", async () => {
     const calls: Array<{ method?: string; params?: unknown }> = [];
     const requesterKey = "agent:planner:main";
@@ -1402,7 +2816,9 @@ describe("sessions tools", () => {
       startedAt: Date.now() - 4_000,
       endedAt: Date.now() - 1_000,
       outcome: { status: "ok" },
+      resultReceiptId: "receipt-finished-implementer-child",
     });
+    await recordHealthyChildHeadroom(childKey, "run-finished-implementer-child");
 
     callGatewayMock.mockImplementation(async (opts: unknown) => {
       const request = opts as { method?: string; params?: unknown };
@@ -1472,7 +2888,9 @@ describe("sessions tools", () => {
       startedAt: Date.now() - 4_000,
       endedAt: Date.now() - 1_000,
       outcome: { status: "ok" },
+      resultReceiptId: "receipt-finished-wait-child",
     });
+    await recordHealthyChildHeadroom(childKey, "run-finished-wait-child");
     addSubagentRunForTests({
       runId: "run-finished-wait-descendant",
       childSessionKey: `${childKey}:subagent:leaf`,

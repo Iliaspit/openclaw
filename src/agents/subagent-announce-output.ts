@@ -11,7 +11,7 @@ import {
   resolveAgentIdFromSessionKey,
   resolveStorePath,
 } from "./subagent-announce.runtime.js";
-import { readLatestAssistantReply } from "./tools/agent-step.js";
+import { readLatestAssistantReply } from "./subagent-output-latest-reply.js";
 import { extractAssistantText, sanitizeTextContent } from "./tools/session-message-text.js";
 import { isAnnounceSkip } from "./tools/sessions-send-tokens.js";
 

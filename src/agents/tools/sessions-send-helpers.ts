@@ -91,7 +91,7 @@ export function buildAgentToAgentReplyContext(params: {
     `Current agent: ${currentLabel}.`,
     `Turn ${params.turn} of ${params.maxTurns}.`,
     ...buildAgentSessionLines(params),
-    `If you want to stop the ping-pong, reply exactly "${REPLY_SKIP_TOKEN}".`,
+    `If the incoming message only needs acknowledgement, contains no new information, or you want to stop the ping-pong, reply exactly "${REPLY_SKIP_TOKEN}".`,
   ].filter(Boolean);
   return lines.join("\n");
 }
@@ -113,7 +113,7 @@ export function buildAgentToAgentAnnounceContext(params: {
       ? `Round 1 reply: ${params.roundOneReply}`
       : "Round 1 reply: (not available).",
     params.latestReply ? `Latest reply: ${params.latestReply}` : "Latest reply: (not available).",
-    `If you want to remain silent, reply exactly "${ANNOUNCE_SKIP_TOKEN}".`,
+    `If there is no user-visible new information, or you want to remain silent, reply exactly "${ANNOUNCE_SKIP_TOKEN}".`,
     "Any other reply will be posted to the target channel.",
     "After this reply, the agent-to-agent conversation is over.",
   ].filter(Boolean);

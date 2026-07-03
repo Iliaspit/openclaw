@@ -220,13 +220,6 @@ actor GatewayConnection {
                 guard nsError.domain == URLError.errorDomain else { throw error }
 
                 var lastError: Error = error
-                await RemoteTunnelManager.shared.stopAll()
-                do {
-                    _ = try await GatewayEndpointStore.shared.ensureRemoteControlTunnel()
-                } catch {
-                    lastError = error
-                }
-
                 for delayMs in [150, 400, 900] {
                     try await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
                     do {
@@ -408,6 +401,24 @@ actor GatewayConnection {
             token: token,
             password: password,
             session: self.sessionBox,
+            connectOptions: GatewayConnectOptions(
+                role: "operator",
+                scopes: [
+                    "operator.admin",
+                    "operator.read",
+                    "operator.write",
+                    "operator.approvals",
+                    "operator.pairing",
+                ],
+                caps: [
+                    "tool-events",
+                    "orchestration-events",
+                ],
+                commands: [],
+                permissions: [:],
+                clientId: "openclaw-macos",
+                clientMode: "ui",
+                clientDisplayName: InstanceIdentity.displayName),
             pushHandler: { [weak self] push in
                 await self?.handle(push: push)
             })

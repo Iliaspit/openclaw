@@ -506,6 +506,7 @@ music, video, media harness) — plus credential handling for live runs — see
 These Docker runners split into two buckets:
 
 - Live-model runners: `test:docker:live-models` and `test:docker:live-gateway` run only their matching profile-key live file inside the repo Docker image (`src/agents/models.profiles.live.test.ts` and `src/gateway/gateway-models.profiles.live.test.ts`), mounting your local config dir and workspace (and sourcing `~/.profile` if mounted). The matching local entrypoints are `test:live:models-profiles` and `test:live:gateway-profiles`.
+- That image is the Dockerfile **`build` stage**, tagged by default as **`openclaw:local-live`** (`OPENCLAW_LIVE_IMAGE`, or `${OPENCLAW_IMAGE}-live` when `OPENCLAW_IMAGE` is set). It is **not** the thinner onboarding image from `scripts/e2e/Dockerfile` (`openclaw-onboard-e2e` via `scripts/e2e/onboard-docker.sh` / `pnpm test:docker:onboard`). The default Compose/runtime image is **`openclaw:local`** (`Dockerfile` final stage); see [Docker](/install/docker).
 - Docker live runners default to a smaller smoke cap so a full Docker sweep stays practical:
   `test:docker:live-models` defaults to `OPENCLAW_LIVE_MAX_MODELS=12`, and
   `test:docker:live-gateway` defaults to `OPENCLAW_LIVE_GATEWAY_SMOKE=1`,
@@ -611,6 +612,7 @@ Useful env vars:
 - `OPENCLAW_LIVE_GATEWAY_MODELS=...` / `OPENCLAW_LIVE_MODELS=...` to narrow the run
 - `OPENCLAW_LIVE_GATEWAY_PROVIDERS=...` / `OPENCLAW_LIVE_PROVIDERS=...` to filter providers in-container
 - `OPENCLAW_SKIP_DOCKER_BUILD=1` to reuse an existing `openclaw:local-live` image for reruns that do not need a rebuild
+- `OPENCLAW_INSTALL_BROWSER=1` when building the live image (`pnpm test:docker:live-build` or any `docker build --target build ...` that should run Playwright/Chromium without root `playwright install-deps` inside the container (same flag as the default runtime image; see [Docker](/install/docker))
 - `OPENCLAW_LIVE_REQUIRE_PROFILE_KEYS=1` to ensure creds come from the profile store (not env)
 - `OPENCLAW_OPENWEBUI_MODEL=...` to choose the model exposed by the gateway for the Open WebUI smoke
 - `OPENCLAW_OPENWEBUI_PROMPT=...` to override the nonce-check prompt used by the Open WebUI smoke

@@ -62,6 +62,7 @@ import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
 } from "../shared/string-coerce.js";
+import { sanitizeTaskStatusText } from "../tasks/task-status.js";
 import { normalizeSessionDeliveryFields } from "../utils/delivery-context.shared.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../utils/usage-format.js";
 import {
@@ -107,6 +108,7 @@ export type {
 } from "./session-utils.types.js";
 
 const DERIVED_TITLE_MAX_LEN = 60;
+const SUBAGENT_DISPLAY_LABEL_MAX_LEN = 72;
 
 function tryResolveExistingPath(value: string): string | null {
   try {
@@ -330,6 +332,56 @@ function resolveChildSessionKeys(
   }
   const childSessions = Array.from(childSessionKeys);
   return childSessions.length > 0 ? childSessions : undefined;
+}
+
+function resolveSubagentDisplayLabel(run: { label?: string } | null): string | undefined {
+  const raw = normalizeOptionalString(run?.label);
+  if (!raw) {
+    return undefined;
+  }
+  return (
+    sanitizeTaskStatusText(raw, {
+      maxChars: SUBAGENT_DISPLAY_LABEL_MAX_LEN,
+    }) || undefined
+  );
+}
+
+function resolveSubagentOrdinal(
+  run: {
+    childSessionKey: string;
+    controllerSessionKey?: string;
+    requesterSessionKey?: string;
+  } | null,
+): number | undefined {
+  const childSessionKey = normalizeOptionalString(run?.childSessionKey);
+  const controllerSessionKey =
+    normalizeOptionalString(run?.controllerSessionKey) ||
+    normalizeOptionalString(run?.requesterSessionKey);
+  if (!childSessionKey || !controllerSessionKey) {
+    return undefined;
+  }
+
+  const firstCreatedAtByChild = new Map<string, number>();
+  for (const entry of listSubagentRunsForController(controllerSessionKey)) {
+    const child = normalizeOptionalString(entry.childSessionKey);
+    if (!child) {
+      continue;
+    }
+    const createdAt =
+      typeof entry.createdAt === "number" && Number.isFinite(entry.createdAt)
+        ? entry.createdAt
+        : Number.MAX_SAFE_INTEGER;
+    const previous = firstCreatedAtByChild.get(child);
+    if (previous === undefined || createdAt < previous) {
+      firstCreatedAtByChild.set(child, createdAt);
+    }
+  }
+
+  const orderedChildren = Array.from(firstCreatedAtByChild.entries()).toSorted(
+    (a, b) => a[1] - b[1] || a[0].localeCompare(b[0]),
+  );
+  const index = orderedChildren.findIndex(([child]) => child === childSessionKey);
+  return index >= 0 ? index + 1 : undefined;
 }
 
 function resolveTranscriptUsageFallback(params: {
@@ -625,21 +677,51 @@ function listConfiguredAgentIds(cfg: OpenClawConfig): string[] {
   const defaultId = normalizeAgentId(resolveDefaultAgentId(cfg));
   ids.add(defaultId);
 
+  const listIdsInOrder: string[] = [];
+  const listOrderSeen = new Set<string>();
   for (const entry of cfg.agents?.list ?? []) {
-    if (entry?.id) {
-      ids.add(normalizeAgentId(entry.id));
+    if (!entry?.id) {
+      continue;
     }
+    const id = normalizeAgentId(entry.id);
+    if (!id || listOrderSeen.has(id)) {
+      continue;
+    }
+    listOrderSeen.add(id);
+    listIdsInOrder.push(id);
+    ids.add(id);
   }
 
   for (const id of listExistingAgentIdsFromDisk()) {
     ids.add(id);
   }
 
-  const sorted = Array.from(ids).filter(Boolean);
-  sorted.sort((a, b) => a.localeCompare(b));
-  return sorted.includes(defaultId)
-    ? [defaultId, ...sorted.filter((id) => id !== defaultId)]
-    : sorted;
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const pushId = (id: string) => {
+    if (!id || seen.has(id) || !ids.has(id)) {
+      return;
+    }
+    seen.add(id);
+    ordered.push(id);
+  };
+
+  const declaredIds = new Set(listIdsInOrder);
+  if (!declaredIds.has(defaultId)) {
+    pushId(defaultId);
+  }
+  for (const id of listIdsInOrder) {
+    pushId(id);
+  }
+
+  const remainder = Array.from(ids)
+    .filter((id) => !seen.has(id))
+    .sort((a, b) => a.localeCompare(b));
+  for (const id of remainder) {
+    pushId(id);
+  }
+
+  return ordered;
 }
 
 function normalizeFallbackList(values: readonly string[]): string[] {
@@ -1279,6 +1361,8 @@ export function buildGatewaySessionRow(params: {
   const subagentStartedAt = subagentRun ? getSubagentSessionStartedAt(subagentRun) : undefined;
   const subagentEndedAt = subagentRun ? subagentRun.endedAt : undefined;
   const subagentRuntimeMs = subagentRun ? resolveSessionRuntimeMs(subagentRun, now) : undefined;
+  const subagentLabel = resolveSubagentDisplayLabel(subagentRun);
+  const subagentOrdinal = resolveSubagentOrdinal(subagentRun);
   const selectedModel = entry?.modelOverride?.trim()
     ? resolveSessionModelRef(cfg, entry, sessionAgentId)
     : null;
@@ -1387,6 +1471,8 @@ export function buildGatewaySessionRow(params: {
     spawnDepth: entry?.spawnDepth,
     subagentRole: entry?.subagentRole,
     subagentControlScope: entry?.subagentControlScope,
+    subagentLabel,
+    subagentOrdinal,
     kind: classifySessionKey(key, entry),
     label: entry?.label,
     displayName,

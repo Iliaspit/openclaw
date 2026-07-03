@@ -1,7 +1,7 @@
 import { subagentRuns } from "./subagent-registry-memory.js";
+import { isSubagentRunNewer } from "./subagent-registry-ordering.js";
 import {
   countActiveDescendantRunsFromRuns,
-  getSubagentRunByChildSessionKeyFromRuns,
   listDescendantRunsForRequesterFromRuns,
   listRunsForControllerFromRuns,
 } from "./subagent-registry-queries.js";
@@ -41,10 +41,29 @@ export function listDescendantRunsForRequester(rootSessionKey: string): Subagent
 }
 
 export function getSubagentRunByChildSessionKey(childSessionKey: string): SubagentRunRecord | null {
-  return getSubagentRunByChildSessionKeyFromRuns(
-    getSubagentRunsSnapshotForRead(subagentRuns),
-    childSessionKey,
-  );
+  const key = childSessionKey.trim();
+  if (!key) {
+    return null;
+  }
+
+  let latestActive: SubagentRunRecord | null = null;
+  let latestEnded: SubagentRunRecord | null = null;
+  for (const entry of getSubagentRunsSnapshotForRead(subagentRuns).values()) {
+    if (entry.childSessionKey !== key) {
+      continue;
+    }
+    if (typeof entry.endedAt !== "number") {
+      if (!latestActive || isSubagentRunNewer(entry, latestActive)) {
+        latestActive = entry;
+      }
+      continue;
+    }
+    if (!latestEnded || isSubagentRunNewer(entry, latestEnded)) {
+      latestEnded = entry;
+    }
+  }
+
+  return latestActive ?? latestEnded;
 }
 
 export function getSessionDisplaySubagentRunByChildSessionKey(
@@ -62,12 +81,12 @@ export function getSessionDisplaySubagentRunByChildSessionKey(
       continue;
     }
     if (typeof entry.endedAt === "number") {
-      if (!latestInMemoryEnded || entry.createdAt > latestInMemoryEnded.createdAt) {
+      if (!latestInMemoryEnded || isSubagentRunNewer(entry, latestInMemoryEnded)) {
         latestInMemoryEnded = entry;
       }
       continue;
     }
-    if (!latestInMemoryActive || entry.createdAt > latestInMemoryActive.createdAt) {
+    if (!latestInMemoryActive || isSubagentRunNewer(entry, latestInMemoryActive)) {
       latestInMemoryActive = entry;
     }
   }
@@ -75,7 +94,7 @@ export function getSessionDisplaySubagentRunByChildSessionKey(
   if (latestInMemoryEnded || latestInMemoryActive) {
     if (
       latestInMemoryEnded &&
-      (!latestInMemoryActive || latestInMemoryEnded.createdAt > latestInMemoryActive.createdAt)
+      (!latestInMemoryActive || isSubagentRunNewer(latestInMemoryEnded, latestInMemoryActive))
     ) {
       return latestInMemoryEnded;
     }
@@ -98,7 +117,7 @@ export function getLatestSubagentRunByChildSessionKey(
     if (entry.childSessionKey !== key) {
       continue;
     }
-    if (!latest || entry.createdAt > latest.createdAt) {
+    if (!latest || isSubagentRunNewer(entry, latest)) {
       latest = entry;
     }
   }

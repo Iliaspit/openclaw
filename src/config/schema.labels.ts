@@ -186,6 +186,8 @@ export const FIELD_LABELS: Record<string, string> = {
   "tools.exec.applyPatch.enabled": "Enable apply_patch",
   "tools.exec.applyPatch.workspaceOnly": "apply_patch Workspace-Only",
   "tools.exec.applyPatch.allowModels": "apply_patch Model Allowlist",
+  "tools.catalog": "Catalog Tool",
+  "tools.catalog.enabled": "Enable Catalog Tool",
   "tools.loopDetection.enabled": "Tool-loop Detection",
   "tools.loopDetection.historySize": "Tool-loop History Size",
   "tools.loopDetection.warningThreshold": "Tool-loop Warning Threshold",

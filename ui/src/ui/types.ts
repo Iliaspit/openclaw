@@ -1,4 +1,6 @@
 export type UpdateAvailable = import("../../../src/infra/update-startup.js").UpdateAvailable;
+export type QueueHealthResult = import("../../../src/gateway/protocol/index.js").QueueHealthResult;
+export type QueueLaneSnapshot = import("../../../src/gateway/protocol/index.js").QueueLaneSnapshot;
 import type { CronJobBase } from "../../../src/cron/types-shared.js";
 import type { ConfigUiHints } from "../../../src/shared/config-ui-hints-types.js";
 import type {
@@ -399,6 +401,9 @@ export type SessionCompactionCheckpoint = {
 export type GatewaySessionRow = {
   key: string;
   spawnedBy?: string;
+  parentSessionKey?: string;
+  subagentLabel?: string;
+  subagentOrdinal?: number;
   kind: "direct" | "group" | "global" | "unknown";
   label?: string;
   displayName?: string;

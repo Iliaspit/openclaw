@@ -1,7 +1,7 @@
 import { listAgentEntries } from "../../agents/agent-scope.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { resolveFastModeState } from "../../agents/fast-mode.js";
-import { type ModelAliasIndex, resolveModelRefFromString } from "../../agents/model-selection.js";
+import type { ModelAliasIndex } from "../../agents/model-selection.js";
 import { resolveSandboxRuntimeStatus } from "../../agents/sandbox/runtime-status.js";
 import type { SkillCommandSpec } from "../../agents/skills.js";
 import type { SessionEntry } from "../../config/sessions.js";
@@ -35,7 +35,6 @@ import {
 } from "./model-selection.js";
 import { formatElevatedUnavailableMessage, resolveElevatedPermissions } from "./reply-elevated.js";
 import { stripInlineStatus } from "./reply-inline.js";
-import { resolveRuntimePolicySessionKey } from "./runtime-policy-session-key.js";
 import type { TypingController } from "./typing.js";
 
 type AgentDefaults = NonNullable<OpenClawConfig["agents"]>["defaults"];
@@ -52,24 +51,6 @@ function loadCommandsRegistry() {
 function loadSkillCommands() {
   skillCommandsPromise ??= import("../skill-commands.runtime.js");
   return skillCommandsPromise;
-}
-
-function canUseFastExplicitModelDirective(params: {
-  directives: InlineDirectives;
-  defaultProvider: string;
-  aliasIndex: ModelAliasIndex;
-}): boolean {
-  const raw = normalizeOptionalString(params.directives.rawModelDirective);
-  if (!raw || /^[0-9]+$/.test(raw)) {
-    return false;
-  }
-  return Boolean(
-    resolveModelRefFromString({
-      raw,
-      defaultProvider: params.defaultProvider,
-      aliasIndex: params.aliasIndex,
-    }),
-  );
 }
 
 function resolveDirectiveCommandText(params: { ctx: MsgContext; sessionCtx: TemplateContext }) {
@@ -221,13 +202,8 @@ export async function resolveReplyDirectives(params: {
     commandSource: ctx.CommandSource,
   });
   const commandTextHasSlash = commandText.includes("/");
-  const hasConfiguredModelAliases =
-    commandTextHasSlash &&
-    Object.values(cfg.agents?.defaults?.models ?? {}).some((entry) =>
-      Boolean(normalizeOptionalString(entry.alias)),
-    );
   const reservedCommands = new Set<string>();
-  if (hasConfiguredModelAliases) {
+  if (commandTextHasSlash) {
     const { listChatCommands } = await loadCommandsRegistry();
     for (const chatCommand of listChatCommands()) {
       for (const alias of chatCommand.textAliases) {
@@ -236,13 +212,11 @@ export async function resolveReplyDirectives(params: {
     }
   }
 
-  const rawAliases = hasConfiguredModelAliases
-    ? resolveConfiguredDirectiveAliases({
-        cfg,
-        commandTextHasSlash,
-        reservedCommands,
-      })
-    : [];
+  const rawAliases = resolveConfiguredDirectiveAliases({
+    cfg,
+    commandTextHasSlash,
+    reservedCommands,
+  });
 
   // Only load workspace skill commands when we actually need them to filter aliases.
   // This avoids scanning skills for messages that only use plain text with no slash syntax.
@@ -387,7 +361,7 @@ export async function resolveReplyDirectives(params: {
     typing.cleanup();
     const runtimeSandboxed = resolveSandboxRuntimeStatus({
       cfg,
-      sessionKey: resolveRuntimePolicySessionKey({ cfg, ctx, sessionKey: ctx.SessionKey }),
+      sessionKey: ctx.SessionKey,
     }).sandboxed;
     return {
       kind: "reply",
@@ -454,41 +428,33 @@ export async function resolveReplyDirectives(params: {
     isFastTestEnv: process.env.OPENCLAW_TEST_FAST === "1",
   });
 
-  const useFastModelSelection =
+  const modelState =
     useFastReplyRuntime &&
+    !directives.hasModelDirective &&
     !hasResolvedHeartbeatModelOverride &&
-    !(agentCfg?.models && Object.keys(agentCfg.models).length > 0) &&
     !normalizeOptionalString(targetSessionEntry?.modelOverride) &&
-    !normalizeOptionalString(targetSessionEntry?.providerOverride) &&
-    (!directives.hasModelDirective ||
-      canUseFastExplicitModelDirective({
-        directives,
-        defaultProvider,
-        aliasIndex: params.aliasIndex,
-      }));
-
-  const modelState = useFastModelSelection
-    ? createFastTestModelSelectionState({
-        agentCfg,
-        provider,
-        model,
-      })
-    : await createModelSelectionState({
-        cfg,
-        agentId,
-        agentCfg,
-        sessionEntry: targetSessionEntry,
-        sessionStore,
-        sessionKey,
-        parentSessionKey: targetSessionEntry?.parentSessionKey ?? ctx.ParentSessionKey,
-        storePath,
-        defaultProvider,
-        defaultModel,
-        provider,
-        model,
-        hasModelDirective: directives.hasModelDirective,
-        hasResolvedHeartbeatModelOverride,
-      });
+    !normalizeOptionalString(targetSessionEntry?.providerOverride)
+      ? createFastTestModelSelectionState({
+          agentCfg,
+          provider,
+          model,
+        })
+      : await createModelSelectionState({
+          cfg,
+          agentId,
+          agentCfg,
+          sessionEntry: targetSessionEntry,
+          sessionStore,
+          sessionKey,
+          parentSessionKey: targetSessionEntry?.parentSessionKey ?? ctx.ParentSessionKey,
+          storePath,
+          defaultProvider,
+          defaultModel,
+          provider,
+          model,
+          hasModelDirective: directives.hasModelDirective,
+          hasResolvedHeartbeatModelOverride,
+        });
   provider = modelState.provider;
   model = modelState.model;
   const resolvedThinkLevelWithDefault =
@@ -496,14 +462,9 @@ export async function resolveReplyDirectives(params: {
     (await modelState.resolveDefaultThinkingLevel()) ??
     (agentCfg?.thinkingDefault as ThinkLevel | undefined);
 
-  const thinkingExplicitlySet =
-    directives.thinkLevel !== undefined ||
-    targetSessionEntry?.thinkingLevel !== undefined ||
-    agentCfg?.thinkingDefault !== undefined;
-
   // When neither directive nor session nor agent set reasoning, default to model capability
   // (e.g. OpenRouter with reasoning: true). Skip model default when thinking is active
-  // or when thinking was explicitly disabled.
+  // to avoid redundant Reasoning: output alongside internal thinking blocks.
   const hasAgentReasoningDefault =
     agentEntry?.reasoningDefault !== undefined && agentEntry?.reasoningDefault !== null;
   const reasoningExplicitlySet =
@@ -515,9 +476,10 @@ export async function resolveReplyDirectives(params: {
   if (
     !reasoningExplicitlySet &&
     resolvedReasoningLevel === "off" &&
-    !thinkingActive &&
-    !thinkingExplicitlySet
+    opts?.typingPolicy === "internal_webchat"
   ) {
+    resolvedReasoningLevel = "stream";
+  } else if (!reasoningExplicitlySet && resolvedReasoningLevel === "off" && !thinkingActive) {
     resolvedReasoningLevel = await modelState.resolveDefaultReasoningLevel();
   }
 

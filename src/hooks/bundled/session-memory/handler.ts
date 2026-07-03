@@ -28,6 +28,21 @@ import { findPreviousSessionFile, getRecentSessionContentWithResetFallback } fro
 
 const log = createSubsystemLogger("hooks/session-memory");
 
+function resolveSessionMemoryOutputDir(params: {
+  hookConfig?: Record<string, unknown>;
+  workspaceDir: string;
+}): string {
+  const rawArchiveDir = typeof params.hookConfig?.archiveDir === "string"
+    ? params.hookConfig.archiveDir.trim()
+    : "";
+  if (rawArchiveDir.length > 0) {
+    return path.isAbsolute(rawArchiveDir)
+      ? rawArchiveDir
+      : path.join(params.workspaceDir, rawArchiveDir);
+  }
+  return path.join(params.workspaceDir, "memory");
+}
+
 function resolveDisplaySessionKey(params: {
   cfg?: OpenClawConfig;
   workspaceDir?: string;
@@ -77,8 +92,6 @@ const saveSessionToMemory: HookHandler = async (event) => {
       workspaceDir: contextWorkspaceDir,
       sessionKey: event.sessionKey,
     });
-    const memoryDir = path.join(workspaceDir, "memory");
-    await fs.mkdir(memoryDir, { recursive: true });
 
     // Get today's date for filename
     const now = new Date(event.timestamp);
@@ -126,6 +139,11 @@ const saveSessionToMemory: HookHandler = async (event) => {
 
     // Read message count from hook config (default: 15)
     const hookConfig = resolveHookConfig(cfg, "session-memory");
+    const outputDir = resolveSessionMemoryOutputDir({
+      hookConfig,
+      workspaceDir,
+    });
+    await fs.mkdir(outputDir, { recursive: true });
     const messageCount =
       typeof hookConfig?.messages === "number" && hookConfig.messages > 0
         ? hookConfig.messages
@@ -167,7 +185,7 @@ const saveSessionToMemory: HookHandler = async (event) => {
 
     // Create filename with date and slug
     const filename = `${dateStr}-${slug}.md`;
-    const memoryFilePath = path.join(memoryDir, filename);
+    const memoryFilePath = path.join(outputDir, filename);
     log.debug("Memory file path resolved", {
       filename,
       path: memoryFilePath.replace(os.homedir(), "~"),
@@ -199,7 +217,7 @@ const saveSessionToMemory: HookHandler = async (event) => {
 
     // Write under memory root with alias-safe file validation.
     await writeFileWithinRoot({
-      rootDir: memoryDir,
+      rootDir: outputDir,
       relativePath: filename,
       data: entry,
       encoding: "utf-8",

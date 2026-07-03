@@ -2,6 +2,7 @@ import { updateSessionStore } from "../../config/sessions/store.js";
 import { mergeSessionEntry, type SessionEntry } from "../../config/sessions/types.js";
 import { formatAgentInternalEventsForPrompt } from "../internal-events.js";
 import { hasInternalRuntimeContext } from "../internal-runtime-context.js";
+import { hydrateAgentInternalEventResultReceipts } from "../subagent-result-receipts.js";
 import type { AgentCommandOpts } from "./types.js";
 
 export type PersistSessionEntryParams = {
@@ -33,7 +34,9 @@ export function prependInternalEventContext(
   if (hasInternalRuntimeContext(body)) {
     return body;
   }
-  const renderedEvents = formatAgentInternalEventsForPrompt(events);
+  const renderedEvents = formatAgentInternalEventsForPrompt(
+    hydrateAgentInternalEventResultReceipts(events),
+  );
   if (!renderedEvents) {
     return body;
   }

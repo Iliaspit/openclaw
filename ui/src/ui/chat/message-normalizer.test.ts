@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
+  INTERNAL_RUNTIME_CONTEXT_BEGIN,
+  INTERNAL_RUNTIME_CONTEXT_END,
+} from "../../../../src/agents/internal-runtime-context.js";
+import {
   normalizeMessage,
   normalizeRoleForGrouping,
   isToolResultMessage,
@@ -120,6 +124,48 @@ describe("message-normalizer", () => {
           rawText: null,
         },
       ]);
+    });
+
+    it("strips internal runtime context from assistant string content", () => {
+      const result = normalizeMessage({
+        role: "assistant",
+        content: [
+          "Visible intro.",
+          INTERNAL_RUNTIME_CONTEXT_BEGIN,
+          "OpenClaw runtime context (internal):",
+          "This context is runtime-generated, not user-authored. Keep internal details private.",
+          "",
+          "[Internal task completion event]",
+          "secret orchestration data",
+          INTERNAL_RUNTIME_CONTEXT_END,
+          "Visible outro.",
+        ].join("\n"),
+      });
+
+      expect(result.content).toEqual([{ type: "text", text: "Visible intro.\n\nVisible outro." }]);
+    });
+
+    it("strips internal runtime context from assistant text blocks", () => {
+      const result = normalizeMessage({
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: [
+              INTERNAL_RUNTIME_CONTEXT_BEGIN,
+              "OpenClaw runtime context (internal):",
+              "This context is runtime-generated, not user-authored. Keep internal details private.",
+              "",
+              "[Internal task completion event]",
+              "secret orchestration data",
+              INTERNAL_RUNTIME_CONTEXT_END,
+              "Visible answer.",
+            ].join("\n"),
+          },
+        ],
+      });
+
+      expect(result.content).toEqual([{ type: "text", text: "Visible answer." }]);
     });
 
     it("ignores [embed] shortcodes inside fenced code blocks", () => {

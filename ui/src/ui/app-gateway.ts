@@ -43,6 +43,7 @@ import {
 } from "./controllers/exec-approval.ts";
 import { loadHealthState, type HealthState } from "./controllers/health.ts";
 import { loadNodes, type NodesState } from "./controllers/nodes.ts";
+import { loadQueueHealth, type QueueHealthState } from "./controllers/queue.ts";
 import { loadSessions, subscribeSessions, type SessionsState } from "./controllers/sessions.ts";
 import {
   resolveGatewayErrorDetailCode,
@@ -87,6 +88,9 @@ type GatewayHost = {
   healthResult: HealthSummary | null;
   healthError: string | null;
   debugHealth: HealthSummary | null;
+  queueHealthLoading: boolean;
+  queueHealthError: string | null;
+  queueHealthResult: import("./types.js").QueueHealthResult | null;
   assistantName: string;
   assistantAvatar: string | null;
   assistantAgentId: string | null;
@@ -332,6 +336,7 @@ export function connectGateway(host: GatewayHost, options?: ConnectGatewayOption
       void loadAgents(host as unknown as AgentsState);
       void loadHealthState(host as unknown as HealthState);
       void loadNodes(host as unknown as NodesState, { quiet: true });
+      void loadQueueHealth(host as unknown as QueueHealthState, { quiet: true });
       void loadDevices(host as unknown as DevicesState, { quiet: true });
       void refreshActiveTab(host as unknown as Parameters<typeof refreshActiveTab>[0]);
     },

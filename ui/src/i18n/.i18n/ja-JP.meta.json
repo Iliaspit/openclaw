@@ -1,11 +1,14 @@
 {
-  "fallbackKeys": [],
-  "generatedAt": "2026-04-23T06:30:13.037Z",
+  "fallbackKeys": [
+    "chat.sessionSelectOther",
+    "chat.sessionSelectTopLevel"
+  ],
+  "generatedAt": "2026-05-04T10:14:34.564Z",
   "locale": "ja-JP",
   "model": "gpt-5.4",
   "provider": "openai",
-  "sourceHash": "33cba33627744c6bb03182f53b02a9a2640272ef0fa3d039ce52723a96f5099e",
-  "totalKeys": 734,
-  "translatedKeys": 734,
+  "sourceHash": "43dfa2734cc5744e5eeb88ba7f46839c14007b71b2787a93082c66de43658dba",
+  "totalKeys": 708,
+  "translatedKeys": 706,
   "workflow": 1
 }

@@ -288,6 +288,9 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain(
       "Re-task existing child sessions through subagents when you need that same tracked completion path.",
     );
+    expect(prompt).toContain(
+      "If the old child is no longer tracked, spawn a fresh child instead of using fire-and-forget sessions_send.",
+    );
     expect(prompt).toContain("Do not poll `subagents list` / `sessions_list` in a loop");
     expect(prompt).toContain(
       "When a first-class tool exists for an action, use the tool directly instead of asking the user to run equivalent CLI or slash commands.",
@@ -400,6 +403,9 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("OpenClaw docs: /tmp/openclaw/docs");
     expect(prompt).toContain(
       "For OpenClaw behavior, commands, config, or architecture: consult local docs first.",
+    );
+    expect(prompt).toContain(
+      "If INCIDENTS.md exists in this workspace, consult it before investigating an issue or making a requested change.",
     );
   });
 
@@ -946,7 +952,10 @@ describe("buildSubagentSystemPrompt", () => {
     );
     expect(prompt).toContain("Subagent results auto-announce back to you");
     expect(prompt).toContain(
-      "After spawning children, do NOT call sessions_list, sessions_history, exec sleep, or any polling tool.",
+      "After spawning children, do NOT call sessions_list, exec sleep, or sessions_history in loops just to wait.",
+    );
+    expect(prompt).toContain(
+      "Use targeted sessions_history only when a completion receipt needs hydration.",
     );
     expect(prompt).toContain(
       "Track expected child session keys and only send your final answer after completion events for ALL expected children arrive.",

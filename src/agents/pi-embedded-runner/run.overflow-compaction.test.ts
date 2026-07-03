@@ -8,13 +8,16 @@ import {
 } from "./run.overflow-compaction.fixture.js";
 import {
   loadRunOverflowCompactionHarness,
+  mockedClassifyFailoverReason,
   mockedCoerceToFailoverError,
   mockedCompactDirect,
   mockedContextEngine,
   mockedDescribeFailoverError,
   mockedEvaluateContextWindowGuard,
   mockedGlobalHookRunner,
+  mockedIsFailoverAssistantError,
   mockedPickFallbackThinkingLevel,
+  mockedRecordSessionExpiredRouteHealth,
   mockedResolveContextWindowInfo,
   mockedResolveFailoverStatus,
   mockedRunContextEngineMaintenance,
@@ -77,6 +80,82 @@ describe("runEmbeddedPiAgent overflow compaction trigger routing", () => {
       expect.objectContaining({
         authProfileId: "test-profile",
         authProfileIdSource: "auto",
+      }),
+    );
+  });
+
+  it("records prompt-side session_expired failures into child route health", async () => {
+    const promptError = new Error("session_expired: conversation id not found");
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(makeAttemptResult({ promptError }));
+    mockedDescribeFailoverError.mockImplementation((err: unknown) => ({
+      message: err instanceof Error ? err.message : String(err),
+      reason: "session_expired",
+      status: 410,
+      code: "session_expired",
+    }));
+
+    await expect(
+      runEmbeddedPiAgent({
+        ...overflowBaseRunParams,
+        sessionKey: "agent:main:subagent:expired-conversation",
+        runId: "run-session-expired-prompt",
+      }),
+    ).rejects.toThrow("session_expired");
+
+    expect(mockedRecordSessionExpiredRouteHealth).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "session_expired: conversation id not found",
+        statusCode: 410,
+        childSessionKey: "agent:main:subagent:expired-conversation",
+        runId: "run-session-expired-prompt",
+        requesterSessionKey: "agent:main:subagent:expired-conversation",
+        provider: expect.objectContaining({
+          providerId: "anthropic",
+          modelId: "test-model",
+          authProfileKey: "test-profile",
+          credentialSource: "test",
+          credentialBucket: "api-key",
+        }),
+      }),
+    );
+  });
+
+  it("records assistant-side session_expired failures into child route health", async () => {
+    mockedClassifyFailoverReason.mockReturnValue("session_expired");
+    mockedIsFailoverAssistantError.mockReturnValue(true);
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        assistantTexts: [],
+        lastAssistant: {
+          role: "assistant",
+          content: [],
+          stopReason: "error",
+          errorMessage: "session_expired: oauth token was revoked",
+          provider: "openai-codex",
+          model: "gpt-5.4",
+        } as never,
+      }),
+    );
+
+    await runEmbeddedPiAgent({
+      ...overflowBaseRunParams,
+      sessionKey: "agent:main:subagent:expired-auth",
+      runId: "run-session-expired-assistant",
+    });
+
+    expect(mockedRecordSessionExpiredRouteHealth).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "session_expired: oauth token was revoked",
+        childSessionKey: "agent:main:subagent:expired-auth",
+        runId: "run-session-expired-assistant",
+        requesterSessionKey: "agent:main:subagent:expired-auth",
+        provider: expect.objectContaining({
+          providerId: "openai-codex",
+          modelId: "gpt-5.4",
+          authProfileKey: "test-profile",
+          credentialSource: "test",
+          credentialBucket: "api-key",
+        }),
       }),
     );
   });

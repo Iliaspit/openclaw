@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +7,13 @@ import {
   getCachedPluginJitiLoader,
   type PluginJitiLoaderCache,
 } from "../plugins/jiti-loader-cache.js";
+import type { PluginManifestRecord } from "../plugins/manifest-registry.js";
+import {
+  PUBLIC_SURFACE_SOURCE_EXTENSIONS,
+  normalizeBundledPluginArtifactSubpath,
+  resolveBundledPluginSourcePublicSurfacePath,
+  resolveBundledPluginPublicSurfacePath,
+} from "../plugins/public-surface-runtime.js";
 import { resolveLoaderPackageRoot } from "../plugins/sdk-alias.js";
 import {
   loadBundledPluginPublicSurfaceModuleSync as loadBundledPluginPublicSurfaceModuleSyncLight,
@@ -13,30 +21,11 @@ import {
   resetFacadeLoaderStateForTest,
   type FacadeModuleLocation,
 } from "./facade-loader.js";
-import {
-  createFacadeResolutionKey as createFacadeResolutionKeyShared,
-  resolveBundledFacadeModuleLocation,
-  resolveCachedFacadeModuleLocation,
-  resolveRegistryPluginModuleLocationFromRecords,
-} from "./facade-resolution-shared.js";
 export {
   createLazyFacadeArrayValue,
   createLazyFacadeObjectValue,
   listImportedBundledPluginFacadeIds,
 } from "./facade-loader.js";
-
-export function createLazyFacadeValue<TFacade extends object, K extends keyof TFacade>(
-  loadFacadeModule: () => TFacade,
-  key: K,
-): TFacade[K] {
-  return ((...args: unknown[]) => {
-    const value = loadFacadeModule()[key];
-    if (typeof value !== "function") {
-      return value;
-    }
-    return (value as (...innerArgs: unknown[]) => unknown)(...args);
-  }) as TFacade[K];
-}
 
 const OPENCLAW_PACKAGE_ROOT =
   resolveLoaderPackageRoot({
@@ -59,7 +48,38 @@ function createFacadeResolutionKey(params: {
   env?: NodeJS.ProcessEnv;
 }): string {
   const bundledPluginsDir = resolveBundledPluginsDir(params.env ?? process.env);
-  return createFacadeResolutionKeyShared({ ...params, bundledPluginsDir });
+  return `${params.dirName}::${params.artifactBasename}::${bundledPluginsDir ? path.resolve(bundledPluginsDir) : "<default>"}`;
+}
+
+function resolveRegistryPluginModuleLocationFromRegistry(params: {
+  registry: readonly Pick<PluginManifestRecord, "id" | "rootDir" | "channels">[];
+  dirName: string;
+  artifactBasename: string;
+}): { modulePath: string; boundaryRoot: string } | null {
+  type RegistryRecord = (typeof params.registry)[number];
+  const tiers: Array<(plugin: RegistryRecord) => boolean> = [
+    (plugin) => plugin.id === params.dirName,
+    (plugin) => path.basename(plugin.rootDir) === params.dirName,
+    (plugin) => plugin.channels.includes(params.dirName),
+  ];
+  const artifactBasename = normalizeBundledPluginArtifactSubpath(params.artifactBasename);
+  const sourceBaseName = artifactBasename.replace(/\.js$/u, "");
+  for (const matchFn of tiers) {
+    for (const record of params.registry.filter(matchFn)) {
+      const rootDir = path.resolve(record.rootDir);
+      const builtCandidate = path.join(rootDir, artifactBasename);
+      if (fs.existsSync(builtCandidate)) {
+        return { modulePath: builtCandidate, boundaryRoot: rootDir };
+      }
+      for (const ext of PUBLIC_SURFACE_SOURCE_EXTENSIONS) {
+        const sourceCandidate = path.join(rootDir, `${sourceBaseName}${ext}`);
+        if (fs.existsSync(sourceCandidate)) {
+          return { modulePath: sourceCandidate, boundaryRoot: rootDir };
+        }
+      }
+    }
+  }
+  return null;
 }
 
 function resolveRegistryPluginModuleLocation(params: {
@@ -79,14 +99,46 @@ function resolveFacadeModuleLocationUncached(params: {
   env?: NodeJS.ProcessEnv;
 }): { modulePath: string; boundaryRoot: string } | null {
   const bundledPluginsDir = resolveBundledPluginsDir(params.env ?? process.env);
-  const bundledLocation = resolveBundledFacadeModuleLocation({
-    ...params,
-    currentModulePath: CURRENT_MODULE_PATH,
-    packageRoot: OPENCLAW_PACKAGE_ROOT,
-    bundledPluginsDir,
+  const preferSource = !CURRENT_MODULE_PATH.includes(`${path.sep}dist${path.sep}`);
+  if (preferSource) {
+    const modulePath =
+      resolveBundledPluginSourcePublicSurfacePath({
+        ...params,
+        sourceRoot: bundledPluginsDir ?? path.resolve(OPENCLAW_PACKAGE_ROOT, "extensions"),
+      }) ??
+      resolveBundledPluginPublicSurfacePath({
+        rootDir: OPENCLAW_PACKAGE_ROOT,
+        env: params.env,
+        ...(bundledPluginsDir ? { bundledPluginsDir } : {}),
+        dirName: params.dirName,
+        artifactBasename: params.artifactBasename,
+      });
+    if (modulePath) {
+      return {
+        modulePath,
+        boundaryRoot:
+          bundledPluginsDir && modulePath.startsWith(path.resolve(bundledPluginsDir) + path.sep)
+            ? path.resolve(bundledPluginsDir)
+            : OPENCLAW_PACKAGE_ROOT,
+      };
+    }
+    return resolveRegistryPluginModuleLocation(params);
+  }
+  const modulePath = resolveBundledPluginPublicSurfacePath({
+    rootDir: OPENCLAW_PACKAGE_ROOT,
+    env: params.env,
+    ...(bundledPluginsDir ? { bundledPluginsDir } : {}),
+    dirName: params.dirName,
+    artifactBasename: params.artifactBasename,
   });
-  if (bundledLocation) {
-    return bundledLocation;
+  if (modulePath) {
+    return {
+      modulePath,
+      boundaryRoot:
+        bundledPluginsDir && modulePath.startsWith(path.resolve(bundledPluginsDir) + path.sep)
+          ? path.resolve(bundledPluginsDir)
+          : OPENCLAW_PACKAGE_ROOT,
+    };
   }
   return resolveRegistryPluginModuleLocation(params);
 }
@@ -96,11 +148,13 @@ function resolveFacadeModuleLocation(params: {
   artifactBasename: string;
   env?: NodeJS.ProcessEnv;
 }): { modulePath: string; boundaryRoot: string } | null {
-  return resolveCachedFacadeModuleLocation({
-    cache: cachedFacadeModuleLocationsByKey,
-    key: createFacadeResolutionKey(params),
-    resolve: () => resolveFacadeModuleLocationUncached(params),
-  });
+  const key = createFacadeResolutionKey(params);
+  if (cachedFacadeModuleLocationsByKey.has(key)) {
+    return cachedFacadeModuleLocationsByKey.get(key) ?? null;
+  }
+  const resolved = resolveFacadeModuleLocationUncached(params);
+  cachedFacadeModuleLocationsByKey.set(key, resolved);
+  return resolved;
 }
 
 type BundledPluginPublicSurfaceParams = {
@@ -185,7 +239,6 @@ function buildFacadeActivationCheckParams(
   };
 }
 
-// oxlint-disable-next-line typescript/no-unnecessary-type-parameters -- Dynamic facade loaders use caller-supplied module surface types.
 export function loadBundledPluginPublicSurfaceModuleSync<T extends object>(
   params: BundledPluginPublicSurfaceParams,
 ): T {
@@ -216,7 +269,6 @@ export function canLoadActivatedBundledPluginPublicSurface(params: {
   ).allowed;
 }
 
-// oxlint-disable-next-line typescript/no-unnecessary-type-parameters -- Dynamic facade loaders use caller-supplied module surface types.
 export function loadActivatedBundledPluginPublicSurfaceModuleSync<T extends object>(params: {
   dirName: string;
   artifactBasename: string;
@@ -228,7 +280,6 @@ export function loadActivatedBundledPluginPublicSurfaceModuleSync<T extends obje
   return loadBundledPluginPublicSurfaceModuleSync<T>(params);
 }
 
-// oxlint-disable-next-line typescript/no-unnecessary-type-parameters -- Dynamic facade loaders use caller-supplied module surface types.
 export function tryLoadActivatedBundledPluginPublicSurfaceModuleSync<T extends object>(params: {
   dirName: string;
   artifactBasename: string;
@@ -253,7 +304,7 @@ export function resetFacadeRuntimeStateForTest(): void {
 
 export const __testing = {
   loadFacadeModuleAtLocationSync,
-  resolveRegistryPluginModuleLocationFromRegistry: resolveRegistryPluginModuleLocationFromRecords,
+  resolveRegistryPluginModuleLocationFromRegistry,
   resolveFacadeModuleLocation,
   evaluateBundledPluginPublicSurfaceAccess: ((
     ...args: Parameters<

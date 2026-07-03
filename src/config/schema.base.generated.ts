@@ -17238,7 +17238,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                 enum: ["self", "tree", "agent", "all"],
                 title: "Session Tools Visibility",
                 description:
-                  'Controls which sessions can be targeted by sessions_list/sessions_history/sessions_send. ("tree" default = current session + spawned subagent sessions; "self" = only current; "agent" = any session in the current agent id; "all" = any session; cross-agent still requires tools.agentToAgent).',
+                  'Controls which sessions can be targeted by sessions_list/sessions_history/sessions_send. ("all" default = any session; "self" = only current; "tree" = current session + spawned subagent sessions; "agent" = any session in the current agent id; cross-agent still requires tools.agentToAgent).',
               },
             },
             additionalProperties: false,
@@ -17386,7 +17386,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                 type: "boolean",
                 title: "Enable Agent-to-Agent Tool",
                 description:
-                  "Enables the agent_to_agent tool surface so one agent can invoke another agent at runtime. Keep off in simple deployments and enable only when orchestration value outweighs complexity.",
+                  "Enables the agent-to-agent tool surface so one agent can invoke another agent at runtime. Defaults to enabled so trusted PM1–PM4 coordination works without local config drift.",
               },
               allow: {
                 type: "array",
@@ -17395,13 +17395,13 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                 },
                 title: "Agent-to-Agent Target Allowlist",
                 description:
-                  "Allowlist of target agent IDs permitted for agent_to_agent calls when orchestration is enabled. Use explicit allowlists to avoid uncontrolled cross-agent call graphs.",
+                  "Allowlist of agent IDs or patterns permitted for agent-to-agent calls when orchestration is enabled. Defaults to PM1, PM2, PM3, and PM4.",
               },
             },
             additionalProperties: false,
             title: "Agent-to-Agent Tool Access",
             description:
-              "Policy for allowing agent-to-agent tool calls and constraining which target agents can be reached. Keep disabled or tightly scoped unless cross-agent orchestration is intentionally enabled.",
+              "Policy for allowing agent-to-agent tool calls and constraining which target agents can be reached. Defaults allow PM1–PM4 orchestration; tighten or disable this in shared deployments.",
           },
           elevated: {
             type: "object",
@@ -17709,6 +17709,21 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
               },
             },
             additionalProperties: false,
+          },
+          catalog: {
+            type: "object",
+            properties: {
+              enabled: {
+                type: "boolean",
+                title: "Enable Catalog Tool",
+                description:
+                  "Enables the built-in `catalog` tool when the active workspace contains the catalog CLI entrypoint. Leave this off in non-Astino workspaces so the tool is not advertised where the backing script is absent.",
+              },
+            },
+            additionalProperties: false,
+            title: "Catalog Tool",
+            description:
+              "Native catalog tool registration for repo file-summary lookups backed by the workspace catalog CLI. Enable this only in workspaces that provide `scripts/openclaw-catalog/catalog.mjs`.",
           },
           experimental: {
             type: "object",
@@ -24178,6 +24193,16 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       help: 'Optional allowlist of model ids (e.g. "gpt-5.4" or "openai/gpt-5.4").',
       tags: ["access", "tools"],
     },
+    "tools.catalog": {
+      label: "Catalog Tool",
+      help: "Native catalog tool registration for repo file-summary lookups backed by the workspace catalog CLI. Enable this only in workspaces that provide `scripts/openclaw-catalog/catalog.mjs`.",
+      tags: ["tools"],
+    },
+    "tools.catalog.enabled": {
+      label: "Enable Catalog Tool",
+      help: "Enables the built-in `catalog` tool when the active workspace contains the catalog CLI entrypoint. Leave this off in non-Astino workspaces so the tool is not advertised where the backing script is absent.",
+      tags: ["tools"],
+    },
     "tools.loopDetection.enabled": {
       label: "Tool-loop Detection",
       help: "Enable repetitive tool-call loop detection and backoff safety checks (default: false).",
@@ -24230,7 +24255,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "tools.sessions.visibility": {
       label: "Session Tools Visibility",
-      help: 'Controls which sessions can be targeted by sessions_list/sessions_history/sessions_send. ("tree" default = current session + spawned subagent sessions; "self" = only current; "agent" = any session in the current agent id; "all" = any session; cross-agent still requires tools.agentToAgent).',
+      help: 'Controls which sessions can be targeted by sessions_list/sessions_history/sessions_send. ("all" default = any session; "self" = only current; "tree" = current session + spawned subagent sessions; "agent" = any session in the current agent id; cross-agent still requires tools.agentToAgent).',
       tags: ["storage", "tools"],
     },
     "tools.exec.notifyOnExit": {
@@ -24270,17 +24295,17 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "tools.agentToAgent": {
       label: "Agent-to-Agent Tool Access",
-      help: "Policy for allowing agent-to-agent tool calls and constraining which target agents can be reached. Keep disabled or tightly scoped unless cross-agent orchestration is intentionally enabled.",
+      help: "Policy for allowing agent-to-agent tool calls and constraining which target agents can be reached. Defaults allow PM1–PM4 orchestration; tighten or disable this in shared deployments.",
       tags: ["tools"],
     },
     "tools.agentToAgent.enabled": {
       label: "Enable Agent-to-Agent Tool",
-      help: "Enables the agent_to_agent tool surface so one agent can invoke another agent at runtime. Keep off in simple deployments and enable only when orchestration value outweighs complexity.",
+      help: "Enables the agent-to-agent tool surface so one agent can invoke another agent at runtime. Defaults to enabled so trusted PM1–PM4 coordination works without local config drift.",
       tags: ["tools"],
     },
     "tools.agentToAgent.allow": {
       label: "Agent-to-Agent Target Allowlist",
-      help: "Allowlist of target agent IDs permitted for agent_to_agent calls when orchestration is enabled. Use explicit allowlists to avoid uncontrolled cross-agent call graphs.",
+      help: "Allowlist of agent IDs or patterns permitted for agent-to-agent calls when orchestration is enabled. Defaults to PM1, PM2, PM3, and PM4.",
       tags: ["access", "tools"],
     },
     "tools.experimental": {

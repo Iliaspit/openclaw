@@ -2,7 +2,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { assessChildRouteHealth, resetChildRouteHealthForTest } from "./child-route-health.js";
 import { wrapEditToolWithRecovery } from "./pi-tools.host-edit.js";
+import { createHostWorkspaceEditTool } from "./pi-tools.read.js";
 import type { AnyAgentTool } from "./pi-tools.types.js";
 import type { SandboxFsBridge, SandboxFsStat } from "./sandbox/fs-bridge.js";
 
@@ -63,8 +65,15 @@ function createInMemoryBridge(root: string, files: Map<string, string>): Sandbox
 
 describe("edit tool recovery hardening", () => {
   let tmpDir = "";
+  const previousStateDir = process.env.OPENCLAW_STATE_DIR;
 
   afterEach(async () => {
+    resetChildRouteHealthForTest();
+    if (previousStateDir === undefined) {
+      delete process.env.OPENCLAW_STATE_DIR;
+    } else {
+      process.env.OPENCLAW_STATE_DIR = previousStateDir;
+    }
     if (tmpDir) {
       await fs.rm(tmpDir, { recursive: true, force: true });
       tmpDir = "";
@@ -75,6 +84,10 @@ describe("edit tool recovery hardening", () => {
     root: string;
     readFile: (absolutePath: string) => Promise<string>;
     execute: AnyAgentTool["execute"];
+    routeHealth?: {
+      childSessionKey?: string;
+      runId?: string;
+    };
   }) {
     const base = {
       name: "edit",
@@ -83,6 +96,7 @@ describe("edit tool recovery hardening", () => {
     return wrapEditToolWithRecovery(base, {
       root: params.root,
       readFile: params.readFile,
+      routeHealth: params.routeHealth,
     });
   }
 
@@ -107,6 +121,125 @@ describe("edit tool recovery hardening", () => {
         undefined,
       ),
     ).rejects.toThrow(/Current file contents:\nactual current content/);
+  });
+
+  it("records repeated child edit misses as route-health edit_failure_threshold", async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-edit-recovery-"));
+    process.env.OPENCLAW_STATE_DIR = path.join(tmpDir, "state");
+    resetChildRouteHealthForTest();
+    const filePath = path.join(tmpDir, "demo.txt");
+    const childSessionKey = "agent:main:subagent:editor";
+    const runId = "run-editor-1";
+    await fs.writeFile(filePath, "actual current content", "utf-8");
+
+    const tool = createRecoveredEditTool({
+      root: tmpDir,
+      readFile: (absolutePath) => fs.readFile(absolutePath, "utf-8"),
+      routeHealth: { childSessionKey, runId },
+      execute: async () => {
+        throw new Error(
+          "Could not find the exact text in demo.txt. The old text must match exactly including all whitespace and newlines.",
+        );
+      },
+    });
+
+    for (const attempt of [1, 2]) {
+      await expect(
+        tool.execute(
+          `call-${attempt}`,
+          { path: filePath, edits: [{ oldText: "missing", newText: "replacement" }] },
+          undefined,
+        ),
+      ).rejects.toThrow(/Current file contents:\nactual current content/);
+    }
+
+    await expect(
+      assessChildRouteHealth(childSessionKey, {
+        routeIntent: "followup_reuse",
+        targetMethod: "sessions_send",
+        requesterSessionKey: "agent:main:main",
+        childTargetKind: "subagent",
+        registryRecord: { childSessionKey, runId },
+      }),
+    ).resolves.toMatchObject({ status: "ok" });
+
+    await expect(
+      tool.execute(
+        "call-3",
+        { path: filePath, edits: [{ oldText: "missing", newText: "replacement" }] },
+        undefined,
+      ),
+    ).rejects.toThrow(/Current file contents:\nactual current content/);
+
+    await expect(
+      assessChildRouteHealth(childSessionKey, {
+        routeIntent: "followup_reuse",
+        targetMethod: "sessions_send",
+        requesterSessionKey: "agent:main:main",
+        childTargetKind: "subagent",
+        registryRecord: { childSessionKey, runId },
+      }),
+    ).resolves.toMatchObject({
+      status: "unhealthy",
+      codes: ["edit_failure_threshold"],
+      recommendedAction: "spawn_fresh",
+    });
+  });
+
+  it("records host missing oldText validation errors as route-health edit_failure_threshold", async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-edit-recovery-"));
+    process.env.OPENCLAW_STATE_DIR = path.join(tmpDir, "state");
+    resetChildRouteHealthForTest();
+    const filePath = path.join(tmpDir, "demo.txt");
+    const childSessionKey = "agent:main:subagent:editor";
+    const runId = "run-editor-1";
+    await fs.writeFile(filePath, "actual current content", "utf-8");
+
+    const tool = createHostWorkspaceEditTool(tmpDir, {
+      routeHealth: { childSessionKey, runId },
+    });
+
+    for (const attempt of [1, 2]) {
+      await expect(
+        tool.execute(
+          `call-missing-${attempt}`,
+          { path: filePath, edits: [{ newText: "replacement" }] },
+          undefined,
+        ),
+      ).rejects.toThrow(/Current file contents:\nactual current content/);
+    }
+
+    await expect(
+      assessChildRouteHealth(childSessionKey, {
+        routeIntent: "followup_reuse",
+        targetMethod: "sessions_send",
+        requesterSessionKey: "agent:main:main",
+        childTargetKind: "subagent",
+        registryRecord: { childSessionKey, runId },
+      }),
+    ).resolves.toMatchObject({ status: "ok" });
+
+    await expect(
+      tool.execute(
+        "call-missing-3",
+        { path: filePath, edits: [{ newText: "replacement" }] },
+        undefined,
+      ),
+    ).rejects.toThrow(/Current file contents:\nactual current content/);
+
+    await expect(
+      assessChildRouteHealth(childSessionKey, {
+        routeIntent: "followup_reuse",
+        targetMethod: "sessions_send",
+        requesterSessionKey: "agent:main:main",
+        childTargetKind: "subagent",
+        registryRecord: { childSessionKey, runId },
+      }),
+    ).resolves.toMatchObject({
+      status: "unhealthy",
+      codes: ["edit_failure_threshold"],
+      recommendedAction: "spawn_fresh",
+    });
   });
 
   it("recovers success after a post-write throw when CRLF output contains newText and oldText is only a substring", async () => {

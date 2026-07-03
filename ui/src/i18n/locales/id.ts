@@ -661,6 +661,8 @@ export const id: TranslationMap = {
     hideCronSessions: "Sembunyikan sesi cron",
     showCronSessions: "Tampilkan sesi cron",
     showCronSessionsHidden: "Tampilkan sesi cron ({count} disembunyikan)",
+    sessionSelectTopLevel: "Top-level agents",
+    sessionSelectOther: "Spawned and other sessions",
     onboardingDisabled: "Dinonaktifkan selama penyiapan",
   },
   languages: {

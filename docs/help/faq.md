@@ -448,13 +448,12 @@ lives on the [First-run FAQ](/help/faq-first-run).
 
   <Accordion title="Docker feels limited - how do I enable full features?">
     The default image is security-first and runs as the `node` user, so it does not
-    include system packages, Homebrew, or bundled browsers. For a fuller setup:
+    include Homebrew or arbitrary system packages. For a fuller setup:
 
     - Persist `/home/node` with `OPENCLAW_HOME_VOLUME` so caches survive.
     - Bake system deps into the image with `OPENCLAW_DOCKER_APT_PACKAGES`.
-    - Install Playwright browsers via the bundled CLI:
-      `node /app/node_modules/playwright-core/cli.js install chromium`
-    - Set `PLAYWRIGHT_BROWSERS_PATH` and ensure the path is persisted.
+    - Keep `OPENCLAW_INSTALL_BROWSER=1` for local Docker builds so Chromium and
+      its Linux shared-library deps are baked into the image.
 
     Docs: [Docker](/install/docker), [Browser](/tools/browser).
 

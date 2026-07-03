@@ -31,21 +31,51 @@ function listConfiguredAgentIds(cfg: OpenClawConfig): string[] {
   const defaultId = normalizeAgentId(resolveDefaultAgentId(cfg));
   ids.add(defaultId);
 
+  const listIdsInOrder: string[] = [];
+  const listOrderSeen = new Set<string>();
   for (const entry of cfg.agents?.list ?? []) {
-    if (entry?.id) {
-      ids.add(normalizeAgentId(entry.id));
+    if (!entry?.id) {
+      continue;
     }
+    const id = normalizeAgentId(entry.id);
+    if (!id || listOrderSeen.has(id)) {
+      continue;
+    }
+    listOrderSeen.add(id);
+    listIdsInOrder.push(id);
+    ids.add(id);
   }
 
   for (const id of listExistingAgentIdsFromDisk()) {
     ids.add(id);
   }
 
-  const sorted = Array.from(ids).filter(Boolean);
-  sorted.sort((a, b) => a.localeCompare(b));
-  return sorted.includes(defaultId)
-    ? [defaultId, ...sorted.filter((id) => id !== defaultId)]
-    : sorted;
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const pushId = (id: string) => {
+    if (!id || seen.has(id) || !ids.has(id)) {
+      return;
+    }
+    seen.add(id);
+    ordered.push(id);
+  };
+
+  const declaredIds = new Set(listIdsInOrder);
+  if (!declaredIds.has(defaultId)) {
+    pushId(defaultId);
+  }
+  for (const id of listIdsInOrder) {
+    pushId(id);
+  }
+
+  const remainder = Array.from(ids)
+    .filter((id) => !seen.has(id))
+    .sort((a, b) => a.localeCompare(b));
+  for (const id of remainder) {
+    pushId(id);
+  }
+
+  return ordered;
 }
 
 export function listGatewayAgentsBasic(cfg: OpenClawConfig): {

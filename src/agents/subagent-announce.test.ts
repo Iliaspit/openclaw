@@ -25,11 +25,13 @@ let mockConfig: ReturnType<(typeof import("../config/config.js"))["loadConfig"]>
 
 const { subagentRegistryRuntimeMock } = vi.hoisted(() => ({
   subagentRegistryRuntimeMock: {
-    shouldIgnorePostCompletionAnnounceForSession: vi.fn(() => false),
+    shouldIgnorePostCompletionAnnounceForRun: vi.fn((_runId: string) => false),
+    shouldIgnorePostCompletionAnnounceForSession: vi.fn((_sessionKey: string) => false),
     isSubagentSessionRunActive: vi.fn(() => true),
     countActiveDescendantRuns: vi.fn(() => 0),
     countPendingDescendantRuns: vi.fn(() => 0),
     countPendingDescendantRunsExcludingRun: vi.fn(() => 0),
+    getLatestSubagentRunByChildSessionKey: vi.fn(() => undefined),
     listSubagentRunsForRequester: vi.fn(() => []),
     replaceSubagentRunAfterSteer: vi.fn(() => true),
     resolveRequesterForChildSession: vi.fn(() => null),
@@ -51,7 +53,7 @@ vi.mock("./subagent-announce.runtime.js", () => ({
     waitForEmbeddedPiRunEndMock(sessionId, timeoutMs),
 }));
 
-vi.mock("./tools/agent-step.js", () => ({
+vi.mock("./subagent-output-latest-reply.js", () => ({
   readLatestAssistantReply: (params?: unknown) => readLatestAssistantReplyMock(params),
 }));
 
@@ -234,6 +236,8 @@ describe("subagent announce seam flow", () => {
         scope: "per-sender",
       },
     };
+    subagentRegistryRuntimeMock.shouldIgnorePostCompletionAnnounceForRun.mockReset();
+    subagentRegistryRuntimeMock.shouldIgnorePostCompletionAnnounceForRun.mockReturnValue(false);
     subagentRegistryRuntimeMock.shouldIgnorePostCompletionAnnounceForSession.mockReset();
     subagentRegistryRuntimeMock.shouldIgnorePostCompletionAnnounceForSession.mockReturnValue(false);
     subagentRegistryRuntimeMock.isSubagentSessionRunActive.mockReset();
@@ -244,6 +248,8 @@ describe("subagent announce seam flow", () => {
     subagentRegistryRuntimeMock.countPendingDescendantRuns.mockReturnValue(0);
     subagentRegistryRuntimeMock.countPendingDescendantRunsExcludingRun.mockReset();
     subagentRegistryRuntimeMock.countPendingDescendantRunsExcludingRun.mockReturnValue(0);
+    subagentRegistryRuntimeMock.getLatestSubagentRunByChildSessionKey.mockReset();
+    subagentRegistryRuntimeMock.getLatestSubagentRunByChildSessionKey.mockReturnValue(undefined);
     subagentRegistryRuntimeMock.listSubagentRunsForRequester.mockReset();
     subagentRegistryRuntimeMock.listSubagentRunsForRequester.mockReturnValue([]);
     subagentRegistryRuntimeMock.replaceSubagentRunAfterSteer.mockReset();
@@ -311,6 +317,58 @@ describe("subagent announce seam flow", () => {
       },
       timeoutMs: 10_000,
     });
+  });
+
+  it("suppresses late top-level completion for a child superseded by fresh reroute", async () => {
+    subagentRegistryRuntimeMock.shouldIgnorePostCompletionAnnounceForRun.mockImplementation(
+      (runId: string) => runId === "run-old-worker",
+    );
+
+    const didAnnounce = await runSubagentAnnounceFlow({
+      childSessionKey: "agent:main:subagent:old-worker",
+      childRunId: "run-old-worker",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "old worker task",
+      timeoutMs: 10,
+      cleanup: "keep",
+      waitForCompletion: false,
+      startedAt: 10,
+      endedAt: 20,
+      outcome: { status: "ok" },
+      roundOneReply: "stale old completion",
+    });
+
+    expect(didAnnounce).toBe(true);
+    expect(agentSpy).not.toHaveBeenCalled();
+    expect(sessionsDeleteSpy).not.toHaveBeenCalled();
+    expect(
+      subagentRegistryRuntimeMock.shouldIgnorePostCompletionAnnounceForRun,
+    ).toHaveBeenCalledWith("run-old-worker");
+  });
+
+  it("formats direct announce messages with hydrated receipt content", async () => {
+    const didAnnounce = await runSubagentAnnounceFlow({
+      childSessionKey: "agent:main:subagent:receipt-worker",
+      childRunId: "run-receipt-worker",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "receipt worker task",
+      timeoutMs: 10,
+      cleanup: "keep",
+      waitForCompletion: false,
+      startedAt: 10,
+      endedAt: 20,
+      outcome: { status: "ok" },
+      roundOneReply: "full child result for requester",
+    });
+
+    expect(didAnnounce).toBe(true);
+    expect(agentSpy).toHaveBeenCalledTimes(1);
+    const message = ((agentSpy.mock.calls[0]?.[0] as AgentCallRequest | undefined)?.params
+      ?.message ?? "") as string;
+    expect(message).toContain("full child result for requester");
+    expect(message).not.toContain("Full child result is available in receipt");
   });
 
   it("uses origin.provider for channel-specific queue settings in active announce delivery", async () => {

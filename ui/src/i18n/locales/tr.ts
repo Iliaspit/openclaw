@@ -666,6 +666,8 @@ export const tr: TranslationMap = {
     hideCronSessions: "Cron oturumlarını gizle",
     showCronSessions: "Cron oturumlarını göster",
     showCronSessionsHidden: "Cron oturumlarını göster ({count} gizli)",
+    sessionSelectTopLevel: "Top-level agents",
+    sessionSelectOther: "Spawned and other sessions",
     onboardingDisabled: "Kurulum sırasında devre dışı",
   },
   languages: {

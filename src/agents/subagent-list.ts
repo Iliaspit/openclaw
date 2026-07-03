@@ -13,6 +13,7 @@ import {
 } from "../shared/subagents-format.js";
 import { resolveModelDisplayName, resolveModelDisplayRef } from "./model-selection-display.js";
 import { subagentRuns } from "./subagent-registry-memory.js";
+import { isSubagentRunNewer } from "./subagent-registry-ordering.js";
 import { countPendingDescendantRunsFromRuns } from "./subagent-registry-queries.js";
 import {
   getSubagentSessionRuntimeMs,
@@ -87,7 +88,7 @@ export function buildLatestSubagentRunIndex(runs: Map<string, SubagentRunRecord>
       continue;
     }
     const existing = latestByChildSessionKey.get(childSessionKey);
-    if (!existing || entry.createdAt > existing.createdAt) {
+    if (!existing || isSubagentRunNewer(entry, existing)) {
       latestByChildSessionKey.set(childSessionKey, entry);
     }
   }

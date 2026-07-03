@@ -10,11 +10,6 @@ import {
   normalizeOptionalLowercaseString,
 } from "../shared/string-coerce.js";
 import { listDeliverableMessageChannels } from "../utils/message-channel.js";
-import type { BootstrapMode } from "./bootstrap-mode.js";
-import {
-  buildFullBootstrapPromptLines,
-  buildLimitedBootstrapPromptLines,
-} from "./bootstrap-prompt.js";
 import type { ResolvedTimeFormat } from "./date-time.js";
 import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
 import type {
@@ -186,34 +181,6 @@ function buildMemorySection(params: {
   });
 }
 
-export function buildAgentUserPromptPrefix(params: {
-  bootstrapMode?: BootstrapMode;
-}): string | undefined {
-  if (!params.bootstrapMode || params.bootstrapMode === "none") {
-    return undefined;
-  }
-  if (params.bootstrapMode === "limited") {
-    return [
-      "[Bootstrap pending]",
-      ...buildLimitedBootstrapPromptLines({
-        introLine:
-          "Bootstrap is still pending for this workspace, but this run cannot safely complete the full BOOTSTRAP.md workflow here.",
-        nextStepLine:
-          "Typical next steps include switching to a primary interactive run with normal workspace access or having the user complete the canonical BOOTSTRAP.md deletion afterward.",
-      }),
-    ].join("\n");
-  }
-  return [
-    "[Bootstrap pending]",
-    ...buildFullBootstrapPromptLines({
-      readLine:
-        "Please read BOOTSTRAP.md from the workspace and follow it before replying normally.",
-      firstReplyLine:
-        "Your first user-visible reply for a bootstrap-pending workspace must follow BOOTSTRAP.md, not a generic greeting.",
-    }),
-  ].join("\n");
-}
-
 function buildUserIdentitySection(ownerLine: string | undefined, isMinimal: boolean) {
   if (!ownerLine || isMinimal) {
     return [];
@@ -302,13 +269,10 @@ function buildExecutionBiasSection(params: { isMinimal: boolean }) {
   }
   return [
     "## Execution Bias",
-    "- Actionable request: act in this turn.",
-    "- Non-final turn: use tools to advance, or ask for the one missing decision that blocks safe progress.",
-    "- Continue until done or genuinely blocked; do not finish with a plan/promise when tools can move it forward.",
-    "- Weak/empty tool result: vary query, path, command, or source before concluding.",
-    "- Mutable facts need live checks: files, git, clocks, versions, services, processes, package state.",
-    "- Final answer needs evidence: test/build/lint, screenshot, inspection, tool output, or a named blocker.",
-    "- Longer work: brief progress update, then keep going; use background work or sub-agents when they fit.",
+    "If the user asks you to do the work, start doing it in the same turn.",
+    "Use a real tool call or concrete action first when the task is actionable; do not stop at a plan or promise-to-act reply.",
+    "Commentary-only turns are incomplete when tools are available and the next action is clear.",
+    "If the work will take multiple steps or a while to finish, send one short progress update before or while acting.",
     "",
   ];
 }
@@ -343,20 +307,12 @@ function buildMessagingSection(params: {
   if (params.isMinimal) {
     return [];
   }
-  const hasSessionsSpawn = params.availableTools.has("sessions_spawn");
-  const hasSubagents = params.availableTools.has("subagents");
-  const subagentOrchestrationGuidance = hasSessionsSpawn
-    ? hasSubagents
-      ? '- Sub-agent orchestration → use `sessions_spawn(...)` to start delegated work; omit `context` for isolated children, set `context:"fork"` only when the child needs the current transcript; use `subagents(action=list|steer|kill)` for tracked completion, restarting finished child sessions, and managing already-spawned children.'
-      : '- Sub-agent orchestration → use `sessions_spawn(...)` to start delegated work; omit `context` for isolated children, set `context:"fork"` only when the child needs the current transcript.'
-    : hasSubagents
-      ? "- Sub-agent orchestration → use `subagents(action=list|steer|kill)` for tracked completion, restarting finished child sessions, and managing already-spawned children."
-      : "";
   return [
     "## Messaging",
     "- Reply in current session → automatically routes to the source channel (Signal, Telegram, etc.)",
     "- Cross-session messaging → use sessions_send(sessionKey, message) for plain inter-session messages",
-    subagentOrchestrationGuidance,
+    "- Sub-agent orchestration (tracked completion, restarting finished child sessions, kill/list control) → use subagents(action=list|steer|kill) and sessions_spawn",
+    "- Do not use fire-and-forget sessions_send to stale or untracked subagent sessions; it cannot create tracked child completion events. Spawn a fresh child when the old child is no longer tracked.",
     `- Runtime-generated completion events may ask for a user update. Rewrite those in your normal assistant voice and send the update (do not forward raw internal metadata or default to ${SILENT_REPLY_TOKEN}).`,
     "- Never use exec/curl for provider messaging; OpenClaw handles all routing internally.",
     params.availableTools.has("message")
@@ -364,7 +320,7 @@ function buildMessagingSection(params: {
           "",
           "### message tool",
           "- Use `message` for proactive sends + channel actions (polls, reactions, etc.).",
-          "- For `action=send`, include `target` and `message`.",
+          "- For `action=send`, include `to` and `message`.",
           `- If multiple channels are configured, pass \`channel\` (${params.messageChannelOptions}).`,
           `- If you use \`message\` (\`action=send\`) to deliver your user-visible reply, respond with ONLY: ${SILENT_REPLY_TOKEN} (avoid duplicate replies).`,
           params.inlineButtonsEnabled
@@ -502,8 +458,8 @@ export function buildAgentSystemPrompt(params: {
     sessions_send:
       "Send a plain message to another session; not the tracked child-orchestration path",
     sessions_spawn: acpSpawnRuntimeEnabled
-      ? 'Spawn a sub-agent or ACP coding session; defaults to isolated, native subagents may use context="fork" when current transcript context is required (runtime="acp" requires `agentId` unless `acp.defaultAgent` is configured; ACP harness ids follow acp.allowedAgents, not agents_list)'
-      : 'Spawn an isolated sub-agent session; use context="fork" only when current transcript context is required',
+      ? 'Spawn an isolated sub-agent or ACP coding session (runtime="acp" requires `agentId` unless `acp.defaultAgent` is configured; ACP harness ids follow acp.allowedAgents, not agents_list)'
+      : "Spawn an isolated sub-agent session",
     subagents:
       "List, steer, or kill tracked sub-agent runs for this requester session, including restarting finished child sessions",
     session_status:
@@ -697,18 +653,16 @@ export function buildAgentSystemPrompt(params: {
           "- cron: manage cron jobs and wake events (use for reminders; when scheduling a reminder, write the systemEvent text as something that will read like a reminder when it fires, and mention that it is a reminder depending on the time gap between setting and firing; include recent context in reminder text if appropriate)",
           "- sessions_list: list sessions",
           "- sessions_history: fetch session history",
-          "- sessions_send: send a plain message to another session",
+          "- sessions_send: send a plain message to another session; not the tracked child-orchestration path",
           "- subagents: list/steer/kill tracked sub-agent runs (including restarting finished child sessions)",
           '- session_status: show usage/time/model state and answer "what model are we using?"',
         ].join("\n"),
     "TOOLS.md does not control tool availability; it is user guidance for how to use external tools.",
     `For long waits, avoid rapid poll loops: use ${execToolName} with enough yieldMs or ${processToolName}(action=poll, timeout=<ms>).`,
-    "If a task is more complex or takes longer, spawn a sub-agent. Completion is push-based: it will auto-announce when done. Re-task existing child sessions through subagents when you need that same tracked completion path.",
-    'Sub-agents start isolated by default. Use `sessions_spawn` with `context:"fork"` only when the child needs the current transcript context; otherwise omit `context` or use `context:"isolated"`.',
+    "If a task is more complex or takes longer, spawn a sub-agent. Completion is push-based: it will auto-announce when done. Re-task existing child sessions through subagents when you need that same tracked completion path. If the old child is no longer tracked, spawn a fresh child instead of using fire-and-forget sessions_send.",
     ...(acpHarnessSpawnAllowed
       ? [
-          'For requests like "do this in claude code/cursor/gemini" or similar ACP harnesses, treat it as ACP harness intent and call `sessions_spawn` with `runtime: "acp"`.',
-          "For Codex conversation binding/control, prefer the native Codex app-server plugin path (`/codex bind`, `/codex threads`, `/codex resume`). Use ACP for Codex only when the user explicitly asks for ACP/`/acp`, or for background child sessions where native Codex runtime spawn is not exposed.",
+          'For requests like "do this in codex/claude code/cursor/gemini" or similar ACP harnesses, treat it as ACP harness intent and call `sessions_spawn` with `runtime: "acp"`.',
           'On Discord, default ACP harness requests to thread-bound persistent sessions (`thread: true`, `mode: "session"`) unless the user asks otherwise.',
           "Set `agentId` explicitly unless `acp.defaultAgent` is configured, and do not route ACP harness requests through `subagents`/`agents_list` or local PTY exec flows.",
           'For ACP harness thread spawns, do not call `message` with `action=thread-create`; use `sessions_spawn` (`runtime: "acp"`, `thread: true`) as the single thread creation path.',
@@ -791,6 +745,7 @@ export function buildAgentSystemPrompt(params: {
     "## Workspace",
     `Your working directory is: ${displayWorkspaceDir}`,
     workspaceGuidance,
+    "If INCIDENTS.md exists in this workspace, consult it before investigating an issue or making a requested change. Append a concise entry when this work reveals or resolves an incident.",
     ...workspaceNotes,
     "",
     ...docsSection,

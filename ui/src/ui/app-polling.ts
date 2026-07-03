@@ -4,12 +4,16 @@ import type { LogsState } from "./controllers/logs.ts";
 import { loadLogs } from "./controllers/logs.ts";
 import type { NodesState } from "./controllers/nodes.ts";
 import { loadNodes } from "./controllers/nodes.ts";
+import type { QueueHealthState } from "./controllers/queue.ts";
+import { loadQueueHealth } from "./controllers/queue.ts";
 
 type PollingHost = {
   nodesPollInterval: number | null;
+  queueHealthPollInterval: number | null;
   logsPollInterval: number | null;
   debugPollInterval: number | null;
   tab: string;
+  connected?: boolean;
 };
 
 export function startNodesPolling(host: PollingHost) {
@@ -28,6 +32,26 @@ export function stopNodesPolling(host: PollingHost) {
   }
   clearInterval(host.nodesPollInterval);
   host.nodesPollInterval = null;
+}
+
+export function startQueueHealthPolling(host: PollingHost) {
+  if (host.queueHealthPollInterval != null) {
+    return;
+  }
+  host.queueHealthPollInterval = window.setInterval(() => {
+    if (!host.connected || host.tab !== "chat") {
+      return;
+    }
+    void loadQueueHealth(host as unknown as QueueHealthState, { quiet: true });
+  }, 2000);
+}
+
+export function stopQueueHealthPolling(host: PollingHost) {
+  if (host.queueHealthPollInterval == null) {
+    return;
+  }
+  clearInterval(host.queueHealthPollInterval);
+  host.queueHealthPollInterval = null;
 }
 
 export function startLogsPolling(host: PollingHost) {

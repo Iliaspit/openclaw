@@ -106,7 +106,7 @@ struct OpenClawChatComposer: View {
         .labelsHidden()
         .pickerStyle(.menu)
         .controlSize(.small)
-        .frame(maxWidth: 140, alignment: .leading)
+        .frame(maxWidth: self.usesDesktopComposerChrome ? 96 : 140, alignment: .leading)
     }
 
     private var modelPicker: some View {
@@ -124,7 +124,7 @@ struct OpenClawChatComposer: View {
         .labelsHidden()
         .pickerStyle(.menu)
         .controlSize(.small)
-        .frame(maxWidth: 240, alignment: .leading)
+        .frame(maxWidth: self.usesDesktopComposerChrome ? 180 : 240, alignment: .leading)
         .help("Model")
     }
 
@@ -151,14 +151,29 @@ struct OpenClawChatComposer: View {
     @ViewBuilder
     private var attachmentPicker: some View {
         #if os(macOS)
-        Button {
-            self.pickFilesMac()
-        } label: {
-            Image(systemName: "paperclip")
+        if self.usesDesktopComposerChrome {
+            Button {
+                self.pickFilesMac()
+            } label: {
+                Image(systemName: "plus")
+            }
+            .help("Add Image")
+            .buttonStyle(.plain)
+            .controlSize(.small)
+            .padding(6)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.white.opacity(0.06)))
+        } else {
+            Button {
+                self.pickFilesMac()
+            } label: {
+                Image(systemName: "paperclip")
+            }
+            .help("Add Image")
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
-        .help("Add Image")
-        .buttonStyle(.bordered)
-        .controlSize(.small)
         #else
         PhotosPicker(selection: self.$pickerItems, maxSelectionCount: 8, matching: .images) {
             Image(systemName: "paperclip")
@@ -213,7 +228,7 @@ struct OpenClawChatComposer: View {
         VStack(alignment: .leading, spacing: 8) {
             self.editorOverlay
 
-            if !self.isComposerCompacted {
+            if !self.isComposerCompacted || self.usesDesktopComposerChrome {
                 Rectangle()
                     .fill(OpenClawChatTheme.divider)
                     .frame(height: 1)
@@ -221,11 +236,24 @@ struct OpenClawChatComposer: View {
             }
 
             HStack(alignment: .center, spacing: 8) {
-                if self.showsConnectionPill {
-                    self.connectionPill
+                if self.usesDesktopComposerChrome {
+                    self.attachmentPicker
+                    if self.showsConnectionPill {
+                        self.connectionPill
+                    }
+                    Spacer(minLength: 0)
+                    if self.viewModel.showsModelPicker {
+                        self.modelPicker
+                    }
+                    self.thinkingPicker
+                    self.sendButton
+                } else {
+                    if self.showsConnectionPill {
+                        self.connectionPill
+                    }
+                    Spacer(minLength: 0)
+                    self.sendButton
                 }
-                Spacer(minLength: 0)
-                self.sendButton
             }
         }
         .padding(.horizontal, 10)
@@ -265,7 +293,7 @@ struct OpenClawChatComposer: View {
     private var editorOverlay: some View {
         ZStack(alignment: .topLeading) {
             if self.viewModel.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text("Message OpenClaw…")
+                Text(self.usesDesktopComposerChrome ? "Ask OpenClaw anything…" : "Message OpenClaw…")
                     .foregroundStyle(.tertiary)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 4)
@@ -349,7 +377,7 @@ struct OpenClawChatComposer: View {
     }
 
     private var showsToolbar: Bool {
-        self.style == .standard && !self.isComposerCompacted
+        self.style == .standard && !self.isComposerCompacted && !self.usesDesktopComposerChrome
     }
 
     private var showsAttachments: Bool {
@@ -357,7 +385,7 @@ struct OpenClawChatComposer: View {
     }
 
     private var showsConnectionPill: Bool {
-        self.style == .standard && !self.isComposerCompacted
+        self.style == .standard && (!self.isComposerCompacted || self.usesDesktopComposerChrome)
     }
 
     private var composerPadding: CGFloat {
@@ -369,11 +397,11 @@ struct OpenClawChatComposer: View {
     }
 
     private var textMinHeight: CGFloat {
-        self.style == .onboarding ? 24 : 28
+        self.usesDesktopComposerChrome ? 44 : (self.style == .onboarding ? 24 : 28)
     }
 
     private var textMaxHeight: CGFloat {
-        self.style == .onboarding ? 52 : 64
+        self.usesDesktopComposerChrome ? 140 : (self.style == .onboarding ? 52 : 64)
     }
 
     private var isComposerCompacted: Bool {
@@ -381,6 +409,14 @@ struct OpenClawChatComposer: View {
         false
         #else
         self.style == .standard && self.isFocused
+        #endif
+    }
+
+    private var usesDesktopComposerChrome: Bool {
+        #if os(macOS)
+        self.style == .standard
+        #else
+        false
         #endif
     }
 

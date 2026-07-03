@@ -6,6 +6,21 @@ import {
 } from "../../../agents/internal-event-contract.js";
 import { InputProvenanceSchema, NonEmptyString, SessionLabelString } from "./primitives.js";
 
+export const AgentResultReceiptSchema = Type.Object(
+  {
+    id: NonEmptyString,
+    kind: Type.Literal("subagent_result"),
+    childSessionKey: Type.Optional(Type.String()),
+    childRunId: Type.Optional(Type.String()),
+    requiredRead: Type.Optional(Type.Boolean()),
+    bytes: Type.Optional(Type.Number({ minimum: 0 })),
+    sha256: Type.Optional(Type.String()),
+    capturedAt: Type.Optional(Type.Number({ minimum: 0 })),
+    hydrated: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
 export const AgentInternalEventSchema = Type.Object(
   {
     type: Type.Literal(AGENT_INTERNAL_EVENT_TYPE_TASK_COMPLETION),
@@ -17,6 +32,7 @@ export const AgentInternalEventSchema = Type.Object(
     status: Type.String({ enum: [...AGENT_INTERNAL_EVENT_STATUSES] }),
     statusLabel: Type.String(),
     result: Type.String(),
+    resultReceipt: Type.Optional(AgentResultReceiptSchema),
     mediaUrls: Type.Optional(Type.Array(Type.String())),
     statsLine: Type.Optional(Type.String()),
     replyInstruction: Type.String(),

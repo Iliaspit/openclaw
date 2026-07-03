@@ -143,9 +143,91 @@ Allowlist:
 - Sandbox inheritance guard: if the requester session is sandboxed, `sessions_spawn` rejects targets that would run unsandboxed.
 - `agents.defaults.subagents.requireAgentId` / `agents.list[].subagents.requireAgentId`: when true, block `sessions_spawn` calls that omit `agentId` (forces explicit profile selection). Default: false.
 
+This spawn allowlist is separate from `tools.agentToAgent.allow`, which controls
+generic cross-agent session access. A requester can still re-task its own
+tracked child sessions with `sessions_send` or `subagents` even when the child
+uses a different `agentId`, because that path is scoped by sub-agent ownership
+metadata.
+
+If a child run is no longer tracked by the sub-agent registry (for example after
+cleanup/TTL or a gateway restart that cannot restore the run), fire-and-forget
+`sessions_send` to that stale sub-agent session is rejected. Use
+`subagents(action="steer")` while the child is still listed, or start a fresh
+tracked child with `sessions_spawn`.
+
+### Unhealthy Child Handoff Runbook
+
+Use this checklist when a planner or orchestrator appears idle after assigning
+work to a sub-agent.
+
+Start by separating queue pressure from runtime health:
+
+- `queue.health` is an operator visibility signal. It can show a lane with
+  backlog, overload, or recent runtime issues, but it is not the routing
+  authority for child reuse.
+- A lane with `queueAhead=0` can still be blocked if the child session has a
+  runtime issue such as context overflow, a terminal lifecycle error, or a
+  stale child route.
+- A real queue backlog usually shows active or waiting command tasks. An
+  unhealthy child handoff usually shows no useful tracked child completion path
+  for the parent to wait on.
+
+Check Docker/runtime logs and visibility summaries first:
+
+- `openclaw logs --json` (or `docker compose logs -f openclaw-gateway` in
+  container mode) can surface closed codes without guessing.
+- `context_overflow` or `input token count exceeds`, `context window exceeded`,
+  `prompt is too long` usually indicate context pressure before child reuse
+  is attempted again.
+- `auth_profile_session_expired`, `child_conversation_expired`, `child_session_unhealthy`,
+  and plain `session_expired` indicate session/route expiry patterns.
+- `recommendedAction` or `sessions_send` records with
+  `spawn_fresh` usually indicate unsafe child reuse for that request path.
+
+Safe recovery rules:
+
+- If logs show `context_overflow`, start a fresh tracked child after short
+  recovery steps instead of retrying a large follow-up on the old session.
+- Provider auth expiry should be treated as `auth_profile_session_expired`.
+  Re-authenticate the affected provider profile before retrying long work, e.g.:
+  - `openclaw onboard --auth-choice openai-codex`
+  - `openclaw models auth login --provider openai-codex`
+- Child conversation expiry should be treated as `child_conversation_expired`.
+  Start a fresh tracked child with a bounded handoff packet instead of retrying
+  the old child session.
+- Ambiguous upstream `session_expired` without clear auth or child-conversation
+  evidence should stop for inspection instead of spawning a fresh child
+  automatically.
+- Use a healthy configured fallback profile only when the failing provider scope is
+  blocked and fallback is explicitly healthy for this route.
+
+Decision rule for manual child replacement:
+
+- If the target child is still controlled, prefer `subagents(action="steer")`
+  for a tracked follow-up.
+- If the child is stale, untracked, context-bloated, or rejected with
+  `recommendedAction: "spawn_fresh"`, start a fresh tracked child for the same
+  semantic role and include a bounded handoff summary. Do not ask the unhealthy
+  child to summarize itself first.
+- If a child path includes `openai-codex` session expiry, do not bypass that
+  credential scope by spawning another child on the same failed profile.
+- Do not retry the same stale child with `sessions_send(timeoutSeconds: 1)`, the
+  default timeout, or another bounded wait. Those retries cannot create a
+  tracked child completion receipt for the parent.
+
 Discovery:
 
-- Use `agents_list` to see which agent ids are currently allowed for `sessions_spawn`.
+- Use `agents_list` to see which agent ids are currently allowed for
+  `sessions_spawn`.
+
+Queue-health interpretation:
+
+- `queue.health` can show lane overload and runtime issue summaries, but it is
+  visibility-only for routing. A child rejection is decided from route-health
+  evidence, not queue depth.
+- If required attachments were cleaned up or are not reachable by the
+  replacement child, stop or mark the handoff as degraded so the planner can
+  reason about the missing context.
 
 Auto-archive:
 

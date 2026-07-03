@@ -1505,6 +1505,85 @@ export function registerControlUiAndPairingSuite(): void {
     }
   });
 
+  test("allows local shared-auth backend and CLI reconnects with approved host metadata", async () => {
+    const { approveDevicePairing, getPairedDevice, listDevicePairing, requestDevicePairing } =
+      await import("../infra/device-pairing.js");
+    const { publicKeyRawBase64UrlFromPem } = await import("../infra/device-identity.js");
+    const { server, ws, port, prevToken } = await startControlUiServerWithClient("secret");
+    ws.close();
+
+    try {
+      const cases = [
+        {
+          name: "backend",
+          identityPrefix: "openclaw-local-backend-metadata-",
+          client: {
+            id: GATEWAY_CLIENT_NAMES.GATEWAY_CLIENT,
+            version: "1.0.0",
+            platform: "linux",
+            mode: GATEWAY_CLIENT_MODES.BACKEND,
+          },
+        },
+        {
+          name: "cli",
+          identityPrefix: "openclaw-local-cli-metadata-",
+          client: {
+            id: GATEWAY_CLIENT_NAMES.CLI,
+            version: "1.0.0",
+            platform: "linux",
+            mode: GATEWAY_CLIENT_MODES.CLI,
+          },
+        },
+      ];
+
+      for (const testCase of cases) {
+        const { identity, identityPath } = await createOperatorIdentityFixture(
+          testCase.identityPrefix,
+        );
+        const pending = await requestDevicePairing({
+          deviceId: identity.deviceId,
+          publicKey: publicKeyRawBase64UrlFromPem(identity.publicKeyPem),
+          role: "operator",
+          scopes: ["operator.admin"],
+          clientId: testCase.client.id,
+          clientMode: testCase.client.mode,
+          displayName: `${testCase.name}-host`,
+          platform: "darwin",
+        });
+        await approveDevicePairing(pending.request.requestId, {
+          callerScopes: ["operator.admin"],
+        });
+
+        const wsReconnect = await openWs(port);
+        try {
+          const nonce = await readConnectChallengeNonce(wsReconnect);
+          const reconnect = await connectReq(wsReconnect, {
+            token: "secret",
+            scopes: ["operator.admin"],
+            client: testCase.client,
+            device: await buildSignedDeviceForIdentity({
+              identityPath,
+              client: testCase.client,
+              scopes: ["operator.admin"],
+              nonce,
+            }),
+          });
+          expect(reconnect.ok).toBe(true);
+
+          const paired = await getPairedDevice(identity.deviceId);
+          expect(paired?.platform).toBe("darwin");
+          const list = await listDevicePairing();
+          expect(list.pending.filter((entry) => entry.deviceId === identity.deviceId)).toEqual([]);
+        } finally {
+          wsReconnect.close();
+        }
+      }
+    } finally {
+      await server.close();
+      restoreGatewayToken(prevToken);
+    }
+  });
+
   test("auto-approves Docker-style CLI connects on loopback with a private host header", async () => {
     const { getPairedDevice, listDevicePairing } = await import("../infra/device-pairing.js");
     const { server, port, prevToken } = await startControlUiServer("secret");

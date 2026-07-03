@@ -1,4 +1,3 @@
-// @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 const {
   refreshChatMock,
@@ -35,8 +34,8 @@ import {
   isCronSessionKey,
   parseSessionKey,
   resolveAssistantAttachmentAuthToken,
-  resolveSessionOptionGroups,
   resolveSessionDisplayName,
+  resolveSessionOptionGroups,
   switchChatSession,
 } from "./app-render.helpers.ts";
 import type { AppViewState } from "./app-view-state.ts";
@@ -48,47 +47,134 @@ function row(overrides: Partial<SessionRow> & { key: string }): SessionRow {
   return { kind: "direct", updatedAt: 0, ...overrides };
 }
 
-function labelsForSessionOptions(params: {
-  sessionKey: string;
-  sessions?: SessionRow[];
-  agentsList?: AppViewState["agentsList"];
-}) {
-  const groups = resolveSessionOptionGroups(
-    {
+describe("resolveSessionOptionGroups", () => {
+  it("orders generic agent groups by agents.list and puts primary sessions ahead of subagents", () => {
+    const state = {
       sessionsHideCron: true,
-      agentsList: params.agentsList ?? null,
-    } as AppViewState,
-    params.sessionKey,
-    {
-      ts: 0,
-      path: "",
-      count: params.sessions?.length ?? 0,
-      defaults: { modelProvider: "openai", model: "gpt-5", contextTokens: null },
-      sessions: params.sessions ?? [],
-    },
-  );
-  return groups.flatMap((group) => group.options.map((option) => option.label));
-}
+      hello: {
+        snapshot: {
+          sessionDefaults: { mainKey: "main" },
+        },
+      },
+      agentsList: {
+        agents: [{ id: "alpha" }, { id: "main" }],
+        defaultId: "alpha",
+      },
+    } as unknown as AppViewState;
 
-function createSettings(): AppViewState["settings"] {
-  return {
-    gatewayUrl: "",
-    token: "",
-    locale: "en",
-    sessionKey: "main",
-    lastActiveSessionKey: "main",
-    theme: "claw",
-    themeMode: "dark",
-    splitRatio: 0.6,
-    navWidth: 280,
-    navCollapsed: false,
-    navGroupsCollapsed: {},
-    borderRadius: 50,
-    chatFocusMode: false,
-    chatShowThinking: false,
-    chatShowToolCalls: true,
-  };
-}
+    const sessions: SessionsListResult = {
+      ts: 1,
+      path: "/p",
+      count: 3,
+      defaults: { model: null, modelProvider: null, contextTokens: null },
+      sessions: [
+        row({
+          key: "agent:alpha:subagent:aaa",
+          updatedAt: 100,
+        }),
+        row({
+          key: "agent:alpha:main",
+          updatedAt: 50,
+        }),
+        row({
+          key: "agent:main:main",
+          updatedAt: 10,
+        }),
+      ],
+    };
+
+    const groups = resolveSessionOptionGroups(state, "agent:alpha:main", sessions);
+    expect(groups.map((g) => g.id)).toEqual(["top-level-agents", "spawned-and-other-sessions"]);
+    expect(groups[0]?.options.map((o) => o.key)).toEqual(["agent:alpha:main", "agent:main:main"]);
+    expect(groups[1]?.options.map((o) => o.key)).toEqual(["agent:alpha:subagent:aaa"]);
+  });
+
+  it("keeps planner sessions and WhatsApp at the top while grouping support agent sessions", () => {
+    const state = {
+      sessionsHideCron: true,
+      hello: {
+        snapshot: {
+          sessionDefaults: { mainKey: "main" },
+        },
+      },
+      agentsList: {
+        agents: [
+          { id: "planner", name: "Planner 1" },
+          { id: "planner-helper", name: "Planner Helper" },
+          { id: "implementer", name: "Implementer" },
+          { id: "tester", name: "Tester" },
+          { id: "reviewer", name: "Reviewer" },
+          { id: "qa", name: "QA" },
+          { id: "planner-2", name: "Planner 2" },
+          { id: "planner-3", name: "Planner 3" },
+          { id: "planner-4", name: "Planner 4" },
+        ],
+        defaultId: "planner",
+      },
+    } as unknown as AppViewState;
+
+    const sessions: SessionsListResult = {
+      ts: 1,
+      path: "/p",
+      count: 12,
+      defaults: { model: null, modelProvider: null, contextTokens: null },
+      sessions: [
+        row({ key: "agent:planner-helper:main", updatedAt: 100 }),
+        row({ key: "agent:implementer:main", updatedAt: 95 }),
+        row({ key: "agent:tester:main", updatedAt: 90 }),
+        row({ key: "agent:reviewer:main", updatedAt: 85 }),
+        row({ key: "agent:qa:main", updatedAt: 80 }),
+        row({ key: "agent:planner:main", updatedAt: 75 }),
+        row({ key: "agent:planner-2:main", updatedAt: 70 }),
+        row({ key: "agent:planner-3:main", updatedAt: 65 }),
+        row({ key: "agent:planner-4:main", updatedAt: 60 }),
+        row({ key: "whatsapp:g-agent-planner-whatsapp-direct-+447476642296", updatedAt: 55 }),
+        row({
+          key: "agent:implementer:subagent:impl-1",
+          updatedAt: 50,
+          label: "impl-phase3-fixture-migration-1",
+        }),
+        row({
+          key: "agent:planner-helper:subagent:helper-1",
+          updatedAt: 45,
+          label: "helper-phase3-fixture-migration-1",
+        }),
+      ],
+    };
+
+    const groups = resolveSessionOptionGroups(state, "agent:planner:main", sessions);
+    expect(groups.map((g) => g.id)).toEqual([
+      "top-level-agents",
+      "agent:planner-helper",
+      "agent:implementer",
+      "agent:tester",
+      "agent:reviewer",
+      "agent:qa",
+    ]);
+    expect(groups[0]?.options.map((o) => o.key)).toEqual([
+      "agent:planner:main",
+      "agent:planner-2:main",
+      "agent:planner-3:main",
+      "agent:planner-4:main",
+      "whatsapp:g-agent-planner-whatsapp-direct-+447476642296",
+    ]);
+    expect(groups[0]?.options.map((o) => o.label)).toEqual([
+      "Planner 1 (planner)",
+      "Planner 2 (planner-2)",
+      "Planner 3 (planner-3)",
+      "Planner 4 (planner-4)",
+      "WhatsApp · +447476642296",
+    ]);
+    expect(groups[1]?.options.map((o) => o.key)).toEqual([
+      "agent:planner-helper:main",
+      "agent:planner-helper:subagent:helper-1",
+    ]);
+    expect(groups[2]?.options.map((o) => o.key)).toEqual([
+      "agent:implementer:main",
+      "agent:implementer:subagent:impl-1",
+    ]);
+  });
+});
 
 /* ================================================================
  *  parseSessionKey – low-level key → type / fallback mapping
@@ -179,20 +265,9 @@ describe("parseSessionKey", () => {
 });
 
 describe("resolveAssistantAttachmentAuthToken", () => {
-  it("prefers the paired device token when present", () => {
-    expect(
-      resolveAssistantAttachmentAuthToken({
-        hello: { auth: { deviceToken: "device-token" } } as AppViewState["hello"],
-        settings: { token: "session-token" } as AppViewState["settings"],
-        password: "shared-password",
-      }),
-    ).toBe("device-token");
-  });
-
   it("prefers the explicit gateway token when present", () => {
     expect(
       resolveAssistantAttachmentAuthToken({
-        hello: null,
         settings: { token: "session-token" } as AppViewState["settings"],
         password: "shared-password",
       }),
@@ -202,7 +277,6 @@ describe("resolveAssistantAttachmentAuthToken", () => {
   it("falls back to the shared password when token is blank", () => {
     expect(
       resolveAssistantAttachmentAuthToken({
-        hello: null,
         settings: { token: "   " } as AppViewState["settings"],
         password: "shared-password",
       }),
@@ -212,7 +286,6 @@ describe("resolveAssistantAttachmentAuthToken", () => {
   it("returns null when neither auth secret is available", () => {
     expect(
       resolveAssistantAttachmentAuthToken({
-        hello: null,
         settings: { token: "" } as AppViewState["settings"],
         password: "   ",
       }),
@@ -405,97 +478,25 @@ describe("isCronSessionKey", () => {
   });
 });
 
-describe("resolveSessionOptionGroups", () => {
-  it("prefers grouped session labels over display names", () => {
-    const sessionKey = "agent:main:subagent:4f2146de-887b-4176-9abe-91140082959b";
-    const labels = labelsForSessionOptions({
-      sessionKey,
-      sessions: [
-        row({
-          key: sessionKey,
-          label: "cron-config-check",
-          displayName: "webchat:g-agent-main-subagent-4f2146de-887b-4176-9abe-91140082959b",
-        }),
-      ],
-    });
-
-    expect(labels).toContain("Subagent: cron-config-check");
-    expect(labels).not.toContain(sessionKey);
-    expect(labels).not.toContain(
-      "subagent:4f2146de-887b-4176-9abe-91140082959b · webchat:g-agent-main-subagent-4f2146de-887b-4176-9abe-91140082959b",
-    );
-  });
-
-  it("keeps scoped fallbacks for active grouped sessions without useful row metadata", () => {
-    const sessionKey = "agent:main:subagent:4f2146de-887b-4176-9abe-91140082959b";
-
-    expect(labelsForSessionOptions({ sessionKey })).toContain(
-      "subagent:4f2146de-887b-4176-9abe-91140082959b",
-    );
-    expect(
-      labelsForSessionOptions({
-        sessionKey,
-        sessions: [row({ key: sessionKey })],
-      }),
-    ).toContain("subagent:4f2146de-887b-4176-9abe-91140082959b");
-  });
-
-  it("disambiguates duplicate grouped labels with scoped suffixes", () => {
-    const labels = labelsForSessionOptions({
-      sessionKey: "agent:main:subagent:4f2146de-887b-4176-9abe-91140082959b",
-      sessions: [
-        row({
-          key: "agent:main:subagent:4f2146de-887b-4176-9abe-91140082959b",
-          label: "cron-config-check",
-        }),
-        row({
-          key: "agent:main:subagent:6fb8b84b-c31f-410f-b7df-1553c82e43c9",
-          label: "cron-config-check",
-        }),
-      ],
-    });
-
-    expect(labels).toContain(
-      "Subagent: cron-config-check · subagent:4f2146de-887b-4176-9abe-91140082959b",
-    );
-    expect(labels).toContain(
-      "Subagent: cron-config-check · subagent:6fb8b84b-c31f-410f-b7df-1553c82e43c9",
-    );
-    expect(labels).not.toContain("Subagent: cron-config-check");
-  });
-
-  it("uses agent group labels to keep duplicate main sessions unique", () => {
-    const labels = labelsForSessionOptions({
-      sessionKey: "agent:alpha:main",
-      agentsList: {
-        defaultId: "alpha",
-        mainKey: "agent:alpha:main",
-        scope: "all",
-        agents: [
-          { id: "alpha", name: "Deep Chat" },
-          { id: "beta", name: "Coding" },
-        ],
-      },
-      sessions: [
-        row({ key: "agent:alpha:main" }),
-        row({ key: "agent:beta:main" }),
-        row({
-          key: "agent:alpha:named-main",
-          label: "Deep Chat (alpha) / main",
-        }),
-      ],
-    });
-
-    expect(labels.filter((label) => label === "Deep Chat (alpha) / main")).toHaveLength(1);
-    expect(labels).toContain("Deep Chat (alpha) / main · named-main");
-    expect(labels).toContain("Coding (beta) / main");
-    expect(labels).not.toContain("main");
-  });
-});
-
 describe("switchChatSession", () => {
   it("refreshes the chat avatar after clearing session-scoped state", async () => {
-    const settings = createSettings();
+    const settings: AppViewState["settings"] = {
+      gatewayUrl: "",
+      token: "",
+      locale: "en",
+      sessionKey: "main",
+      lastActiveSessionKey: "main",
+      theme: "claw",
+      themeMode: "dark",
+      splitRatio: 0.6,
+      navWidth: 280,
+      navCollapsed: false,
+      navGroupsCollapsed: {},
+      borderRadius: 50,
+      chatFocusMode: false,
+      chatShowThinking: false,
+      chatShowToolCalls: true,
+    };
     const state = {
       sessionKey: "main",
       chatMessage: "draft",
@@ -556,7 +557,23 @@ describe("switchChatSession", () => {
   });
 
   it("does not force agentId=main for plain session keys", async () => {
-    const settings = createSettings();
+    const settings: AppViewState["settings"] = {
+      gatewayUrl: "",
+      token: "",
+      locale: "en",
+      sessionKey: "main",
+      lastActiveSessionKey: "main",
+      theme: "claw",
+      themeMode: "dark",
+      splitRatio: 0.6,
+      navWidth: 280,
+      navCollapsed: false,
+      navGroupsCollapsed: {},
+      borderRadius: 50,
+      chatFocusMode: false,
+      chatShowThinking: false,
+      chatShowToolCalls: true,
+    };
     const state = {
       sessionKey: "main",
       chatMessage: "",

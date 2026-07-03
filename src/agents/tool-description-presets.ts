@@ -3,7 +3,7 @@ export const PROCESS_TOOL_DISPLAY_SUMMARY = "Inspect and control running exec se
 export const CATALOG_TOOL_DISPLAY_SUMMARY = "Inspect repo file summaries.";
 export const CRON_TOOL_DISPLAY_SUMMARY = "Schedule cron jobs, reminders, and wake events.";
 export const SESSIONS_LIST_TOOL_DISPLAY_SUMMARY =
-  "List visible sessions with mailbox filters and optional previews.";
+  "List visible sessions and optional recent messages.";
 export const SESSIONS_HISTORY_TOOL_DISPLAY_SUMMARY =
   "Read sanitized message history for a visible session.";
 export const SESSIONS_SEND_TOOL_DISPLAY_SUMMARY = "Send a message to another visible session.";
@@ -13,8 +13,9 @@ export const UPDATE_PLAN_TOOL_DISPLAY_SUMMARY = "Track a short structured work p
 
 export function describeSessionsListTool(): string {
   return [
-    "List visible sessions with optional filters for kind, label, agentId, search, recent activity, derived titles, and last-message previews.",
-    "Use this to discover a target session before calling sessions_history or sessions_send.",
+    "List visible sessions with optional filters for kind, recent activity, and last messages.",
+    "Use this to discover a target session before calling sessions_history or sessions_send, or for debugging/intervention.",
+    "For sub-agent closeout after known child completions arrive, prefer tracked completion events and targeted sessions_history over broad session listings.",
   ].join(" ");
 }
 
@@ -30,15 +31,15 @@ export function describeSessionsSendTool(): string {
     "Send a message into another visible session by sessionKey or label.",
     "Use this for direct cross-session messaging; waits for the target run and returns the updated assistant reply when available.",
     "For spawned child-session orchestration with push-based completion, use `subagents(action=steer|kill|list)` or `sessions_spawn` instead of pairing `sessions_send` with `sessions_yield`.",
+    "Fire-and-forget delivery to stale/untracked subagent sessions is rejected because it cannot produce a tracked child completion event.",
   ].join(" ");
 }
 
 export function describeSessionsSpawnTool(): string {
   return [
-    'Spawn a clean isolated session by default with `runtime="subagent"` or `runtime="acp"`.',
+    'Spawn an isolated session with `runtime="subagent"` or `runtime="acp"`.',
     '`mode="run"` is one-shot and `mode="session"` is persistent or thread-bound.',
     "Subagents inherit the parent workspace directory automatically.",
-    'For native subagents only, set `context="fork"` when the child needs the current transcript context; otherwise omit it or use `context="isolated"`.',
     "Use this when the work should happen in a fresh child session instead of the current one.",
   ].join(" ");
 }

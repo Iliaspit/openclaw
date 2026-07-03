@@ -562,6 +562,79 @@ describe("readSessionMessages", () => {
     }
   });
 
+  test("surfaces sessions_yield custom messages as visible assistant status", () => {
+    const sessionId = "test-session-visible-yield";
+    const transcriptPath = path.join(tmpDir, `${sessionId}.jsonl`);
+    const lines = [
+      JSON.stringify({ type: "session", version: 1, id: sessionId }),
+      JSON.stringify({
+        type: "custom_message",
+        customType: "some.hidden.context",
+        content: "hidden custom context",
+        display: false,
+        id: "hidden-1",
+        timestamp: "2026-02-07T00:00:00.000Z",
+      }),
+      JSON.stringify({
+        type: "custom_message",
+        customType: "openclaw.sessions_yield",
+        content:
+          "Current status: waiting for tester.\n\n[Context: The previous turn ended intentionally via sessions_yield while waiting for a follow-up event.]",
+        display: false,
+        details: { source: "sessions_yield", message: "Current status: waiting for tester." },
+        id: "yield-1",
+        timestamp: "2026-02-07T00:01:00.000Z",
+      }),
+    ];
+    fs.writeFileSync(transcriptPath, lines.join("\n"), "utf-8");
+
+    const out = readSessionMessages(sessionId, storePath);
+
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      role: "assistant",
+      content: [{ type: "text", text: "Current status: waiting for tester." }],
+      __openclaw: {
+        id: "yield-1",
+        kind: "custom_message",
+        customType: "openclaw.sessions_yield",
+        seq: 1,
+      },
+    });
+    expect(JSON.stringify(out[0])).not.toContain("previous turn ended intentionally");
+  });
+
+  test("surfaces displayed custom messages from transcripts", () => {
+    const sessionId = "test-session-visible-custom-message";
+    const transcriptPath = path.join(tmpDir, `${sessionId}.jsonl`);
+    const lines = [
+      JSON.stringify({ type: "session", version: 1, id: sessionId }),
+      JSON.stringify({
+        type: "custom_message",
+        customType: "test.visible",
+        content: [{ type: "text", text: "Visible custom status" }],
+        display: true,
+        id: "custom-1",
+        timestamp: "2026-02-07T00:02:00.000Z",
+      }),
+    ];
+    fs.writeFileSync(transcriptPath, lines.join("\n"), "utf-8");
+
+    const out = readSessionMessages(sessionId, storePath);
+
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      role: "system",
+      content: [{ type: "text", text: "Visible custom status" }],
+      __openclaw: {
+        id: "custom-1",
+        kind: "custom_message",
+        customType: "test.visible",
+        seq: 1,
+      },
+    });
+  });
+
   test.each([
     {
       sessionId: "cross-agent-default-root",

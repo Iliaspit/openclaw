@@ -80,21 +80,6 @@ function waitForSessionMessageEvent(
   );
 }
 
-function waitForSessionsChangedMessagePhase(
-  ws: Awaited<ReturnType<Awaited<ReturnType<typeof createGatewaySuiteHarness>>["openWs"]>>,
-  sessionKey: string,
-) {
-  return onceMessage(
-    ws,
-    (message) =>
-      message.type === "event" &&
-      message.event === "sessions.changed" &&
-      (message.payload as { phase?: string; sessionKey?: string } | undefined)?.phase ===
-        "message" &&
-      (message.payload as { sessionKey?: string } | undefined)?.sessionKey === sessionKey,
-  );
-}
-
 async function emitTranscriptUpdateAndCollectEvents(params: {
   ws: Awaited<ReturnType<Awaited<ReturnType<typeof createGatewaySuiteHarness>>["openWs"]>>;
   sessionKey: string;
@@ -103,7 +88,6 @@ async function emitTranscriptUpdateAndCollectEvents(params: {
   messageId: string;
 }) {
   const messageEventPromise = waitForSessionMessageEvent(params.ws, params.sessionKey);
-  const changedEventPromise = waitForSessionsChangedMessagePhase(params.ws, params.sessionKey);
 
   emitSessionTranscriptUpdate({
     sessionFile: params.sessionFile,
@@ -112,11 +96,8 @@ async function emitTranscriptUpdateAndCollectEvents(params: {
     messageId: params.messageId,
   });
 
-  const [messageEvent, changedEvent] = await Promise.all([
-    messageEventPromise,
-    changedEventPromise,
-  ]);
-  return { messageEvent, changedEvent };
+  const messageEvent = await messageEventPromise;
+  return { messageEvent };
 }
 
 async function expectNoMessageWithin(params: {
@@ -289,7 +270,42 @@ describe("session.message websocket events", () => {
     }
   });
 
-  test("includes live usage metadata on session.message and sessions.changed transcript events", async () => {
+  test("does not broadcast sessions.changed for transcript-only updates", async () => {
+    const storePath = await createSessionStoreFile();
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main",
+          updatedAt: Date.now(),
+        },
+      },
+      storePath,
+    });
+
+    await withOperatorSessionSubscriber(async (ws) => {
+      await expectNoMessageWithin({
+        watch: () =>
+          onceMessage(
+            ws,
+            (message) =>
+              message.type === "event" &&
+              message.event === "sessions.changed" &&
+              (message.payload as { phase?: string } | undefined)?.phase === "message",
+            300,
+          ),
+        action: async () => {
+          const appended = await appendAssistantMessageToSessionTranscript({
+            sessionKey: "agent:main:main",
+            text: "no session reload churn",
+            storePath,
+          });
+          expect(appended.ok).toBe(true);
+        },
+      });
+    });
+  });
+
+  test("includes live usage metadata on session.message transcript events", async () => {
     const storePath = await createSessionStoreFile();
     await writeSessionStore({
       entries: {
@@ -330,7 +346,7 @@ describe("session.message websocket events", () => {
     );
 
     await withOperatorSessionSubscriber(async (ws) => {
-      const { messageEvent, changedEvent } = await emitTranscriptUpdateAndCollectEvents({
+      const { messageEvent } = await emitTranscriptUpdateAndCollectEvents({
         ws,
         sessionKey: "agent:main:main",
         sessionFile: transcriptPath,
@@ -348,22 +364,10 @@ describe("session.message websocket events", () => {
         modelProvider: "openai",
         model: "gpt-5.4",
       });
-      expect(changedEvent.payload).toMatchObject({
-        sessionKey: "agent:main:main",
-        phase: "message",
-        messageId: "msg-usage",
-        messageSeq: 1,
-        totalTokens: 2_400,
-        totalTokensFresh: true,
-        contextTokens: 123_456,
-        estimatedCostUsd: 0.0042,
-        modelProvider: "openai",
-        model: "gpt-5.4",
-      });
     });
   });
 
-  test("includes spawnedBy metadata on session.message and sessions.changed transcript events", async () => {
+  test("includes spawnedBy metadata on session.message transcript events", async () => {
     const storePath = await createSessionStoreFile();
     const transcriptPath = path.join(path.dirname(storePath), "sess-child.jsonl");
     await writeSessionStore({
@@ -410,17 +414,6 @@ describe("session.message websocket events", () => {
           (message.payload as { sessionKey?: string } | undefined)?.sessionKey ===
             "agent:main:child",
       );
-      const changedEventPromise = onceMessage(
-        ws,
-        (message) =>
-          message.type === "event" &&
-          message.event === "sessions.changed" &&
-          (message.payload as { phase?: string; sessionKey?: string } | undefined)?.phase ===
-            "message" &&
-          (message.payload as { sessionKey?: string } | undefined)?.sessionKey ===
-            "agent:main:child",
-      );
-
       emitSessionTranscriptUpdate({
         sessionFile: transcriptPath,
         sessionKey: "agent:main:child",
@@ -428,23 +421,9 @@ describe("session.message websocket events", () => {
         messageId: "msg-spawn",
       });
 
-      const [messageEvent, changedEvent] = await Promise.all([
-        messageEventPromise,
-        changedEventPromise,
-      ]);
+      const messageEvent = await messageEventPromise;
       expect(messageEvent.payload).toMatchObject({
         sessionKey: "agent:main:child",
-        spawnedBy: "agent:main:main",
-        spawnedWorkspaceDir: "/tmp/subagent-workspace",
-        forkedFromParent: true,
-        spawnDepth: 2,
-        subagentRole: "orchestrator",
-        subagentControlScope: "children",
-        parentSessionKey: "agent:main:main",
-      });
-      expect(changedEvent.payload).toMatchObject({
-        sessionKey: "agent:main:child",
-        phase: "message",
         spawnedBy: "agent:main:main",
         spawnedWorkspaceDir: "/tmp/subagent-workspace",
         forkedFromParent: true,
@@ -458,7 +437,7 @@ describe("session.message websocket events", () => {
     }
   });
 
-  test("includes route thread metadata on session.message and sessions.changed transcript events", async () => {
+  test("includes route thread metadata on session.message transcript events", async () => {
     const storePath = await createSessionStoreFile();
     const transcriptPath = path.join(path.dirname(storePath), "sess-thread.jsonl");
     await writeSessionStore({
@@ -490,7 +469,7 @@ describe("session.message websocket events", () => {
     );
 
     await withOperatorSessionSubscriber(async (ws) => {
-      const { messageEvent, changedEvent } = await emitTranscriptUpdateAndCollectEvents({
+      const { messageEvent } = await emitTranscriptUpdateAndCollectEvents({
         ws,
         sessionKey: "agent:main:main",
         sessionFile: transcriptPath,
@@ -499,14 +478,6 @@ describe("session.message websocket events", () => {
       });
       expect(messageEvent.payload).toMatchObject({
         sessionKey: "agent:main:main",
-        lastChannel: "telegram",
-        lastTo: "-100123",
-        lastAccountId: "acct-1",
-        lastThreadId: 42,
-      });
-      expect(changedEvent.payload).toMatchObject({
-        sessionKey: "agent:main:main",
-        phase: "message",
         lastChannel: "telegram",
         lastTo: "-100123",
         lastAccountId: "acct-1",

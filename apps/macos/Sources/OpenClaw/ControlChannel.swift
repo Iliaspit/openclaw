@@ -106,7 +106,6 @@ final class ControlChannel {
                     "control channel configure mode=remote " +
                         "target=\(target, privacy: .public) identitySet=\(idSet, privacy: .public)")
                 self.state = .connecting
-                _ = try await GatewayEndpointStore.shared.ensureRemoteControlTunnel()
                 await self.refreshEndpoint(reason: "configure")
             } catch {
                 self.state = .degraded(error.localizedDescription)
@@ -279,15 +278,6 @@ final class ControlChannel {
                     "reason=\(reasonText, privacy: .public)")
             if mode == .local {
                 GatewayProcessManager.shared.setActive(true)
-            }
-            if mode == .remote {
-                do {
-                    let port = try await GatewayEndpointStore.shared.ensureRemoteControlTunnel()
-                    self.logger.info("control channel recovery ensured SSH tunnel port=\(port, privacy: .public)")
-                } catch {
-                    self.logger.error(
-                        "control channel recovery tunnel failed \(error.localizedDescription, privacy: .public)")
-                }
             }
 
             await self.refreshEndpoint(reason: "recovery:\(reasonText)")

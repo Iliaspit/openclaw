@@ -14,7 +14,11 @@ import {
   buildAnnounceIdFromChildRun,
   buildAnnounceIdempotencyKey,
 } from "./announce-idempotency.js";
-import { formatAgentInternalEventsForPrompt, type AgentInternalEvent } from "./internal-events.js";
+import {
+  formatAgentInternalEventsForPrompt,
+  type AgentInternalEvent,
+  type AgentTaskCompletionInternalEvent,
+} from "./internal-events.js";
 import {
   deliverSubagentAnnouncement,
   loadRequesterSessionEntry,
@@ -42,6 +46,7 @@ import {
   waitForEmbeddedPiRunEnd,
 } from "./subagent-announce.runtime.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
+import { buildSubagentResultReceipt } from "./subagent-result-receipts.js";
 import type { SpawnSubagentMode } from "./subagent-spawn.types.js";
 import { isAnnounceSkip } from "./tools/sessions-send-tokens.js";
 
@@ -83,7 +88,7 @@ function buildAnnounceReplyInstruction(params: {
     return `Convert this completion into a concise internal orchestration update for your parent agent in your own words. Keep this internal context private (don't mention system/log/stats/session details or announce type). If this result is duplicate or no update is needed, reply ONLY: ${SILENT_REPLY_TOKEN}.`;
   }
   if (params.expectsCompletionMessage) {
-    return `A completed ${params.announceType} is ready for user delivery. Convert the result above into your normal assistant voice and send that user-facing update now. Keep this internal context private (don't mention system/log/stats/session details or announce type).`;
+    return `A completed ${params.announceType} is ready for user delivery. Convert the result above into your normal assistant voice and send that user-facing update now. Keep this internal context private (don't mention system/log/stats/session details or announce type). Reply ONLY: ${SILENT_REPLY_TOKEN} if this exact result was already delivered to the user, or if the only new content is an acknowledgement/status-only no-op with no user-visible task result.`;
   }
   return `A completed ${params.announceType} is ready for user delivery. Convert the result above into your normal assistant voice and send that user-facing update now. Keep this internal context private (don't mention system/log/stats/session details or announce type), and do not copy the internal event text verbatim. Reply ONLY: ${SILENT_REPLY_TOKEN} if this exact result was already delivered to the user in this same turn.`;
 }
@@ -222,6 +227,7 @@ export async function runSubagentAnnounceFlow(params: {
   childSessionKey: string;
   childRunId: string;
   requesterSessionKey: string;
+  requesterGeneration?: string;
   requesterOrigin?: DeliveryContext;
   requesterDisplayKey: string;
   task: string;
@@ -300,6 +306,28 @@ export async function runSubagentAnnounceFlow(params: {
       | undefined;
     try {
       subagentRegistryRuntime = await subagentAnnounceDeps.loadSubagentRegistryRuntime();
+      const currentRequesterGeneration =
+        subagentRegistryRuntime.getLatestSubagentRunByChildSessionKey(
+          targetRequesterSessionKey,
+        )?.runId;
+      if (
+        params.requesterGeneration &&
+        currentRequesterGeneration &&
+        currentRequesterGeneration !== params.requesterGeneration
+      ) {
+        return true;
+      }
+      if (
+        subagentRegistryRuntime.shouldIgnorePostCompletionAnnounceForRun?.(params.childRunId) ===
+        true
+      ) {
+        return true;
+      }
+      if (
+        subagentRegistryRuntime.shouldIgnorePostCompletionAnnounceForSession(params.childSessionKey)
+      ) {
+        return true;
+      }
       if (
         requesterDepth >= 1 &&
         subagentRegistryRuntime.shouldIgnorePostCompletionAnnounceForSession(
@@ -459,6 +487,15 @@ export async function runSubagentAnnounceFlow(params: {
     const taskLabel = params.label || params.task || "task";
     const announceSessionId = childSessionId || "unknown";
     const findings = childCompletionFindings || reply || "(no output)";
+    const resultReceipt =
+      announceType !== "cron job" && !childCompletionFindings && findings.trim() !== "(no output)"
+        ? buildSubagentResultReceipt({
+            childSessionKey: params.childSessionKey,
+            childRunId: params.childRunId,
+            resultText: findings,
+            capturedAt: params.endedAt,
+          })
+        : undefined;
 
     let requesterIsSubagent = requesterIsInternalSession();
     if (requesterIsSubagent) {
@@ -499,22 +536,37 @@ export async function runSubagentAnnounceFlow(params: {
       startedAt: params.startedAt,
       endedAt: params.endedAt,
     });
-    const internalEvents: AgentInternalEvent[] = [
-      {
-        type: "task_completion",
-        source: announceType === "cron job" ? "cron" : "subagent",
-        childSessionKey: params.childSessionKey,
-        childSessionId: announceSessionId,
-        announceType,
-        taskLabel,
-        status: outcome.status,
-        statusLabel,
-        result: findings,
-        statsLine,
-        replyInstruction,
-      },
-    ];
-    const triggerMessage = buildAnnounceSteerMessage(internalEvents);
+    const taskCompletionEvent: AgentTaskCompletionInternalEvent = {
+      type: "task_completion",
+      source: announceType === "cron job" ? "cron" : "subagent",
+      childSessionKey: params.childSessionKey,
+      childSessionId: announceSessionId,
+      announceType,
+      taskLabel,
+      status: outcome.status,
+      statusLabel,
+      result: resultReceipt
+        ? `Full child result is available in receipt ${resultReceipt.id}.`
+        : findings,
+      ...(resultReceipt ? { resultReceipt } : {}),
+      statsLine,
+      replyInstruction,
+    };
+    const internalEvents: AgentInternalEvent[] = [taskCompletionEvent];
+    const steerInternalEvents: AgentInternalEvent[] = resultReceipt
+      ? [
+          {
+            ...taskCompletionEvent,
+            result: findings,
+            resultReceipt: {
+              ...resultReceipt,
+              hydrated: true,
+            },
+          },
+        ]
+      : internalEvents;
+    const triggerMessage = buildAnnounceSteerMessage(steerInternalEvents);
+    const steerMessage = buildAnnounceSteerMessage(steerInternalEvents);
 
     // Send to the requester session. For nested subagents this is an internal
     // follow-up injection (deliver=false) so the orchestrator receives it.
@@ -539,7 +591,7 @@ export async function runSubagentAnnounceFlow(params: {
       requesterSessionKey: targetRequesterSessionKey,
       announceId,
       triggerMessage,
-      steerMessage: triggerMessage,
+      steerMessage,
       internalEvents,
       summaryLine: taskLabel,
       requesterSessionOrigin: targetRequesterOrigin,

@@ -160,7 +160,10 @@ type ResolveProviderRequestPolicyConfigParams = {
   callerHeaders?: Record<string, string>;
   precedence?: ProviderRequestHeaderPrecedence;
   authHeader?: boolean;
-  compat?: unknown;
+  compat?: {
+    supportsStore?: boolean;
+    supportsPromptCacheKey?: boolean;
+  } | null;
   modelId?: string | null;
   allowPrivateNetwork?: boolean;
   request?: ModelProviderRequestTransportOverrides;

@@ -206,6 +206,34 @@ function scheduleAnnounceDrain(key: string) {
   })();
 }
 
+function coalesceDuplicateAnnounceItem(
+  queue: AnnounceQueueState,
+  item: AnnounceQueueItem,
+): boolean {
+  const announceId = item.announceId?.trim();
+  if (!announceId) {
+    return false;
+  }
+  const existingIndex = queue.items.findIndex((queued) => queued.announceId?.trim() === announceId);
+  if (existingIndex === -1) {
+    return false;
+  }
+  const existing = queue.items[existingIndex];
+  if (!existing) {
+    return false;
+  }
+  const origin = normalizeDeliveryContext(item.origin);
+  const originKey = deliveryContextKey(origin);
+  queue.items[existingIndex] = {
+    ...existing,
+    ...item,
+    enqueuedAt: existing.enqueuedAt,
+    origin,
+    originKey,
+  };
+  return true;
+}
+
 export function enqueueAnnounce(params: {
   key: string;
   item: AnnounceQueueItem;
@@ -215,6 +243,11 @@ export function enqueueAnnounce(params: {
   const queue = getAnnounceQueue(params.key, params.settings, params.send);
   // Preserve any retry backoff marker already encoded in lastEnqueuedAt.
   queue.lastEnqueuedAt = Math.max(queue.lastEnqueuedAt, Date.now());
+
+  if (coalesceDuplicateAnnounceItem(queue, params.item)) {
+    scheduleAnnounceDrain(params.key);
+    return true;
+  }
 
   const shouldEnqueue = applyQueueDropPolicy({
     queue,

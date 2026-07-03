@@ -1,8 +1,10 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { createApplyPatchTool } from "./apply-patch.js";
+import { assessChildRouteHealth, resetChildRouteHealthForTest } from "./child-route-health.js";
 import {
   createSandboxedEditTool,
   createSandboxedReadTool,
@@ -48,7 +50,14 @@ function resolveApplyPatchTool(params: {
   }) as ToolWithExecute;
 }
 
-function createSandboxFsTools(params: { sandbox: UnsafeMountedSandbox; workspaceOnly?: boolean }) {
+function createSandboxFsTools(params: {
+  sandbox: UnsafeMountedSandbox;
+  workspaceOnly?: boolean;
+  routeHealth?: {
+    childSessionKey?: string;
+    runId?: string;
+  };
+}) {
   const tools = [
     createSandboxedReadTool({
       root: params.sandbox.workspaceDir,
@@ -61,6 +70,7 @@ function createSandboxFsTools(params: { sandbox: UnsafeMountedSandbox; workspace
     createSandboxedEditTool({
       root: params.sandbox.workspaceDir,
       bridge: params.sandbox.fsBridge!,
+      routeHealth: params.routeHealth,
     }),
   ];
   if (!params.workspaceOnly) {
@@ -112,6 +122,61 @@ describe("tools.fs.workspaceOnly", () => {
       ).rejects.toThrow(/Path escapes sandbox root/i);
       expect(await fs.readFile(path.join(agentRoot, "secret.txt"), "utf8")).toBe("shh");
     });
+  });
+
+  it("records repeated child edit misses from sandboxed edit tools", async () => {
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sandbox-edit-route-"));
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    resetChildRouteHealthForTest();
+    try {
+      await withUnsafeMountedSandboxHarness(async ({ sandbox }) => {
+        const childSessionKey = "agent:main:subagent:sandbox-editor";
+        const runId = "run-sandbox-editor-1";
+        await fs.writeFile(
+          path.join(sandbox.workspaceDir, "demo.txt"),
+          "actual current content",
+          "utf8",
+        );
+
+        const tools = createSandboxFsTools({
+          sandbox,
+          routeHealth: { childSessionKey, runId },
+        });
+        const { editTool } = expectReadWriteEditTools(tools);
+
+        for (const attempt of [1, 2, 3]) {
+          await expect(
+            editTool?.execute(`t-edit-${attempt}`, {
+              path: "demo.txt",
+              edits: [{ oldText: "missing", newText: "replacement" }],
+            }),
+          ).rejects.toThrow(/Could not find the exact text|Current file contents/i);
+        }
+
+        await expect(
+          assessChildRouteHealth(childSessionKey, {
+            routeIntent: "followup_reuse",
+            targetMethod: "sessions_send",
+            requesterSessionKey: "agent:main:main",
+            childTargetKind: "subagent",
+            registryRecord: { childSessionKey, runId },
+          }),
+        ).resolves.toMatchObject({
+          status: "unhealthy",
+          codes: ["edit_failure_threshold"],
+          recommendedAction: "spawn_fresh",
+        });
+      });
+    } finally {
+      resetChildRouteHealthForTest();
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
   });
 
   it("enforces apply_patch workspace-only in sandbox mounts by default", async () => {

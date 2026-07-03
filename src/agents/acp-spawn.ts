@@ -70,6 +70,12 @@ import {
   startAcpSpawnParentStreamRelay,
 } from "./acp-spawn-parent-stream.js";
 import { resolveAgentConfig, resolveDefaultAgentId } from "./agent-scope.js";
+import {
+  markChildRoutePendingSpawnFailed,
+  registerChildRoutePendingSpawn,
+} from "./child-route-health.js";
+import { resolveChildRouteProviderContextForSpawn } from "./child-route-provider-context.js";
+import { guardFreshChildSpawnAuth } from "./child-route-spawn-preflight.js";
 import { resolveSandboxRuntimeStatus } from "./sandbox/runtime-status.js";
 import { resolveRequesterOriginForChild } from "./spawn-requester-origin.js";
 import { resolveSpawnedWorkspaceInheritance } from "./spawned-context.js";
@@ -1126,6 +1132,24 @@ export async function spawnAcpDirect(
   });
 
   const sessionKey = `agent:${targetAgentId}:acp:${crypto.randomUUID()}`;
+  const spawnAuthPreflight = await guardFreshChildSpawnAuth(
+    resolveChildRouteProviderContextForSpawn({
+      cfg,
+      sessionKey,
+      requesterSessionKey: requesterInternalKey,
+    }),
+    {
+      childSessionKey: sessionKey,
+      includeProviderDefaultCredentialBlockers: true,
+    },
+  );
+  if (!spawnAuthPreflight.ok) {
+    return createAcpSpawnFailure({
+      status: "error",
+      errorCode: "spawn_failed",
+      error: spawnAuthPreflight.error,
+    });
+  }
   const runtimeMode = resolveAcpSessionMode(spawnMode);
   const resolvedCwd = resolveSpawnedWorkspaceInheritance({
     config: cfg,
@@ -1170,6 +1194,22 @@ export async function spawnAcpDirect(
   let binding: SessionBindingRecord | null = null;
   let sessionCreated = false;
   let initializedRuntime: AcpSpawnRuntimeCloseHandle | undefined;
+  const childIdem = crypto.randomUUID();
+  const pendingSpawn = await registerChildRoutePendingSpawn({
+    childSessionKey: sessionKey,
+    requesterSessionKey: requesterInternalKey,
+    childTargetKind: "acp",
+    idempotencyKey: childIdem,
+    runId: childIdem,
+    targetAgentId,
+  });
+  if (!pendingSpawn.ok) {
+    return createAcpSpawnFailure({
+      status: "error",
+      errorCode: "spawn_failed",
+      error: `failed to persist child route pending-spawn state: ${pendingSpawn.error}`,
+    });
+  }
   try {
     await callGateway({
       method: "sessions.patch",
@@ -1204,6 +1244,12 @@ export async function spawnAcpDirect(
       }));
     }
   } catch (err) {
+    await markChildRoutePendingSpawnFailed({
+      childSessionKey: sessionKey,
+      requesterSessionKey: requesterInternalKey,
+      idempotencyKey: childIdem,
+      pendingSpawnId: pendingSpawn.pendingSpawnId,
+    });
     await cleanupFailedAcpSpawn({
       cfg,
       sessionKey,
@@ -1226,7 +1272,6 @@ export async function spawnAcpDirect(
     requester: requesterState,
     binding,
   });
-  const childIdem = crypto.randomUUID();
   let childRunId: string = childIdem;
   const streamLogPath =
     effectiveStreamToParent && parentSessionKey
@@ -1281,6 +1326,12 @@ export async function spawnAcpDirect(
       childRunId = responseRunId;
     }
   } catch (err) {
+    await markChildRoutePendingSpawnFailed({
+      childSessionKey: sessionKey,
+      requesterSessionKey: requesterInternalKey,
+      idempotencyKey: childIdem,
+      pendingSpawnId: pendingSpawn.pendingSpawnId,
+    });
     parentRelay?.dispose();
     await cleanupFailedAcpSpawn({
       cfg,

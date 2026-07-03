@@ -276,6 +276,7 @@ public struct OpenClawAgentEventPayload: Codable, Sendable, Identifiable {
     public let stream: String
     public let ts: Int?
     public let data: [String: AnyCodable]
+    public var sessionKey: String? = nil
 }
 
 public struct OpenClawChatPendingToolCall: Identifiable, Hashable, Sendable {
@@ -285,6 +286,97 @@ public struct OpenClawChatPendingToolCall: Identifiable, Hashable, Sendable {
     public let args: AnyCodable?
     public let startedAt: Double?
     public let isError: Bool?
+}
+
+public struct OpenClawChatThinkingBlock: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let sessionKey: String
+    public let title: String
+    public let summary: String
+    public let text: String
+    public let isStreaming: Bool
+    public let updatedAt: Double
+
+    public init(
+        id: String,
+        sessionKey: String,
+        title: String,
+        summary: String,
+        text: String,
+        isStreaming: Bool,
+        updatedAt: Double)
+    {
+        self.id = id
+        self.sessionKey = sessionKey
+        self.title = title
+        self.summary = summary
+        self.text = text
+        self.isStreaming = isStreaming
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct OpenClawChatChecklistEntry: Identifiable, Hashable, Sendable {
+    public enum State: String, Sendable, Hashable {
+        case pending
+        case running
+        case completed
+        case blocked
+        case failed
+    }
+
+    public let id: String
+    public let sessionKey: String
+    public let sessionTitle: String?
+    public let title: String
+    public let detail: String?
+    public let state: State
+    public let updatedAt: Double
+
+    public init(
+        id: String,
+        sessionKey: String,
+        sessionTitle: String?,
+        title: String,
+        detail: String?,
+        state: State,
+        updatedAt: Double)
+    {
+        self.id = id
+        self.sessionKey = sessionKey
+        self.sessionTitle = sessionTitle
+        self.title = title
+        self.detail = detail
+        self.state = state
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct OpenClawChatSidebarAgent: Identifiable, Hashable, Sendable {
+    public var id: String { self.sessionKey }
+
+    public let sessionKey: String
+    public let title: String
+    public let subtitle: String?
+    public let status: String
+    public let isRunning: Bool
+    public let updatedAt: Double
+
+    public init(
+        sessionKey: String,
+        title: String,
+        subtitle: String?,
+        status: String,
+        isRunning: Bool,
+        updatedAt: Double)
+    {
+        self.sessionKey = sessionKey
+        self.title = title
+        self.subtitle = subtitle
+        self.status = status
+        self.isRunning = isRunning
+        self.updatedAt = updatedAt
+    }
 }
 
 public struct OpenClawGatewayHealthOK: Codable, Sendable {

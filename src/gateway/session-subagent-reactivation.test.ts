@@ -59,4 +59,30 @@ describe("reactivateCompletedSubagentSession", () => {
       runTimeoutSeconds: 0,
     });
   });
+
+  it("does not reactivate a fresh-reroute-superseded old generation", async () => {
+    const childSessionKey = "agent:main:subagent:fresh-reroute-reactivation";
+    getLatestSubagentRunByChildSessionKeyMock.mockReturnValue({
+      runId: "run-old-generation",
+      childSessionKey,
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "old generation task",
+      cleanup: "keep",
+      createdAt: 20,
+      startedAt: 21,
+      endedAt: 22,
+      outcome: { status: "ok" },
+      suppressAnnounceReason: "fresh-reroute",
+    });
+
+    await expect(
+      reactivateCompletedSubagentSession({
+        sessionKey: childSessionKey,
+        runId: "run-new-old-session",
+      }),
+    ).resolves.toBe(false);
+
+    expect(replaceSubagentRunAfterSteerMock).not.toHaveBeenCalled();
+  });
 });

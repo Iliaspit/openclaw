@@ -36,6 +36,7 @@ describe("Dockerfile", () => {
     expect(installIndex).toBeGreaterThan(-1);
     expect(browserArgIndex).toBeGreaterThan(-1);
     expect(browserArgIndex).toBeGreaterThan(installIndex);
+    expect(dockerfile.match(/ARG OPENCLAW_INSTALL_BROWSER="1"/g)).toHaveLength(2);
     expect(dockerfile).toContain(
       "node /app/node_modules/playwright-core/cli.js install --with-deps chromium",
     );

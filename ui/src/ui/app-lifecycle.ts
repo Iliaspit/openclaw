@@ -2,8 +2,10 @@ import { connectGateway } from "./app-gateway.ts";
 import {
   startLogsPolling,
   startNodesPolling,
+  startQueueHealthPolling,
   stopLogsPolling,
   stopNodesPolling,
+  stopQueueHealthPolling,
   startDebugPolling,
   stopDebugPolling,
 } from "./app-polling.ts";
@@ -32,6 +34,7 @@ type LifecycleHost = {
   embedSandboxMode: "strict" | "scripts" | "trusted";
   allowExternalEmbedUrls: boolean;
   chatHasAutoScrolled: boolean;
+  queueHealthPollInterval: number | null;
   chatManualRefreshInFlight: boolean;
   realtimeTalkSession?: { stop: () => void } | null;
   realtimeTalkActive?: boolean;
@@ -64,6 +67,7 @@ export function handleConnected(host: LifecycleHost) {
     connectGateway(host as unknown as Parameters<typeof connectGateway>[0]);
   });
   startNodesPolling(host as unknown as Parameters<typeof startNodesPolling>[0]);
+  startQueueHealthPolling(host as unknown as Parameters<typeof startQueueHealthPolling>[0]);
   if (host.tab === "logs") {
     startLogsPolling(host as unknown as Parameters<typeof startLogsPolling>[0]);
   }
@@ -80,6 +84,7 @@ export function handleDisconnected(host: LifecycleHost) {
   host.connectGeneration += 1;
   window.removeEventListener("popstate", host.popStateHandler);
   stopNodesPolling(host as unknown as Parameters<typeof stopNodesPolling>[0]);
+  stopQueueHealthPolling(host as unknown as Parameters<typeof stopQueueHealthPolling>[0]);
   stopLogsPolling(host as unknown as Parameters<typeof stopLogsPolling>[0]);
   stopDebugPolling(host as unknown as Parameters<typeof stopDebugPolling>[0]);
   host.realtimeTalkSession?.stop();

@@ -668,6 +668,8 @@ export const fr: TranslationMap = {
     hideCronSessions: "Masquer les sessions cron",
     showCronSessions: "Afficher les sessions cron",
     showCronSessionsHidden: "Afficher les sessions cron ({count} masquées)",
+    sessionSelectTopLevel: "Top-level agents",
+    sessionSelectOther: "Spawned and other sessions",
     onboardingDisabled: "Désactivé pendant la configuration",
   },
   languages: {

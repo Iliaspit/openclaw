@@ -85,13 +85,13 @@ describe("sandbox session-tools context", () => {
 });
 
 describe("createAgentToAgentPolicy", () => {
-  it("allows main and planner by default", () => {
+  it("allows PM1–PM4 by default", () => {
     const policy = createAgentToAgentPolicy({} as unknown as OpenClawConfig);
     expect(policy.enabled).toBe(true);
-    expect(policy.isAllowed("main", "main")).toBe(true);
-    expect(policy.isAllowed("main", "planner")).toBe(true);
-    expect(policy.isAllowed("planner", "main")).toBe(true);
-    expect(policy.isAllowed("main", "ops")).toBe(false);
+    expect(policy.isAllowed("PM1", "PM1")).toBe(true);
+    expect(policy.isAllowed("PM1", "PM2")).toBe(true);
+    expect(policy.isAllowed("PM4", "PM1")).toBe(true);
+    expect(policy.isAllowed("PM1", "ops")).toBe(false);
   });
 
   it("denies cross-agent access when explicitly disabled", () => {
@@ -100,8 +100,8 @@ describe("createAgentToAgentPolicy", () => {
     } as unknown as OpenClawConfig);
 
     expect(policy.enabled).toBe(false);
-    expect(policy.isAllowed("main", "main")).toBe(true);
-    expect(policy.isAllowed("main", "planner")).toBe(false);
+    expect(policy.isAllowed("PM1", "PM1")).toBe(true);
+    expect(policy.isAllowed("PM1", "PM2")).toBe(false);
   });
 
   it("honors allow patterns when enabled", () => {

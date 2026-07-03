@@ -903,6 +903,7 @@ async function agentCommandInternal(
               opts,
               runContext,
               spawnedBy,
+              parentSessionKey: sessionEntry?.parentSessionKey,
               messageChannel,
               skillsSnapshot,
               resolvedVerboseLevel,

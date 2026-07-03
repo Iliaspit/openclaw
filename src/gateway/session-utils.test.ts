@@ -2,6 +2,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
+import {
+  addSubagentRunForTests,
+  resetSubagentRegistryForTests,
+} from "../agents/subagent-registry.test-helpers.js";
 import { resetConfigRuntimeState, setRuntimeConfigSnapshot } from "../config/config.js";
 import type { OpenClawConfig } from "../config/config.js";
 import type { SessionEntry } from "../config/sessions.js";
@@ -67,6 +71,7 @@ function createModelDefaultsConfig(params: {
 describe("gateway session utils", () => {
   afterEach(() => {
     resetConfigRuntimeState();
+    resetSubagentRegistryForTests();
   });
 
   test("capArrayByJsonBytes trims from the front", () => {
@@ -641,6 +646,25 @@ describe("gateway session utils", () => {
     });
   });
 
+  test("listAgentsForGateway preserves agents.list order (not alphabetical)", async () => {
+    await withStateDirEnv("openclaw-agent-list-order-", async () => {
+      const cfg = {
+        session: { mainKey: "main" },
+        agents: {
+          list: [
+            { id: "planner" },
+            { id: "zeus" },
+            { id: "acme" },
+            { id: "main", default: true },
+          ],
+        },
+      } as OpenClawConfig;
+
+      const { agents } = listAgentsForGateway(cfg);
+      expect(agents.map((agent) => agent.id)).toEqual(["planner", "zeus", "acme", "main"]);
+    });
+  });
+
   test("listAgentsForGateway includes effective workspace + model for default agent", () => {
     const cfg = {
       session: { mainKey: "main" },
@@ -831,6 +855,93 @@ describe("resolveSessionModelRef", () => {
 });
 
 describe("listSessionsFromStore selected model display", () => {
+  test("adds sanitized subagent display metadata without changing session keys", () => {
+    const cfg = {
+      session: { mainKey: "main" },
+      agents: {
+        list: [
+          { id: "planner-4", default: true },
+          { id: "implementer" },
+        ],
+      },
+    } as OpenClawConfig;
+    const controllerSessionKey = "agent:planner-4:main";
+    const firstChildKey = "agent:implementer:subagent:first";
+    const secondChildKey = "agent:implementer:subagent:second";
+    const unlabeledChildKey = "agent:implementer:subagent:unlabeled";
+    addSubagentRunForTests({
+      runId: "run-first",
+      childSessionKey: firstChildKey,
+      controllerSessionKey,
+      requesterSessionKey: controllerSessionKey,
+      requesterDisplayKey: controllerSessionKey,
+      task: "First child task",
+      label: "First feature",
+      cleanup: "keep",
+      createdAt: 100,
+    });
+    addSubagentRunForTests({
+      runId: "run-second",
+      childSessionKey: secondChildKey,
+      controllerSessionKey,
+      requesterSessionKey: controllerSessionKey,
+      requesterDisplayKey: controllerSessionKey,
+      task: "Second child task with\nextra whitespace",
+      label: "Queue health UI",
+      cleanup: "keep",
+      createdAt: 200,
+    });
+    addSubagentRunForTests({
+      runId: "run-unlabeled",
+      childSessionKey: unlabeledChildKey,
+      controllerSessionKey,
+      requesterSessionKey: controllerSessionKey,
+      requesterDisplayKey: controllerSessionKey,
+      task: "Do not expose this task text in session metadata",
+      cleanup: "keep",
+      createdAt: 300,
+    });
+
+    const result = listSessionsFromStore({
+      cfg,
+      storePath: "/tmp/sessions.json",
+      store: {
+        [controllerSessionKey]: {
+          sessionId: "sess-parent",
+          updatedAt: 300,
+        } as SessionEntry,
+        [firstChildKey]: {
+          sessionId: "sess-first",
+          updatedAt: 100,
+        } as SessionEntry,
+        [secondChildKey]: {
+          sessionId: "sess-second",
+          updatedAt: 200,
+        } as SessionEntry,
+        [unlabeledChildKey]: {
+          sessionId: "sess-unlabeled",
+          updatedAt: 300,
+        } as SessionEntry,
+      },
+      opts: {},
+    });
+
+    const row = result.sessions.find((entry) => entry.key === secondChildKey);
+    expect(row).toMatchObject({
+      key: secondChildKey,
+      parentSessionKey: controllerSessionKey,
+      subagentLabel: "Queue health UI",
+      subagentOrdinal: 2,
+    });
+    const unlabeledRow = result.sessions.find((entry) => entry.key === unlabeledChildKey);
+    expect(unlabeledRow).toMatchObject({
+      key: unlabeledChildKey,
+      parentSessionKey: controllerSessionKey,
+      subagentOrdinal: 3,
+    });
+    expect(unlabeledRow?.subagentLabel).toBeUndefined();
+  });
+
   test("shows the selected override model even when a fallback runtime model exists", () => {
     const cfg = createModelDefaultsConfig({
       primary: "anthropic/claude-opus-4-6",

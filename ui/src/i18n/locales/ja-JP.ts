@@ -664,6 +664,8 @@ export const ja_JP: TranslationMap = {
     hideCronSessions: "Cron セッションを非表示",
     showCronSessions: "Cron セッションを表示",
     showCronSessionsHidden: "Cron セッションを表示（{count} 件を非表示中）",
+    sessionSelectTopLevel: "Top-level agents",
+    sessionSelectOther: "Spawned and other sessions",
     onboardingDisabled: "セットアップ中は無効",
   },
   languages: {

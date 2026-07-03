@@ -725,6 +725,7 @@ export async function compactEmbeddedPiSessionDirect(
         resolveSystemPromptOverride({
           config: params.config,
           agentId: sessionAgentId,
+          workspaceDir: effectiveWorkspace,
         }) ??
         buildEmbeddedSystemPrompt({
           workspaceDir: effectiveWorkspace,

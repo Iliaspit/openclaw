@@ -18,6 +18,7 @@ function stubActionTool(name: string, actions: string[]) {
 }
 
 const coreTools = [
+  stubTool("catalog"),
   stubActionTool("canvas", ["create", "read"]),
   stubActionTool("nodes", ["list", "invoke"]),
   stubActionTool("cron", ["schedule", "cancel"]),

@@ -81,6 +81,26 @@ function mergeWizardConfigOntoLatest(current: unknown, base: unknown, next: unkn
   return structuredClone(next);
 }
 
+function mergeWizardConfigOntoLatest(current: unknown, base: unknown, next: unknown): unknown {
+  if (isDeepStrictEqual(next, base)) {
+    return current;
+  }
+  if (isPlainObject(current) && isPlainObject(base) && isPlainObject(next)) {
+    const merged: Record<string, unknown> = { ...current };
+    const keys = new Set([...Object.keys(current), ...Object.keys(base), ...Object.keys(next)]);
+    for (const key of keys) {
+      const mergedValue = mergeWizardConfigOntoLatest(current[key], base[key], next[key]);
+      if (mergedValue === undefined) {
+        delete merged[key];
+      } else {
+        merged[key] = mergedValue;
+      }
+    }
+    return merged;
+  }
+  return structuredClone(next);
+}
+
 async function resolveGatewaySecretInputForWizard(params: {
   cfg: OpenClawConfig;
   value: unknown;

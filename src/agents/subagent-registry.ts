@@ -1,17 +1,16 @@
-import type { cleanupBrowserSessionsForLifecycleEnd } from "../browser-lifecycle-cleanup.js";
+import { cleanupBrowserSessionsForLifecycleEnd } from "../browser-lifecycle-cleanup.js";
 import { loadConfig } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { ContextEngine, SubagentEndReason } from "../context-engine/types.js";
 import { callGateway } from "../gateway/call.js";
 import { onAgentEvent } from "../infra/agent-events.js";
-import { registerPendingSpawnedChildrenQuery } from "../infra/outbound/pending-spawn-query.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { importRuntimeModule } from "../shared/runtime-import.js";
-import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
-import type { DeliveryContext } from "../utils/delivery-context.types.js";
+import { type DeliveryContext, normalizeDeliveryContext } from "../utils/delivery-context.js";
 import type { ensureRuntimePluginsLoaded as ensureRuntimePluginsLoadedFn } from "./runtime-plugins.js";
 import type { SubagentRunOutcome } from "./subagent-announce-output.js";
 import { resetAnnounceQueuesForTests } from "./subagent-announce-queue.js";
+import * as subagentAnnounceModule from "./subagent-announce.js";
 import {
   SUBAGENT_ENDED_REASON_COMPLETE,
   SUBAGENT_ENDED_REASON_ERROR,
@@ -34,23 +33,21 @@ import {
 } from "./subagent-registry-helpers.js";
 import { createSubagentRegistryLifecycleController } from "./subagent-registry-lifecycle.js";
 import { subagentRuns } from "./subagent-registry-memory.js";
+import { isSubagentRunNewer } from "./subagent-registry-ordering.js";
 import {
   countActiveDescendantRunsFromRuns,
   countActiveRunsForSessionFromRuns,
   countPendingDescendantRunsExcludingRunFromRuns,
   countPendingDescendantRunsFromRuns,
-  getSubagentRunByChildSessionKeyFromRuns,
-  isSubagentSessionRunActiveFromRuns,
+  findRunIdsByChildSessionKeyFromRuns,
   listRunsForControllerFromRuns,
   listDescendantRunsForRequesterFromRuns,
   listRunsForRequesterFromRuns,
   resolveRequesterForChildSessionFromRuns,
+  shouldIgnorePostCompletionAnnounceForRunFromRuns,
   shouldIgnorePostCompletionAnnounceForSessionFromRuns,
 } from "./subagent-registry-queries.js";
-import {
-  createSubagentRunManager,
-  type RegisterSubagentRunParams,
-} from "./subagent-registry-run-manager.js";
+import { createSubagentRunManager } from "./subagent-registry-run-manager.js";
 import {
   getSubagentRunsSnapshotForRead,
   persistSubagentRunsToDisk,
@@ -68,18 +65,9 @@ export {
 } from "./subagent-registry-helpers.js";
 const log = createSubsystemLogger("agents/subagent-registry");
 
-type SubagentAnnounceModule = Pick<
-  typeof import("./subagent-announce.js"),
-  "captureSubagentCompletionReply" | "runSubagentAnnounceFlow"
->;
-type BrowserCleanupModule = Pick<
-  typeof import("../browser-lifecycle-cleanup.js"),
-  "cleanupBrowserSessionsForLifecycleEnd"
->;
-
 type SubagentRegistryDeps = {
   callGateway: typeof callGateway;
-  captureSubagentCompletionReply: SubagentAnnounceModule["captureSubagentCompletionReply"];
+  captureSubagentCompletionReply: typeof subagentAnnounceModule.captureSubagentCompletionReply;
   cleanupBrowserSessionsForLifecycleEnd: typeof cleanupBrowserSessionsForLifecycleEnd;
   getSubagentRunsSnapshotForRead: typeof getSubagentRunsSnapshotForRead;
   loadConfig: typeof loadConfig;
@@ -87,41 +75,24 @@ type SubagentRegistryDeps = {
   persistSubagentRunsToDisk: typeof persistSubagentRunsToDisk;
   resolveAgentTimeoutMs: typeof resolveAgentTimeoutMs;
   restoreSubagentRunsFromDisk: typeof restoreSubagentRunsFromDisk;
-  runSubagentAnnounceFlow: SubagentAnnounceModule["runSubagentAnnounceFlow"];
+  runSubagentAnnounceFlow: typeof subagentAnnounceModule.runSubagentAnnounceFlow;
   ensureContextEnginesInitialized?: () => void;
   ensureRuntimePluginsLoaded?: typeof ensureRuntimePluginsLoadedFn;
   resolveContextEngine?: (cfg: OpenClawConfig) => Promise<ContextEngine>;
 };
 
-let subagentAnnouncePromise: Promise<SubagentAnnounceModule> | null = null;
-let browserCleanupPromise: Promise<BrowserCleanupModule> | null = null;
-
-async function loadSubagentAnnounceModule(): Promise<SubagentAnnounceModule> {
-  subagentAnnouncePromise ??= import("./subagent-announce.js");
-  return await subagentAnnouncePromise;
-}
-
-async function loadCleanupBrowserSessionsForLifecycleEnd(): Promise<
-  BrowserCleanupModule["cleanupBrowserSessionsForLifecycleEnd"]
-> {
-  browserCleanupPromise ??= import("../browser-lifecycle-cleanup.js");
-  return (await browserCleanupPromise).cleanupBrowserSessionsForLifecycleEnd;
-}
-
 const defaultSubagentRegistryDeps: SubagentRegistryDeps = {
   callGateway,
-  captureSubagentCompletionReply: async (sessionKey, options) =>
-    (await loadSubagentAnnounceModule()).captureSubagentCompletionReply(sessionKey, options),
-  cleanupBrowserSessionsForLifecycleEnd: async (params) =>
-    (await loadCleanupBrowserSessionsForLifecycleEnd())(params),
+  captureSubagentCompletionReply: (sessionKey) =>
+    subagentAnnounceModule.captureSubagentCompletionReply(sessionKey),
+  cleanupBrowserSessionsForLifecycleEnd,
   getSubagentRunsSnapshotForRead,
   loadConfig,
   onAgentEvent,
   persistSubagentRunsToDisk,
   resolveAgentTimeoutMs,
   restoreSubagentRunsFromDisk,
-  runSubagentAnnounceFlow: async (params) =>
-    (await loadSubagentAnnounceModule()).runSubagentAnnounceFlow(params),
+  runSubagentAnnounceFlow: (params) => subagentAnnounceModule.runSubagentAnnounceFlow(params),
 };
 
 let subagentRegistryDeps: SubagentRegistryDeps = defaultSubagentRegistryDeps;
@@ -156,7 +127,7 @@ let sweepInProgress = false;
 let listenerStarted = false;
 let listenerStop: (() => void) | null = null;
 // Use var to avoid TDZ when init runs across circular imports during bootstrap.
-let restoreAttempted = false;
+var restoreAttempted = false;
 const ORPHAN_RECOVERY_DEBOUNCE_MS = 1_000;
 let lastOrphanRecoveryScheduleAt = 0;
 const SUBAGENT_ANNOUNCE_TIMEOUT_MS = 120_000;
@@ -330,7 +301,10 @@ async function notifyContextEngineSubagentEnded(params: {
 }
 
 function suppressAnnounceForSteerRestart(entry?: SubagentRunRecord) {
-  return entry?.suppressAnnounceReason === "steer-restart";
+  return (
+    entry?.suppressAnnounceReason === "steer-restart" ||
+    entry?.suppressAnnounceReason === "fresh-reroute"
+  );
 }
 
 function shouldKeepThreadBindingAfterRun(params: {
@@ -392,8 +366,8 @@ const subagentLifecycleController = createSubagentRegistryLifecycleController({
   emitSubagentEndedHookForRun,
   notifyContextEngineSubagentEnded,
   resumeSubagentRun,
-  captureSubagentCompletionReply: (sessionKey, options) =>
-    subagentRegistryDeps.captureSubagentCompletionReply(sessionKey, options),
+  captureSubagentCompletionReply: (sessionKey) =>
+    subagentRegistryDeps.captureSubagentCompletionReply(sessionKey),
   cleanupBrowserSessionsForLifecycleEnd: (args) =>
     subagentRegistryDeps.cleanupBrowserSessionsForLifecycleEnd(args),
   runSubagentAnnounceFlow: (params) => subagentRegistryDeps.runSubagentAnnounceFlow(params),
@@ -768,7 +742,25 @@ export function replaceSubagentRunAfterSteer(params: {
   return subagentRunManager.replaceSubagentRunAfterSteer(params);
 }
 
-export function registerSubagentRun(params: RegisterSubagentRunParams) {
+export function registerSubagentRun(params: {
+  runId: string;
+  childSessionKey: string;
+  controllerSessionKey?: string;
+  requesterSessionKey: string;
+  requesterOrigin?: DeliveryContext;
+  requesterDisplayKey: string;
+  task: string;
+  cleanup: "delete" | "keep";
+  label?: string;
+  model?: string;
+  workspaceDir?: string;
+  runTimeoutSeconds?: number;
+  expectsCompletionMessage?: boolean;
+  spawnMode?: "run" | "session";
+  attachmentsDir?: string;
+  attachmentsRootDir?: string;
+  retainAttachmentsOnKeep?: boolean;
+}) {
   subagentRunManager.registerSubagentRun(params);
 }
 
@@ -785,8 +777,6 @@ export function resetSubagentRegistryForTests(opts?: { persist?: boolean }) {
   contextEngineInitPromise = null;
   contextEngineRegistryPromise = null;
   runtimePluginsPromise = null;
-  subagentAnnouncePromise = null;
-  browserCleanupPromise = null;
   resetAnnounceQueuesForTests();
   stopSweeper();
   sweepInProgress = false;
@@ -820,30 +810,53 @@ export function releaseSubagentRun(runId: string) {
   subagentRunManager.releaseSubagentRun(runId);
 }
 
+function findRunIdsByChildSessionKey(childSessionKey: string): string[] {
+  return findRunIdsByChildSessionKeyFromRuns(subagentRuns, childSessionKey);
+}
+
 export function resolveRequesterForChildSession(childSessionKey: string): {
   requesterSessionKey: string;
   requesterOrigin?: DeliveryContext;
 } | null {
-  const runsSnapshot = subagentRegistryDeps.getSubagentRunsSnapshotForRead(subagentRuns);
-  const resolved = resolveRequesterForChildSessionFromRuns(runsSnapshot, childSessionKey);
-  if (resolved === null) {
+  const resolved = resolveRequesterForChildSessionFromRuns(
+    subagentRegistryDeps.getSubagentRunsSnapshotForRead(subagentRuns),
+    childSessionKey,
+  );
+  if (!resolved) {
     return null;
   }
-  const requesterOrigin = normalizeDeliveryContext(resolved.requesterOrigin);
   return {
     requesterSessionKey: resolved.requesterSessionKey,
-    requesterOrigin,
+    requesterOrigin: normalizeDeliveryContext(resolved.requesterOrigin),
   };
 }
 
 export function isSubagentSessionRunActive(childSessionKey: string): boolean {
-  return isSubagentSessionRunActiveFromRuns(subagentRuns, childSessionKey);
+  const runIds = findRunIdsByChildSessionKey(childSessionKey);
+  let latest: SubagentRunRecord | undefined;
+  for (const runId of runIds) {
+    const entry = subagentRuns.get(runId);
+    if (!entry) {
+      continue;
+    }
+    if (!latest || isSubagentRunNewer(entry, latest)) {
+      latest = entry;
+    }
+  }
+  return Boolean(latest && typeof latest.endedAt !== "number");
 }
 
 export function shouldIgnorePostCompletionAnnounceForSession(childSessionKey: string): boolean {
   return shouldIgnorePostCompletionAnnounceForSessionFromRuns(
     subagentRegistryDeps.getSubagentRunsSnapshotForRead(subagentRuns),
     childSessionKey,
+  );
+}
+
+export function shouldIgnorePostCompletionAnnounceForRun(runId: string): boolean {
+  return shouldIgnorePostCompletionAnnounceForRunFromRuns(
+    subagentRegistryDeps.getSubagentRunsSnapshotForRead(subagentRuns),
+    runId,
   );
 }
 
@@ -909,10 +922,29 @@ export function listDescendantRunsForRequester(rootSessionKey: string): Subagent
 }
 
 export function getSubagentRunByChildSessionKey(childSessionKey: string): SubagentRunRecord | null {
-  return getSubagentRunByChildSessionKeyFromRuns(
-    subagentRegistryDeps.getSubagentRunsSnapshotForRead(subagentRuns),
-    childSessionKey,
-  );
+  const key = childSessionKey.trim();
+  if (!key) {
+    return null;
+  }
+
+  let latestActive: SubagentRunRecord | null = null;
+  let latestEnded: SubagentRunRecord | null = null;
+  for (const entry of subagentRegistryDeps.getSubagentRunsSnapshotForRead(subagentRuns).values()) {
+    if (entry.childSessionKey !== key) {
+      continue;
+    }
+    if (typeof entry.endedAt !== "number") {
+      if (!latestActive || isSubagentRunNewer(entry, latestActive)) {
+        latestActive = entry;
+      }
+      continue;
+    }
+    if (!latestEnded || isSubagentRunNewer(entry, latestEnded)) {
+      latestEnded = entry;
+    }
+  }
+
+  return latestActive ?? latestEnded;
 }
 
 export function getLatestSubagentRunByChildSessionKey(
@@ -928,7 +960,7 @@ export function getLatestSubagentRunByChildSessionKey(
     if (entry.childSessionKey !== key) {
       continue;
     }
-    if (!latest || entry.createdAt > latest.createdAt) {
+    if (!latest || isSubagentRunNewer(entry, latest)) {
       latest = entry;
     }
   }
@@ -939,20 +971,3 @@ export function getLatestSubagentRunByChildSessionKey(
 export function initSubagentRegistry() {
   restoreSubagentRunsOnce();
 }
-
-// Let the shared outbound plan treat bare silent replies as dropped (instead
-// of rewriting them to visible fallback text) when the parent session has at
-// least one pending spawned child whose completion will deliver the real
-// reply. Uses the pending-descendant count so runs that have ended but whose
-// announce/cleanup is still in flight continue to suppress rewriting; without
-// this the window between `completeSubagentRun` setting `endedAt` and
-// `startSubagentAnnounceCleanupFlow` finishing could briefly re-enable
-// fallback chatter. Runtime-enforced, so it does not rely on agent prompt
-// compliance.
-registerPendingSpawnedChildrenQuery((sessionKey) => {
-  const key = sessionKey?.trim();
-  if (!key) {
-    return false;
-  }
-  return countPendingDescendantRuns(key) > 0;
-});

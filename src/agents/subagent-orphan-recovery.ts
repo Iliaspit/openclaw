@@ -21,6 +21,8 @@ import {
 import { callGateway } from "../gateway/call.js";
 import { readSessionMessages } from "../gateway/session-utils.fs.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import { guardChildRouteForDelivery } from "./child-route-guard.js";
+import { resolveChildRouteProviderContextFromSession } from "./child-route-provider-context.js";
 import { replaceSubagentRunAfterSteer } from "./subagent-registry-steer-runtime.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
@@ -170,6 +172,10 @@ export async function recoverOrphanedSubagentSessions(params: {
         result.skipped++;
         continue;
       }
+      if (runRecord.suppressAnnounceReason === "fresh-reroute") {
+        result.skipped++;
+        continue;
+      }
 
       try {
         const agentId = resolveAgentIdFromSessionKey(childSessionKey);
@@ -222,6 +228,33 @@ export async function recoverOrphanedSubagentSessions(params: {
         // We intentionally do NOT clear abortedLastRun before attempting
         // the resume — if callGateway fails (e.g. gateway still booting),
         // the flag stays true so the next restart can retry.
+        const routeGuard = await guardChildRouteForDelivery({
+          childSessionKey,
+          context: {
+            routeIntent: "reactivation",
+            targetMethod: "subagent_orphan_recovery",
+            requesterSessionKey: runRecord.controllerSessionKey ?? runRecord.requesterSessionKey,
+            childTargetKind: "subagent",
+            registryRecord: runRecord,
+            provider: resolveChildRouteProviderContextFromSession({
+              cfg,
+              sessionKey: childSessionKey,
+              entry,
+              requesterSessionKey: runRecord.controllerSessionKey ?? runRecord.requesterSessionKey,
+            }),
+          },
+          payloadForHash: {
+            method: "subagent_orphan_recovery",
+            originalRunId: runId,
+          },
+        });
+        if (!routeGuard.ok) {
+          result.failed++;
+          log.warn(
+            `route health blocked orphan recovery for ${childSessionKey}: ${routeGuard.message}`,
+          );
+          continue;
+        }
         const resumed = await resumeOrphanedSession({
           sessionKey: childSessionKey,
           task: runRecord.task,

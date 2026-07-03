@@ -1,19 +1,19 @@
 import type { AgentMessage, StreamFn } from "@mariozechner/pi-agent-core";
 import { streamSimple } from "@mariozechner/pi-ai";
-import { visitObjectContentBlocks } from "../../../shared/message-content-blocks.js";
 import { normalizeLowercaseStringOrEmpty } from "../../../shared/string-coerce.js";
 import { validateAnthropicTurns, validateGeminiTurns } from "../../pi-embedded-helpers.js";
-import { sanitizeToolUseResultPairing } from "../../session-transcript-repair.js";
+import {
+  isRedactedSessionsSpawnAttachment,
+  sanitizeToolUseResultPairing,
+} from "../../session-transcript-repair.js";
 import {
   extractToolCallsFromAssistant,
   sanitizeToolCallIdsForCloudCodeAssist,
   type ToolCallIdMode,
 } from "../../tool-call-id.js";
-import { hasUnredactedSessionsSpawnAttachments } from "../../tool-call-shared.js";
 import { normalizeToolName } from "../../tool-policy.js";
 import { shouldAllowProviderOwnedThinkingReplay } from "../../transcript-policy.js";
 import type { TranscriptPolicy } from "../../transcript-policy.js";
-import { wrapStreamObjectEvents } from "./stream-wrapper.js";
 
 type UnknownToolLoopGuardState = {
   lastUnknownToolName?: string;
@@ -253,6 +253,28 @@ function isThinkingLikeReplayBlock(block: unknown): boolean {
   }
   const type = (block as { type?: unknown }).type;
   return type === "thinking" || type === "redacted_thinking";
+}
+
+function hasUnredactedSessionsSpawnAttachments(block: ReplayToolCallBlock): boolean {
+  const rawName = typeof block.name === "string" ? block.name.trim() : "";
+  if (normalizeLowercaseStringOrEmpty(rawName) !== "sessions_spawn") {
+    return false;
+  }
+  for (const payload of [block.arguments, block.input]) {
+    if (!payload || typeof payload !== "object") {
+      continue;
+    }
+    const attachments = (payload as { attachments?: unknown }).attachments;
+    if (!Array.isArray(attachments)) {
+      continue;
+    }
+    for (const attachment of attachments) {
+      if (!isRedactedSessionsSpawnAttachment(attachment)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function isReplaySafeThinkingTurn(content: unknown[], allowedToolNames?: Set<string>): boolean {
@@ -587,10 +609,20 @@ function trimWhitespaceFromToolCallNamesInMessage(
   message: unknown,
   allowedToolNames?: Set<string>,
 ): void {
-  visitObjectContentBlocks(message, (block) => {
+  if (!message || typeof message !== "object") {
+    return;
+  }
+  const content = (message as { content?: unknown }).content;
+  if (!Array.isArray(content)) {
+    return;
+  }
+  for (const block of content) {
+    if (!block || typeof block !== "object") {
+      continue;
+    }
     const typedBlock = block as { type?: unknown; name?: unknown; id?: unknown };
     if (!isToolCallBlockType(typedBlock.type)) {
-      return;
+      continue;
     }
     const rawId = typeof typedBlock.id === "string" ? typedBlock.id : undefined;
     if (typeof typedBlock.name === "string") {
@@ -598,13 +630,13 @@ function trimWhitespaceFromToolCallNamesInMessage(
       if (normalized !== typedBlock.name) {
         typedBlock.name = normalized;
       }
-      return;
+      continue;
     }
     const inferred = inferToolNameFromToolCallId(rawId, allowedToolNames);
     if (inferred) {
       typedBlock.name = inferred;
     }
-  });
+  }
   normalizeToolCallIdsInMessage(message);
 }
 
@@ -766,29 +798,50 @@ function wrapStreamTrimToolCallNames(
     return message;
   };
 
-  wrapStreamObjectEvents(stream, (event) => {
-    trimWhitespaceFromToolCallNamesInMessage(event.partial, allowedToolNames);
-    trimWhitespaceFromToolCallNamesInMessage(event.message, allowedToolNames);
-    if (event.message && typeof event.message === "object") {
-      const countedStreamAttempt = guardUnknownToolLoopInMessage(
-        event.message,
-        unknownToolGuardState,
-        {
-          allowedToolNames,
-          threshold: options?.unknownToolThreshold,
-          countAttempt: !streamAttemptAlreadyCounted,
-          resetOnAllowedTool: true,
-          resetOnMissingUnknownTool: false,
+  const originalAsyncIterator = stream[Symbol.asyncIterator].bind(stream);
+  (stream as { [Symbol.asyncIterator]: typeof originalAsyncIterator })[Symbol.asyncIterator] =
+    function () {
+      const iterator = originalAsyncIterator();
+      return {
+        async next() {
+          const result = await iterator.next();
+          if (!result.done && result.value && typeof result.value === "object") {
+            const event = result.value as {
+              partial?: unknown;
+              message?: unknown;
+            };
+            trimWhitespaceFromToolCallNamesInMessage(event.partial, allowedToolNames);
+            trimWhitespaceFromToolCallNamesInMessage(event.message, allowedToolNames);
+            if (event.message && typeof event.message === "object") {
+              const countedStreamAttempt = guardUnknownToolLoopInMessage(
+                event.message,
+                unknownToolGuardState,
+                {
+                  allowedToolNames,
+                  threshold: options?.unknownToolThreshold,
+                  countAttempt: !streamAttemptAlreadyCounted,
+                  resetOnAllowedTool: true,
+                  resetOnMissingUnknownTool: false,
+                },
+              );
+              streamAttemptAlreadyCounted ||= countedStreamAttempt;
+            }
+            guardUnknownToolLoopInMessage(event.partial, unknownToolGuardState, {
+              allowedToolNames,
+              threshold: options?.unknownToolThreshold,
+              countAttempt: false,
+            });
+          }
+          return result;
         },
-      );
-      streamAttemptAlreadyCounted ||= countedStreamAttempt;
-    }
-    guardUnknownToolLoopInMessage(event.partial, unknownToolGuardState, {
-      allowedToolNames,
-      threshold: options?.unknownToolThreshold,
-      countAttempt: false,
-    });
-  });
+        async return(value?: unknown) {
+          return iterator.return?.(value) ?? { done: true as const, value: undefined };
+        },
+        async throw(error?: unknown) {
+          return iterator.throw?.(error) ?? { done: true as const, value: undefined };
+        },
+      };
+    };
 
   return stream;
 }

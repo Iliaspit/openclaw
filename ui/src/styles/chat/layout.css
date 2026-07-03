@@ -959,6 +959,97 @@
   flex-wrap: wrap;
 }
 
+.chat-controls__session-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.queue-health {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.25;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.queue-health:hover,
+.queue-health:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.queue-health__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  flex: 0 0 auto;
+  background: var(--muted);
+}
+
+.queue-health__label,
+.queue-health__detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.queue-health__detail {
+  color: color-mix(in srgb, var(--muted) 78%, var(--text) 22%);
+}
+
+.queue-health--idle .queue-health__dot {
+  background: #22c55e;
+}
+
+.queue-health--running .queue-health__dot,
+.queue-health--other .queue-health__dot {
+  background: #38bdf8;
+}
+
+.queue-health--waiting .queue-health__dot {
+  background: #f59e0b;
+}
+
+.queue-health--degraded .queue-health__dot {
+  background: #eab308;
+}
+
+.queue-health--draining .queue-health__dot,
+.queue-health--error .queue-health__dot {
+  background: #ef4444;
+}
+
+.queue-health--waiting {
+  color: color-mix(in srgb, #f59e0b 74%, var(--text) 26%);
+  border-color: color-mix(in srgb, #f59e0b 38%, var(--border));
+}
+
+.queue-health--degraded {
+  color: color-mix(in srgb, #eab308 74%, var(--text) 26%);
+  border-color: color-mix(in srgb, #eab308 38%, var(--border));
+}
+
+.queue-health--draining,
+.queue-health--error {
+  color: color-mix(in srgb, #ef4444 74%, var(--text) 26%);
+  border-color: color-mix(in srgb, #ef4444 38%, var(--border));
+}
+
 .chat-controls__model {
   min-width: 170px;
   max-width: 320px;

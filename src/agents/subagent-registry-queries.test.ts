@@ -5,6 +5,7 @@ import {
   countPendingDescendantRunsFromRuns,
   listRunsForRequesterFromRuns,
   resolveRequesterForChildSessionFromRuns,
+  shouldIgnorePostCompletionAnnounceForRunFromRuns,
   shouldIgnorePostCompletionAnnounceForSessionFromRuns,
 } from "./subagent-registry-queries.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
@@ -503,5 +504,66 @@ describe("subagent registry query regressions", () => {
     ]);
 
     expect(shouldIgnorePostCompletionAnnounceForSessionFromRuns(runs, childSessionKey)).toBe(false);
+  });
+
+  it("ignores post-completion announce for child runs superseded by fresh reroute", () => {
+    const childSessionKey = "agent:main:subagent:old-worker";
+    const runs = toRunMap([
+      makeRun({
+        runId: "run-old-worker",
+        childSessionKey,
+        requesterSessionKey: "agent:main:main",
+        createdAt: 1,
+        suppressAnnounceReason: "fresh-reroute",
+      }),
+    ]);
+
+    expect(shouldIgnorePostCompletionAnnounceForSessionFromRuns(runs, childSessionKey)).toBe(true);
+  });
+
+  it("uses a deterministic run-id tie-break for equal-timestamp child generations", () => {
+    const childSessionKey = "agent:main:subagent:equal-created-at";
+    const runs = toRunMap([
+      makeRun({
+        runId: "run-z-suppressed",
+        childSessionKey,
+        requesterSessionKey: "agent:main:main",
+        createdAt: 1,
+        suppressAnnounceReason: "fresh-reroute",
+      }),
+      makeRun({
+        runId: "run-a-older",
+        childSessionKey,
+        requesterSessionKey: "agent:main:main",
+        createdAt: 1,
+      }),
+    ]);
+
+    expect(shouldIgnorePostCompletionAnnounceForSessionFromRuns(runs, childSessionKey)).toBe(true);
+  });
+
+  it("keeps fresh-reroute suppression attached to the old run when a newer same-session run exists", () => {
+    const childSessionKey = "agent:main:subagent:same-session-worker";
+    const runs = toRunMap([
+      makeRun({
+        runId: "run-old-suppressed",
+        childSessionKey,
+        requesterSessionKey: "agent:main:main",
+        createdAt: 1,
+        suppressAnnounceReason: "fresh-reroute",
+      }),
+      makeRun({
+        runId: "run-new-active",
+        childSessionKey,
+        requesterSessionKey: "agent:main:main",
+        createdAt: 2,
+      }),
+    ]);
+
+    expect(shouldIgnorePostCompletionAnnounceForSessionFromRuns(runs, childSessionKey)).toBe(
+      false,
+    );
+    expect(shouldIgnorePostCompletionAnnounceForRunFromRuns(runs, "run-old-suppressed")).toBe(true);
+    expect(shouldIgnorePostCompletionAnnounceForRunFromRuns(runs, "run-new-active")).toBe(false);
   });
 });

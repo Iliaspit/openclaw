@@ -5,6 +5,8 @@ read_when:
 title: "Podman"
 ---
 
+# Podman
+
 Run the OpenClaw Gateway in a rootless Podman container, managed by your current non-root user.
 
 The intended model is:
@@ -62,7 +64,8 @@ Optional build/setup env vars:
 
 - `OPENCLAW_IMAGE` or `OPENCLAW_PODMAN_IMAGE` -- use an existing/pulled image instead of building `openclaw:local`
 - `OPENCLAW_DOCKER_APT_PACKAGES` -- install extra apt packages during image build
-- `OPENCLAW_EXTENSIONS` -- pre-install plugin dependencies at build time
+- `OPENCLAW_EXTENSIONS` -- pre-install extension dependencies at build time
+- `OPENCLAW_INSTALL_BROWSER` -- bake Chromium and Linux browser deps into local builds by default; set `0` to skip
 
 Container start:
 

@@ -24,6 +24,7 @@ OPENCLAW_HOME="${HOME:-}"
 OPENCLAW_CONFIG_DIR="${OPENCLAW_CONFIG_DIR:-}"
 OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-}"
 OPENCLAW_IMAGE="${OPENCLAW_PODMAN_IMAGE:-${OPENCLAW_IMAGE:-openclaw:local}}"
+OPENCLAW_INSTALL_BROWSER_SETTING="${OPENCLAW_INSTALL_BROWSER:-1}"
 OPENCLAW_CONTAINER_NAME="${OPENCLAW_PODMAN_CONTAINER:-openclaw}"
 PLATFORM_NAME="$(uname -s 2>/dev/null || echo unknown)"
 HOST_GATEWAY_PORT="${OPENCLAW_PODMAN_GATEWAY_HOST_PORT:-${OPENCLAW_GATEWAY_PORT:-18789}}"
@@ -34,6 +35,15 @@ require_cmd() {
     echo "Missing dependency: $1" >&2
     exit 1
   fi
+}
+
+is_truthy_value() {
+  local raw="${1:-}"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  case "$raw" in
+    1 | true | yes | on) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 is_root() { [[ "$(id -u)" -eq 0 ]]; }
@@ -364,6 +374,9 @@ if [[ -n "${OPENCLAW_DOCKER_APT_PACKAGES:-}" ]]; then
 fi
 if [[ -n "${OPENCLAW_EXTENSIONS:-}" ]]; then
   BUILD_ARGS+=(--build-arg "OPENCLAW_EXTENSIONS=${OPENCLAW_EXTENSIONS}")
+fi
+if is_truthy_value "$OPENCLAW_INSTALL_BROWSER_SETTING"; then
+  BUILD_ARGS+=(--build-arg "OPENCLAW_INSTALL_BROWSER=1")
 fi
 
 if [[ "$OPENCLAW_IMAGE" == "openclaw:local" ]]; then

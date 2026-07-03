@@ -7,7 +7,11 @@ import { getAcpRuntimeBackend } from "../acp/runtime/registry.js";
 import { readAcpSessionEntry, upsertAcpSessionMeta } from "../acp/runtime/session-meta.js";
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { clearBootstrapSnapshot } from "../agents/bootstrap-cache.js";
-import { retireSessionMcpRuntime } from "../agents/pi-bundle-mcp-tools.js";
+import type { ChildRouteHealthCode } from "../agents/child-route-health-contract.js";
+import {
+  recordChildRouteHealthEvents,
+  resolveChildTargetKind,
+} from "../agents/child-route-health.js";
 import { abortEmbeddedPiRun, waitForEmbeddedPiRunEnd } from "../agents/pi-embedded.js";
 import { stopSubagentsForRequester } from "../auto-reply/reply/abort.js";
 import { clearSessionQueues } from "../auto-reply/reply/queue.js";
@@ -22,7 +26,6 @@ import {
   updateSessionStore,
 } from "../config/sessions.js";
 import { resolveSessionFilePath, resolveSessionFilePathOptions } from "../config/sessions/paths.js";
-import { resolveResetPreservedSelection } from "../config/sessions/reset-preserved-selection.js";
 import type { SessionAcpMeta } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { logVerbose } from "../globals.js";
@@ -51,6 +54,15 @@ import {
 
 const ACP_RUNTIME_CLEANUP_TIMEOUT_MS = 15_000;
 
+const CHILD_LOCAL_RESET_REPAIR_CODES: ChildRouteHealthCode[] = [
+  "child_conversation_expired",
+  "context_overflow",
+  "agent_lifecycle_blocked",
+  "agent_lifecycle_abandoned",
+  "agent_lifecycle_error",
+  "edit_failure_threshold",
+];
+
 function stripRuntimeModelState(entry?: SessionEntry): SessionEntry | undefined {
   if (!entry) {
     return entry;
@@ -62,6 +74,48 @@ function stripRuntimeModelState(entry?: SessionEntry): SessionEntry | undefined 
     contextTokens: undefined,
     systemPromptReport: undefined,
   };
+}
+
+type ResetPreservedSelectionState = Pick<
+  SessionEntry,
+  | "providerOverride"
+  | "modelOverride"
+  | "modelOverrideSource"
+  | "authProfileOverride"
+  | "authProfileOverrideSource"
+  | "authProfileOverrideCompactionCount"
+>;
+
+function resolveResetPreservedSelection(params: {
+  entry?: SessionEntry;
+}): Partial<ResetPreservedSelectionState> {
+  const { entry } = params;
+  if (!entry) {
+    return {};
+  }
+
+  const preserved: Partial<ResetPreservedSelectionState> = {};
+  // `modelOverrideSource` is new. Older persisted sessions can still carry
+  // user-selected overrides without the source field, so treat an absent
+  // source as legacy user state during reset and backfill it forward.
+  const preserveLegacyUserModelOverride =
+    entry.modelOverrideSource === "user" ||
+    (entry.modelOverrideSource === undefined && Boolean(entry.modelOverride));
+  if (preserveLegacyUserModelOverride && entry.modelOverride) {
+    preserved.providerOverride = entry.providerOverride;
+    preserved.modelOverride = entry.modelOverride;
+    preserved.modelOverrideSource = "user";
+  }
+
+  if (entry.authProfileOverrideSource === "user" && entry.authProfileOverride) {
+    preserved.authProfileOverride = entry.authProfileOverride;
+    preserved.authProfileOverrideSource = entry.authProfileOverrideSource;
+    if (entry.authProfileOverrideCompactionCount !== undefined) {
+      preserved.authProfileOverrideCompactionCount = entry.authProfileOverrideCompactionCount;
+    }
+  }
+
+  return preserved;
 }
 
 export function archiveSessionTranscriptsForSession(params: {
@@ -226,15 +280,6 @@ async function ensureSessionRuntimeCleanup(params: {
   const ended = await waitForEmbeddedPiRunEnd(params.sessionId, 15_000);
   clearBootstrapSnapshot(params.target.canonicalKey);
   if (ended) {
-    await retireSessionMcpRuntime({
-      sessionId: params.sessionId,
-      reason: "gateway-session-cleanup",
-      onError: (error, sessionId) => {
-        logVerbose(
-          `sessions cleanup: failed to dispose bundle MCP runtime for ${sessionId}: ${String(error)}`,
-        );
-      },
-    });
     await closeTrackedBrowserTabs();
     return undefined;
   }
@@ -468,6 +513,41 @@ function emitGatewayBeforeResetPluginHook(params: {
     });
 }
 
+async function recordChildRouteResetRepairTransition(params: {
+  sessionKey: string;
+  runId?: string;
+  reason: "new" | "reset";
+}) {
+  if (!resolveChildTargetKind(params.sessionKey)) {
+    return undefined;
+  }
+  const recorded = await recordChildRouteHealthEvents(
+    CHILD_LOCAL_RESET_REPAIR_CODES.map((code) => ({
+      code,
+      status: "cleared",
+      source: "repair_control",
+      childSessionKey: params.sessionKey,
+      runId: params.runId,
+      reason: `Session ${params.reason} created a fresh transcript for this child route.`,
+    })),
+    { failClosedOnError: true },
+  );
+  if (!recorded.ok) {
+    return errorShape(ErrorCodes.UNAVAILABLE, "failed to record child route repair transition", {
+      retryable: true,
+      details: {
+        kind: "child_route_health_unavailable",
+        childSessionKey: params.sessionKey,
+        errorKind: "child_route_health_unavailable",
+        retryable: true,
+        plannerInstruction:
+          "Retry after route-health storage is available; do not deliver follow-up work to the child.",
+      },
+    });
+  }
+  return undefined;
+}
+
 export async function performGatewaySessionReset(params: {
   key: string;
   reason: "new" | "reset";
@@ -498,6 +578,13 @@ export async function performGatewaySessionReset(params: {
     },
   );
   await triggerInternalHook(hookEvent);
+  const childRouteRepairError = await recordChildRouteResetRepairTransition({
+    sessionKey: target.canonicalKey ?? params.key,
+    reason: params.reason,
+  });
+  if (childRouteRepairError) {
+    return { ok: false, error: childRouteRepairError };
+  }
   const mutationCleanupError = await cleanupSessionBeforeMutation({
     cfg,
     key: params.key,

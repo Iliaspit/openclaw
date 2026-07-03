@@ -124,6 +124,7 @@ import {
   resolveUnauthorizedHandshakeContext,
   shouldAllowSilentLocalPairing,
   shouldSkipLocalBackendSelfPairing,
+  shouldUsePinnedMetadataForLocalSharedAuthClient,
 } from "./handshake-auth-helpers.js";
 import { isUnauthorizedRoleError, UnauthorizedFloodGuard } from "./unauthorized-flood-guard.js";
 
@@ -1097,12 +1098,32 @@ export function attachGatewayWsMessageHandler(params: {
             });
             const { platformMismatch, deviceFamilyMismatch } = metadataPinning;
             if (platformMismatch || deviceFamilyMismatch) {
-              logGateway.warn(
-                `security audit: device metadata upgrade requested reason=metadata-upgrade device=${device.id} ip=${reportedClientIp ?? "unknown-ip"} auth=${authMethod} payload=${deviceAuthPayloadVersion ?? "unknown"} claimedPlatform=${claimedPlatform ?? "<none>"} pinnedPlatform=${pairedPlatform ?? "<none>"} claimedDeviceFamily=${claimedDeviceFamily ?? "<none>"} pinnedDeviceFamily=${pairedDeviceFamily ?? "<none>"} client=${connectParams.client.id} conn=${connId}`,
-              );
-              const ok = await requirePairing("metadata-upgrade", paired);
-              if (!ok) {
-                return;
+              if (
+                shouldUsePinnedMetadataForLocalSharedAuthClient({
+                  connectParams,
+                  locality: pairingLocality,
+                  hasBrowserOriginHeader,
+                  sharedAuthOk,
+                  authMethod,
+                })
+              ) {
+                logGateway.warn(
+                  `security audit: using approved device metadata for local shared-auth client reason=metadata-pinned device=${device.id} ip=${reportedClientIp ?? "unknown-ip"} auth=${authMethod} payload=${deviceAuthPayloadVersion ?? "unknown"} claimedPlatform=${claimedPlatform ?? "<none>"} pinnedPlatform=${pairedPlatform ?? "<none>"} claimedDeviceFamily=${claimedDeviceFamily ?? "<none>"} pinnedDeviceFamily=${pairedDeviceFamily ?? "<none>"} client=${connectParams.client.id} conn=${connId}`,
+                );
+                if (metadataPinning.pinnedPlatform) {
+                  connectParams.client.platform = metadataPinning.pinnedPlatform;
+                }
+                if (metadataPinning.pinnedDeviceFamily) {
+                  connectParams.client.deviceFamily = metadataPinning.pinnedDeviceFamily;
+                }
+              } else {
+                logGateway.warn(
+                  `security audit: device metadata upgrade requested reason=metadata-upgrade device=${device.id} ip=${reportedClientIp ?? "unknown-ip"} auth=${authMethod} payload=${deviceAuthPayloadVersion ?? "unknown"} claimedPlatform=${claimedPlatform ?? "<none>"} pinnedPlatform=${pairedPlatform ?? "<none>"} claimedDeviceFamily=${claimedDeviceFamily ?? "<none>"} pinnedDeviceFamily=${pairedDeviceFamily ?? "<none>"} client=${connectParams.client.id} conn=${connId}`,
+                );
+                const ok = await requirePairing("metadata-upgrade", paired);
+                if (!ok) {
+                  return;
+                }
               }
             } else {
               if (metadataPinning.pinnedPlatform) {

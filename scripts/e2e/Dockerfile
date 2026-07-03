@@ -50,4 +50,21 @@ RUN pnpm build
 RUN mkdir -p dist/control-ui \
   && printf '%s\n' '<!doctype html><title>OpenClaw Control UI</title>' > dist/control-ui/index.html
 
+# Playwright browser automation (e.g. Control UI / web E2E) needs OS packages.
+# Bake Chromium + deps at build time as root so non-root runs never need
+# `playwright install-deps` / sudo (restricted sandboxes often block elevation).
+USER root
+RUN --mount=type=cache,id=openclaw-e2e-bookworm-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=openclaw-e2e-bookworm-apt-lists,target=/var/lib/apt,sharing=locked \
+    apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb \
+    && mkdir -p /home/appuser/.cache/ms-playwright \
+    && PLAYWRIGHT_BROWSERS_PATH=/home/appuser/.cache/ms-playwright \
+      node /app/node_modules/playwright-core/cli.js install --with-deps chromium \
+    && chown -R appuser:appuser /home/appuser/.cache/ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+
+USER appuser
+ENV PLAYWRIGHT_BROWSERS_PATH=/home/appuser/.cache/ms-playwright
+
 CMD ["bash"]

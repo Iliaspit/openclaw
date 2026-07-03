@@ -657,6 +657,8 @@ export const ko: TranslationMap = {
     hideCronSessions: "Cron 세션 숨기기",
     showCronSessions: "Cron 세션 표시",
     showCronSessionsHidden: "Cron 세션 표시({count}개 숨김)",
+    sessionSelectTopLevel: "Top-level agents",
+    sessionSelectOther: "Spawned and other sessions",
     onboardingDisabled: "설정 중에는 비활성화됨",
   },
   languages: {

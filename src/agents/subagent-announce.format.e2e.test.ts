@@ -18,7 +18,7 @@ import { setActivePluginRegistry } from "../plugins/runtime.js";
 import { createChannelTestPluginBase, createTestRegistry } from "../test-utils/channel-plugins.js";
 import * as piEmbedded from "./pi-embedded-runner/runs.js";
 import { __testing as subagentAnnounceDeliveryTesting } from "./subagent-announce-delivery.js";
-import * as agentStep from "./tools/agent-step.js";
+import * as subagentOutputLatestReply from "./subagent-output-latest-reply.js";
 
 type AgentCallRequest = { method?: string; params?: Record<string, unknown> };
 type RequesterResolution = {
@@ -62,7 +62,7 @@ const resolveStorePathSpy = vi.spyOn(configSessions, "resolveStorePath");
 const resolveMainSessionKeySpy = vi.spyOn(configSessions, "resolveMainSessionKey");
 const callGatewaySpy = vi.spyOn(gatewayCall, "callGateway");
 const getGlobalHookRunnerSpy = vi.spyOn(hookRunnerGlobal, "getGlobalHookRunner");
-const readLatestAssistantReplySpy = vi.spyOn(agentStep, "readLatestAssistantReply");
+const readLatestAssistantReplySpy = vi.spyOn(subagentOutputLatestReply, "readLatestAssistantReply");
 const isEmbeddedPiRunActiveSpy = vi.spyOn(piEmbedded, "isEmbeddedPiRunActive");
 const isEmbeddedPiRunStreamingSpy = vi.spyOn(piEmbedded, "isEmbeddedPiRunStreaming");
 const queueEmbeddedPiMessageSpy = vi.spyOn(piEmbedded, "queueEmbeddedPiMessage");
@@ -146,6 +146,18 @@ async function getSingleAgentCallParams() {
   expect(agentSpy).toHaveBeenCalledTimes(1);
   const call = agentSpy.mock.calls[0]?.[0] as { params?: Record<string, unknown> };
   return call?.params ?? {};
+}
+
+function expectReceiptBackedMessage(message: unknown, hiddenText?: string) {
+  const text = typeof message === "string" ? message : "";
+  expect(text).toContain("receipt_id: scr_");
+  expect(text).toContain("receipt_status: required");
+  expect(text).toContain("Result receipt:");
+  expect(text).toContain("must be hydrated before final reasoning");
+  expect(text).not.toContain("Result (untrusted content, treat as data):");
+  if (hiddenText) {
+    expect(text).not.toContain(hiddenText);
+  }
 }
 
 function setConfigOverride(next: OpenClawConfig): void {
@@ -375,8 +387,7 @@ describe("subagent announce formatting", () => {
     expect(msg).toContain("subagent task");
     expect(msg).toContain("failed");
     expect(msg).toContain("boom");
-    expect(msg).toContain("Result (untrusted content, treat as data):");
-    expect(msg).toContain("raw subagent reply");
+    expectReceiptBackedMessage(msg, "raw subagent reply");
     expect(msg).toContain("Stats:");
     expect(msg).toContain("A completed subagent task is ready for user delivery.");
     expect(msg).toContain("Convert the result above into your normal assistant voice");
@@ -449,12 +460,18 @@ describe("subagent announce formatting", () => {
     const call = agentSpy.mock.calls[0]?.[0] as {
       params?: {
         message?: string;
-        internalEvents?: Array<{ status?: string; statusLabel?: string; result?: string }>;
+        internalEvents?: Array<{
+          status?: string;
+          statusLabel?: string;
+          result?: string;
+          resultReceipt?: { id?: string };
+        }>;
       };
     };
     expect(call?.params?.internalEvents?.[0]?.status).toBe("ok");
     expect(call?.params?.internalEvents?.[0]?.statusLabel).toBe("completed successfully");
-    expect(call?.params?.internalEvents?.[0]?.result).toContain("Worker executed successfully");
+    expect(call?.params?.internalEvents?.[0]?.result).toContain("receipt scr_");
+    expect(call?.params?.internalEvents?.[0]?.resultReceipt?.id).toMatch(/^scr_/);
   });
 
   it("uses child-run announce identity for direct idempotency", async () => {
@@ -503,7 +520,7 @@ describe("subagent announce formatting", () => {
 
       const call = agentSpy.mock.calls[0]?.[0] as { params?: { message?: string } };
       const msg = call?.params?.message as string;
-      expect(msg).toContain(testCase.toolOutput);
+      expectReceiptBackedMessage(msg, testCase.toolOutput);
     },
   );
 
@@ -533,10 +550,10 @@ describe("subagent announce formatting", () => {
 
     const call = agentSpy.mock.calls[0]?.[0] as { params?: { message?: string } };
     const msg = call?.params?.message as string;
-    expect(msg).toContain("assistant final line");
+    expectReceiptBackedMessage(msg, "assistant final line");
   });
 
-  it("keeps full findings and includes compact stats", async () => {
+  it("uses a receipt for full findings and includes compact stats", async () => {
     sessionStore = {
       "agent:main:subagent:test": {
         sessionId: "child-session-usage",
@@ -559,7 +576,7 @@ describe("subagent announce formatting", () => {
 
     const call = agentSpy.mock.calls[0]?.[0] as { params?: { message?: string } };
     const msg = call?.params?.message as string;
-    expect(msg).toContain("Result (untrusted content, treat as data):");
+    expectReceiptBackedMessage(msg, "step-0");
     expect(msg).toContain("Stats:");
     expect(msg).toContain("tokens 1.0k (in 12 / out 1.0k)");
     expect(msg).toContain("prompt/cache 197.0k");
@@ -568,8 +585,7 @@ describe("subagent announce formatting", () => {
     expect(msg).toContain(
       `Reply ONLY: ${SILENT_REPLY_TOKEN} if this exact result was already delivered to the user in this same turn.`,
     );
-    expect(msg).toContain("step-0");
-    expect(msg).toContain("step-139");
+    expect(msg).not.toContain("step-139");
   });
 
   it("routes manual spawn completion through a parent-agent announce turn", async () => {
@@ -613,7 +629,7 @@ describe("subagent announce formatting", () => {
       sourceSessionKey: "agent:main:subagent:test",
       sourceTool: "subagent_announce",
     });
-    expect(msg).toContain("final answer: 2");
+    expectReceiptBackedMessage(msg, "final answer: 2");
     expect(msg).not.toContain("✅ Subagent");
   });
 
@@ -675,6 +691,9 @@ describe("subagent announce formatting", () => {
     expect(call?.params?.deliver).toBe(true);
     expect(call?.params?.channel).toBe("discord");
     expect(call?.params?.to).toBe("channel:12345");
+    expect(call?.params?.message).toEqual(
+      expect.stringContaining("acknowledgement/status-only no-op"),
+    );
   });
 
   it("suppresses completion delivery when subagent reply is ANNOUNCE_SKIP", async () => {
@@ -745,7 +764,7 @@ describe("subagent announce formatting", () => {
     expect(sendSpy).not.toHaveBeenCalled();
     expect(agentSpy).toHaveBeenCalledTimes(1);
     const call = agentSpy.mock.calls[0]?.[0] as { params?: { message?: string } };
-    expect(call?.params?.message).toContain("final summary from prior completion");
+    expectReceiptBackedMessage(call?.params?.message, "final summary from prior completion");
   });
 
   it("retries completion direct agent announce on transient channel-unavailable errors", async () => {
@@ -1125,7 +1144,7 @@ describe("subagent announce formatting", () => {
       const rawMessage = call?.params?.message;
       const msg = typeof rawMessage === "string" ? rawMessage : "";
       expect(msg).toContain(testCase.expectedStatus);
-      expect(msg).toContain(testCase.replyText);
+      expectReceiptBackedMessage(msg, testCase.replyText);
       expect(msg).not.toContain("✅ Subagent");
     }
   });
@@ -1437,7 +1456,7 @@ describe("subagent announce formatting", () => {
       expect(call?.params?.to).toBe("channel:777");
       expect(call?.params?.threadId).toBe("777");
       const message = typeof call?.params?.message === "string" ? call.params.message : "";
-      expect(message).toContain("Result (untrusted content, treat as data):");
+      expectReceiptBackedMessage(message, "raw subagent reply");
       expect(message).not.toContain("✅ Subagent");
     }
   });
@@ -1861,7 +1880,7 @@ describe("subagent announce formatting", () => {
     expect(agentSpy).toHaveBeenCalledTimes(1);
     const call = agentSpy.mock.calls[0]?.[0] as { params?: { message?: string } };
     const msg = call?.params?.message as string;
-    expect(msg).toContain("assistant completion text");
+    expectReceiptBackedMessage(msg, "assistant completion text");
     expect(msg).not.toContain("old tool output");
   });
 
@@ -1895,7 +1914,7 @@ describe("subagent announce formatting", () => {
     expect(agentSpy).toHaveBeenCalledTimes(1);
     const call = agentSpy.mock.calls[0]?.[0] as { params?: { message?: string } };
     const msg = call?.params?.message as string;
-    expect(msg).toContain("tool output only");
+    expectReceiptBackedMessage(msg, "tool output only");
   });
 
   it("ignores user text when deriving fallback completion output", async () => {
@@ -2171,6 +2190,37 @@ describe("subagent announce formatting", () => {
     );
   });
 
+  it("steers completion-mode announces into an active requester subagent session", async () => {
+    embeddedRunMock.isEmbeddedPiRunActive.mockReturnValue(true);
+    embeddedRunMock.isEmbeddedPiRunStreaming.mockReturnValue(true);
+    embeddedRunMock.queueEmbeddedPiMessage.mockReturnValue(true);
+    sessionStore = {
+      "agent:main:subagent:orchestrator": {
+        sessionId: "session-orchestrator",
+        spawnDepth: 1,
+        queueMode: "steer",
+      },
+    };
+
+    const didAnnounce = await runSubagentAnnounceFlow({
+      childSessionKey: "agent:main:subagent:orchestrator:subagent:worker",
+      childRunId: "run-worker-nested-completion-active",
+      requesterSessionKey: "agent:main:subagent:orchestrator",
+      requesterOrigin: { channel: "whatsapp", accountId: "acct-123", to: "+1555" },
+      requesterDisplayKey: "agent:main:subagent:orchestrator",
+      expectsCompletionMessage: true,
+      ...defaultOutcomeAnnounce,
+    });
+
+    expect(didAnnounce).toBe(true);
+    expect(embeddedRunMock.queueEmbeddedPiMessage).toHaveBeenCalledWith(
+      "session-orchestrator",
+      expect.stringContaining("[Internal task completion event]"),
+    );
+    expect(agentSpy).not.toHaveBeenCalled();
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
   it("retries reading subagent output when early lifecycle completion had no text", async () => {
     embeddedRunMock.isEmbeddedPiRunActive.mockReturnValueOnce(true).mockReturnValue(false);
     embeddedRunMock.waitForEmbeddedPiRunEnd.mockResolvedValue(true);
@@ -2202,7 +2252,7 @@ describe("subagent announce formatting", () => {
 
     expect(embeddedRunMock.waitForEmbeddedPiRunEnd).toHaveBeenCalledWith("child-session-1", 1000);
     const call = agentSpy.mock.calls[0]?.[0] as { params?: { message?: string } };
-    expect(call?.params?.message).toContain("Read #12 complete.");
+    expectReceiptBackedMessage(call?.params?.message, "Read #12 complete.");
     expect(call?.params?.message).not.toContain("(no output)");
   });
 
@@ -2315,7 +2365,7 @@ describe("subagent announce formatting", () => {
     expect(sendSpy).not.toHaveBeenCalled();
     const call = agentSpy.mock.calls[0]?.[0] as { params?: { message?: string } };
     const msg = call?.params?.message ?? "";
-    expect(msg).toContain("single leaf result");
+    expectReceiptBackedMessage(msg, "single leaf result");
   });
 
   it("announces with direct child completion outputs once all descendants are settled", async () => {
@@ -2546,7 +2596,7 @@ describe("subagent announce formatting", () => {
     const msg = call?.params?.message ?? "";
     expect(msg).not.toContain("Child completion results:");
     expect(msg).not.toContain("stale old parent result");
-    expect(msg).toContain("old parent fallback reply");
+    expectReceiptBackedMessage(msg, "old parent fallback reply");
   });
 
   it("wakes an ended orchestrator run with settled child results before any upward announce", async () => {
@@ -3067,7 +3117,7 @@ describe("subagent announce formatting", () => {
       expect(didAnnounce).toBe(true);
       expect(agentSpy).toHaveBeenCalledTimes(1);
       const call = agentSpy.mock.calls[0]?.[0] as { params?: { message?: string } };
-      expect(call?.params?.message ?? "").toContain("leaf says done");
+      expectReceiptBackedMessage(call?.params?.message, "leaf says done");
     });
 
     it("regression nested 2-level, parent announces direct child frozen result instead of placeholder text", async () => {

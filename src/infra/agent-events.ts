@@ -1,6 +1,10 @@
 import type { VerboseLevel } from "../auto-reply/thinking.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { notifyListeners, registerListener } from "../shared/listeners.js";
+import {
+  resetAgentRuntimeHealthForTest,
+  updateAgentRuntimeHealthFromEvent,
+} from "./agent-runtime-health.js";
 
 export type AgentEventStream =
   | "lifecycle"
@@ -216,6 +220,7 @@ export function emitAgentEvent(event: Omit<AgentEventPayload, "seq" | "ts">) {
     seq: nextSeq,
     ts: Date.now(),
   };
+  updateAgentRuntimeHealthFromEvent(enriched);
   notifyListeners(state.listeners, enriched);
 }
 
@@ -294,4 +299,5 @@ export function resetAgentEventsForTest() {
   state.seqByRun.clear();
   state.listeners.clear();
   state.runContextById.clear();
+  resetAgentRuntimeHealthForTest();
 }

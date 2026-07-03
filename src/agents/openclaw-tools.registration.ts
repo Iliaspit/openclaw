@@ -8,6 +8,12 @@ export function collectPresentOpenClawTools(
   return candidates.filter((tool): tool is AnyAgentTool => tool !== null && tool !== undefined);
 }
 
+export function isCatalogToolEnabledForOpenClawTools(params: {
+  config?: OpenClawConfig;
+}): boolean {
+  return params.config?.tools?.catalog?.enabled === true;
+}
+
 export function isUpdatePlanToolEnabledForOpenClawTools(params: {
   config?: OpenClawConfig;
   agentSessionKey?: string;

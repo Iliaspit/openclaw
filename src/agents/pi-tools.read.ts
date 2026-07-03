@@ -622,6 +622,10 @@ type SandboxToolParams = {
   bridge: SandboxFsBridge;
   modelContextWindowTokens?: number;
   imageSanitization?: ImageSanitizationLimits;
+  routeHealth?: {
+    childSessionKey?: string;
+    runId?: string;
+  };
 };
 
 export function createSandboxedReadTool(params: SandboxToolParams) {
@@ -645,12 +649,13 @@ export function createSandboxedEditTool(params: SandboxToolParams) {
   const base = createEditTool(params.root, {
     operations: createSandboxEditOperations(params),
   }) as unknown as AnyAgentTool;
-  const withRecovery = wrapEditToolWithRecovery(base, {
+  const withValidation = wrapToolParamValidation(base, REQUIRED_PARAM_GROUPS.edit);
+  return wrapEditToolWithRecovery(withValidation, {
     root: params.root,
     readFile: async (absolutePath: string) =>
       (await params.bridge.readFile({ filePath: absolutePath, cwd: params.root })).toString("utf8"),
+    routeHealth: params.routeHealth,
   });
-  return wrapToolParamValidation(withRecovery, REQUIRED_PARAM_GROUPS.edit);
 }
 
 export function createHostWorkspaceWriteTool(root: string, options?: { workspaceOnly?: boolean }) {
@@ -660,15 +665,25 @@ export function createHostWorkspaceWriteTool(root: string, options?: { workspace
   return wrapToolParamValidation(base, REQUIRED_PARAM_GROUPS.write);
 }
 
-export function createHostWorkspaceEditTool(root: string, options?: { workspaceOnly?: boolean }) {
+export function createHostWorkspaceEditTool(
+  root: string,
+  options?: {
+    workspaceOnly?: boolean;
+    routeHealth?: {
+      childSessionKey?: string;
+      runId?: string;
+    };
+  },
+) {
   const base = createEditTool(root, {
     operations: createHostEditOperations(root, options),
   }) as unknown as AnyAgentTool;
-  const withRecovery = wrapEditToolWithRecovery(base, {
+  const withValidation = wrapToolParamValidation(base, REQUIRED_PARAM_GROUPS.edit);
+  return wrapEditToolWithRecovery(withValidation, {
     root,
     readFile: (absolutePath: string) => fs.readFile(absolutePath, "utf-8"),
+    routeHealth: options?.routeHealth,
   });
-  return wrapToolParamValidation(withRecovery, REQUIRED_PARAM_GROUPS.edit);
 }
 
 export function createOpenClawReadTool(

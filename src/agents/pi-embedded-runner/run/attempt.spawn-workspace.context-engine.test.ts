@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildMemorySystemPromptAddition } from "../../../plugin-sdk/core.js";
@@ -5,6 +8,10 @@ import {
   clearMemoryPluginState,
   registerMemoryPromptSection,
 } from "../../../plugins/memory-state.js";
+import {
+  readLatestChildRouteContextHeadroomSnapshot,
+  resetChildRouteHealthForTest,
+} from "../../child-route-health.js";
 import {
   type AttemptContextEngine,
   buildLoopPromptCacheInfo,
@@ -141,6 +148,49 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
     expectCalledWithSessionKey(bootstrap, sessionKey);
     expectCalledWithSessionKey(assemble, sessionKey);
     expectCalledWithSessionKey(afterTurn, sessionKey);
+  });
+
+  it("records scalar context-headroom telemetry for child request assembly", async () => {
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-route-headroom-attempt-"));
+    tempPaths.push(stateDir);
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    resetChildRouteHealthForTest();
+    try {
+      const childSessionKey = "agent:main:subagent:route-headroom";
+      const runId = "run-route-headroom";
+      await createContextEngineAttemptRunner({
+        sessionKey: childSessionKey,
+        tempPaths,
+        contextEngine: {
+          assemble: async ({ messages }) => ({ messages, estimatedTokens: messages.length }),
+        },
+        attemptOverrides: { runId },
+      });
+
+      await expect(
+        readLatestChildRouteContextHeadroomSnapshot({ childSessionKey, runId }),
+      ).resolves.toEqual({
+        ok: true,
+        snapshot: expect.objectContaining({
+          childSessionKey,
+          runId,
+          modelContextLimitTokens: 2048,
+          estimateSource: "actual_request",
+          lastCompactionStatus: "none",
+          estimatedPromptTokens: expect.any(Number),
+          headroomTokens: expect.any(Number),
+          headroomPercent: expect.any(Number),
+        }),
+      });
+    } finally {
+      resetChildRouteHealthForTest();
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+    }
   });
 
   it("forwards modelId to assemble", async () => {

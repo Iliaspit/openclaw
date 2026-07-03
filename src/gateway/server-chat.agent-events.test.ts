@@ -57,6 +57,7 @@ describe("agent event handler", () => {
     resolveSessionKeyForRun?: (runId: string) => string | undefined;
     lifecycleErrorRetryGraceMs?: number;
     isChatSendRunActive?: (runId: string) => boolean;
+    selectOrchestrationConnIds?: (connIds?: ReadonlySet<string>) => ReadonlySet<string>;
   }) {
     const nowSpy =
       params?.now === undefined ? undefined : vi.spyOn(Date, "now").mockReturnValue(params.now);
@@ -79,6 +80,9 @@ describe("agent event handler", () => {
       clearAgentRunContext,
       toolEventRecipients,
       sessionEventSubscribers,
+      selectOrchestrationConnIds:
+        params?.selectOrchestrationConnIds ??
+        ((connIds?: ReadonlySet<string>) => connIds ?? new Set(["conn-orchestration"])),
       lifecycleErrorRetryGraceMs: params?.lifecycleErrorRetryGraceMs,
       isChatSendRunActive: params?.isChatSendRunActive,
     });
@@ -117,6 +121,10 @@ describe("agent event handler", () => {
 
   function chatBroadcastCalls(broadcast: ReturnType<typeof vi.fn>) {
     return broadcast.mock.calls.filter(([event]) => event === "chat");
+  }
+
+  function agentConnBroadcastCalls(broadcastToConnIds: ReturnType<typeof vi.fn>) {
+    return broadcastToConnIds.mock.calls.filter(([event]) => event === "agent");
   }
 
   function sessionChatCalls(nodeSendToSession: ReturnType<typeof vi.fn>) {
@@ -161,8 +169,8 @@ describe("agent event handler", () => {
     });
   }
 
-  function expectSingleAgentBroadcastPayload(broadcast: ReturnType<typeof vi.fn>) {
-    const broadcastAgentCalls = broadcast.mock.calls.filter(([event]) => event === "agent");
+  function expectSingleAgentBroadcastPayload(broadcastToConnIds: ReturnType<typeof vi.fn>) {
+    const broadcastAgentCalls = agentConnBroadcastCalls(broadcastToConnIds);
     expect(broadcastAgentCalls).toHaveLength(1);
     return broadcastAgentCalls[0]?.[1] as {
       runId?: string;
@@ -575,7 +583,7 @@ describe("agent event handler", () => {
   });
 
   it("drops stale events that arrive after lifecycle completion", () => {
-    const { broadcast, nodeSendToSession, chatRunState, handler, nowSpy } = createHarness({
+    const { broadcastToConnIds, nodeSendToSession, chatRunState, handler, nowSpy } = createHarness({
       now: 2_500,
     });
     chatRunState.registry.add("run-stale-tail", {
@@ -591,7 +599,7 @@ describe("agent event handler", () => {
       data: { text: "done" },
     });
     emitLifecycleEnd(handler, "run-stale-tail");
-    const errorCallsBeforeStaleEvent = broadcast.mock.calls.filter(
+    const errorCallsBeforeStaleEvent = agentConnBroadcastCalls(broadcastToConnIds).filter(
       ([event, payload]) =>
         event === "agent" && (payload as { stream?: string }).stream === "error",
     ).length;
@@ -605,7 +613,7 @@ describe("agent event handler", () => {
       data: { text: "late tail" },
     });
 
-    const errorCalls = broadcast.mock.calls.filter(
+    const errorCalls = agentConnBroadcastCalls(broadcastToConnIds).filter(
       ([event, payload]) =>
         event === "agent" && (payload as { stream?: string }).stream === "error",
     );
@@ -674,9 +682,15 @@ describe("agent event handler", () => {
     expect(flushedPayload.message?.content?.[0]?.text).toBe("Before tool expanded");
     expect(sessionChatCalls(nodeSendToSession)).toHaveLength(2);
 
-    expect(broadcastToConnIds).toHaveBeenCalledTimes(1);
     const flushCallOrder = broadcast.mock.invocationCallOrder[1] ?? 0;
-    const toolCallOrder = broadcastToConnIds.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER;
+    const toolCallIndex = broadcastToConnIds.mock.calls.findIndex(
+      ([event, payload]) =>
+        event === "agent" && (payload as { stream?: string }).stream === "tool",
+    );
+    const toolCallOrder =
+      toolCallIndex >= 0
+        ? (broadcastToConnIds.mock.invocationCallOrder[toolCallIndex] ?? Number.MAX_SAFE_INTEGER)
+        : Number.MAX_SAFE_INTEGER;
     expect(flushCallOrder).toBeLessThan(toolCallOrder);
     nowSpy.mockRestore();
     resetAgentRunContextForTest();
@@ -954,11 +968,11 @@ describe("agent event handler", () => {
       },
     });
 
-    const sessionsChangedCalls = broadcastToConnIds.mock.calls.filter(
-      ([event]) => event === "sessions.changed",
+    const sessionActivityCalls = broadcastToConnIds.mock.calls.filter(
+      ([event]) => event === "session.activity",
     );
-    expect(sessionsChangedCalls).toHaveLength(2);
-    expect(sessionsChangedCalls[1]?.[1]).toEqual(
+    expect(sessionActivityCalls).toHaveLength(2);
+    expect(sessionActivityCalls[1]?.[1]).toEqual(
       expect.objectContaining({
         sessionKey: "session-finished",
         phase: "end",
@@ -1029,7 +1043,7 @@ describe("agent event handler", () => {
     });
 
     expect(broadcastToConnIds).toHaveBeenCalledWith(
-      "sessions.changed",
+      "session.activity",
       expect.objectContaining({
         sessionKey: "session-finished",
         phase: "end",
@@ -1112,14 +1126,13 @@ describe("agent event handler", () => {
   });
 
   it("broadcasts fallback events to agent subscribers and node session", () => {
-    const { broadcast, broadcastToConnIds, nodeSendToSession, handler } = createHarness({
+    const { broadcastToConnIds, nodeSendToSession, handler } = createHarness({
       resolveSessionKeyForRun: () => "session-fallback",
     });
 
     emitFallbackLifecycle({ handler, runId: "run-fallback" });
 
-    expect(broadcastToConnIds).not.toHaveBeenCalled();
-    const payload = expectSingleAgentBroadcastPayload(broadcast);
+    const payload = expectSingleAgentBroadcastPayload(broadcastToConnIds);
     expect(payload.stream).toBe("lifecycle");
     expect(payload.data?.phase).toBe("fallback");
     expect(payload.sessionKey).toBe("session-fallback");
@@ -1129,8 +1142,21 @@ describe("agent event handler", () => {
     expect(nodeCalls).toHaveLength(1);
   });
 
+  it("keeps orchestration lifecycle events off clients that did not opt in", () => {
+    const { broadcastToConnIds, nodeSendToSession, handler } = createHarness({
+      resolveSessionKeyForRun: () => "session-fallback",
+      selectOrchestrationConnIds: () => new Set(),
+    });
+
+    emitFallbackLifecycle({ handler, runId: "run-no-orchestration-cap" });
+
+    expect(broadcastToConnIds).not.toHaveBeenCalled();
+    const nodeCalls = nodeSendToSession.mock.calls.filter(([, event]) => event === "agent");
+    expect(nodeCalls).toHaveLength(1);
+  });
+
   it("remaps chat-linked lifecycle runId to client runId", () => {
-    const { broadcast, nodeSendToSession, chatRunState, handler } = createHarness({
+    const { broadcastToConnIds, nodeSendToSession, chatRunState, handler } = createHarness({
       resolveSessionKeyForRun: () => "session-fallback",
     });
     chatRunState.registry.add("run-fallback-internal", {
@@ -1140,7 +1166,7 @@ describe("agent event handler", () => {
 
     emitFallbackLifecycle({ handler, runId: "run-fallback-internal" });
 
-    const payload = expectSingleAgentBroadcastPayload(broadcast);
+    const payload = expectSingleAgentBroadcastPayload(broadcastToConnIds);
     expect(payload.runId).toBe("run-fallback-client");
     expect(payload.stream).toBe("lifecycle");
     expect(payload.data?.phase).toBe("fallback");
@@ -1153,10 +1179,11 @@ describe("agent event handler", () => {
 
   it("keeps chat-linked run remapping alive across per-attempt lifecycle errors", () => {
     vi.useFakeTimers();
-    const { broadcast, chatRunState, clearAgentRunContext, agentRunSeq, handler } = createHarness({
+    const { broadcast, broadcastToConnIds, chatRunState, clearAgentRunContext, agentRunSeq, handler } =
+      createHarness({
       resolveSessionKeyForRun: () => "session-fallback",
       lifecycleErrorRetryGraceMs: 100,
-    });
+      });
     chatRunState.registry.add("run-fallback-retry", {
       sessionKey: "session-fallback",
       clientRunId: "run-fallback-client",
@@ -1190,7 +1217,7 @@ describe("agent event handler", () => {
       seq: 3,
       sessionKey: "session-fallback",
     });
-    const agentCalls = broadcast.mock.calls.filter(([event]) => event === "agent");
+    const agentCalls = agentConnBroadcastCalls(broadcastToConnIds);
     const fallbackPayload = agentCalls.at(-1)?.[1] as {
       runId?: string;
       data?: Record<string, unknown>;
@@ -1350,7 +1377,7 @@ describe("agent event handler", () => {
   });
 
   it("uses agent event sessionKey when run-context lookup cannot resolve", () => {
-    const { broadcast, handler } = createHarness({
+    const { broadcastToConnIds, handler } = createHarness({
       resolveSessionKeyForRun: () => undefined,
     });
 
@@ -1360,7 +1387,7 @@ describe("agent event handler", () => {
       sessionKey: "session-from-event",
     });
 
-    const payload = expectSingleAgentBroadcastPayload(broadcast);
+    const payload = expectSingleAgentBroadcastPayload(broadcastToConnIds);
     expect(payload.sessionKey).toBe("session-from-event");
   });
 

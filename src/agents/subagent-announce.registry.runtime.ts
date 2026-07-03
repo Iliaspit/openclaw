@@ -7,5 +7,6 @@ export {
   listSubagentRunsForRequester,
   replaceSubagentRunAfterSteer,
   resolveRequesterForChildSession,
+  shouldIgnorePostCompletionAnnounceForRun,
   shouldIgnorePostCompletionAnnounceForSession,
 } from "./subagent-registry-runtime.js";

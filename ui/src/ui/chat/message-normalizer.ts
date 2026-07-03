@@ -2,6 +2,7 @@
  * Message normalization utilities for chat rendering.
  */
 
+import { stripInternalRuntimeContext } from "../../../../src/agents/internal-runtime-context.js";
 import { stripInboundMetadata } from "../../../../src/auto-reply/reply/strip-inbound-meta.js";
 import { extractCanvasShortcodes } from "../../../../src/chat/canvas-render.js";
 import {
@@ -162,7 +163,7 @@ function expandTextContent(text: string): {
   audioAsVoice: boolean;
   replyTarget: NormalizedMessage["replyTarget"];
 } {
-  const extracted = extractCanvasShortcodes(text);
+  const extracted = extractCanvasShortcodes(stripInternalRuntimeContext(text));
   const parsed = splitMediaFromOutput(extracted.text);
   const parts: MessageContentItem[] = [];
   let audioAsVoice = parsed.audioAsVoice === true;
