@@ -35,6 +35,83 @@ function resolveNonNegativeNumber(value: number | undefined): number | undefined
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+function resolvePositiveNumber(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function resolveCheckpointHighWaterTokens(
+  entry: Pick<SessionEntry, "compactionCheckpoints">,
+): number | undefined {
+  const checkpoints = entry.compactionCheckpoints;
+  if (!Array.isArray(checkpoints) || checkpoints.length === 0) {
+    return undefined;
+  }
+  let highWater: number | undefined;
+  for (const checkpoint of checkpoints) {
+    const tokensBefore = resolvePositiveNumber(checkpoint.tokensBefore);
+    if (tokensBefore === undefined) {
+      continue;
+    }
+    highWater = highWater === undefined ? tokensBefore : Math.max(highWater, tokensBefore);
+  }
+  return highWater;
+}
+
+function applyContextHighWaterTelemetry(params: {
+  entry: SessionEntry;
+  next: SessionEntry;
+  freshCurrentRunTotalTokens?: number;
+  contextTokens?: number;
+}) {
+  let winningEvidence:
+    | {
+        tokens: number;
+        contextTokens?: number;
+      }
+    | undefined;
+
+  const previousHighWater = resolvePositiveNumber(params.entry.contextHighWaterTokens);
+  if (previousHighWater !== undefined) {
+    winningEvidence = {
+      tokens: previousHighWater,
+      contextTokens: resolvePositiveNumber(params.entry.contextHighWaterContextTokens),
+    };
+  }
+
+  const freshCurrentRunTotalTokens = resolvePositiveNumber(params.freshCurrentRunTotalTokens);
+  if (
+    freshCurrentRunTotalTokens !== undefined &&
+    (!winningEvidence || freshCurrentRunTotalTokens > winningEvidence.tokens)
+  ) {
+    winningEvidence = {
+      tokens: freshCurrentRunTotalTokens,
+      contextTokens: resolvePositiveNumber(params.contextTokens),
+    };
+  }
+
+  const checkpointHighWater = resolveCheckpointHighWaterTokens(params.entry);
+  if (
+    checkpointHighWater !== undefined &&
+    (!winningEvidence || checkpointHighWater > winningEvidence.tokens)
+  ) {
+    winningEvidence = {
+      tokens: checkpointHighWater,
+    };
+  }
+
+  if (!winningEvidence) {
+    delete params.next.contextHighWaterContextTokens;
+    return;
+  }
+
+  params.next.contextHighWaterTokens = winningEvidence.tokens;
+  if (winningEvidence.contextTokens === undefined) {
+    delete params.next.contextHighWaterContextTokens;
+  } else {
+    params.next.contextHighWaterContextTokens = winningEvidence.contextTokens;
+  }
+}
+
 function isChildSession(
   sessionKey: string,
   entry: Pick<SessionEntry, "spawnedBy" | "parentSessionKey">,
@@ -171,6 +248,7 @@ export async function updateSessionStoreAfterAgentRun(params: {
     contextTokens,
     promptTokens,
   });
+  let freshCurrentRunTotalTokens: number | undefined;
   if (hasNonzeroUsage(usage)) {
     const { estimateUsageCost, resolveModelCostConfig } = await getUsageFormatModule();
     const input = usage.input ?? 0;
@@ -190,6 +268,7 @@ export async function updateSessionStoreAfterAgentRun(params: {
     if (typeof totalTokens === "number" && Number.isFinite(totalTokens) && totalTokens > 0) {
       next.totalTokens = totalTokens;
       next.totalTokensFresh = true;
+      freshCurrentRunTotalTokens = totalTokens;
     } else {
       next.totalTokens = undefined;
       next.totalTokensFresh = false;
@@ -205,6 +284,7 @@ export async function updateSessionStoreAfterAgentRun(params: {
   } else if (typeof totalTokens === "number" && Number.isFinite(totalTokens) && totalTokens > 0) {
     next.totalTokens = totalTokens;
     next.totalTokensFresh = true;
+    freshCurrentRunTotalTokens = totalTokens;
   } else if (
     typeof entry.totalTokens === "number" &&
     Number.isFinite(entry.totalTokens) &&
@@ -216,6 +296,12 @@ export async function updateSessionStoreAfterAgentRun(params: {
   if (compactionsThisRun > 0) {
     next.compactionCount = (entry.compactionCount ?? 0) + compactionsThisRun;
   }
+  applyContextHighWaterTelemetry({
+    entry,
+    next,
+    freshCurrentRunTotalTokens,
+    contextTokens,
+  });
   const persisted = await updateSessionStore(storePath, (store) => {
     const merged = mergeSessionEntry(store[sessionKey], next);
     store[sessionKey] = merged;

@@ -216,6 +216,13 @@ export type SessionEntry = {
    * totalTokens as stale/unknown for context-utilization displays.
    */
   totalTokensFresh?: boolean;
+  /**
+   * Highest scalar context snapshot observed for this session. This is monotonic
+   * telemetry and intentionally does not replace latest/current totalTokens.
+   */
+  contextHighWaterTokens?: number;
+  /** Effective context window paired with contextHighWaterTokens when known. */
+  contextHighWaterContextTokens?: number;
   estimatedCostUsd?: number;
   cacheRead?: number;
   cacheWrite?: number;
@@ -392,6 +399,7 @@ export function mergeSessionEntryWithPolicy(
       delete next.modelProvider;
     }
   }
+  preserveContextHighWaterTelemetry(existing, patch, next);
   return normalizeSessionRuntimeModelFields(next);
 }
 
@@ -409,6 +417,44 @@ export function mergeSessionEntryPreserveActivity(
   return mergeSessionEntryWithPolicy(existing, patch, {
     policy: "preserve-activity",
   });
+}
+
+function resolvePositiveTelemetryNumber(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function preserveContextHighWaterTelemetry(
+  existing: SessionEntry,
+  patch: Partial<SessionEntry>,
+  next: SessionEntry,
+) {
+  const existingHighWater = resolvePositiveTelemetryNumber(existing.contextHighWaterTokens);
+  const patchHighWater = resolvePositiveTelemetryNumber(patch.contextHighWaterTokens);
+  const highWater =
+    existingHighWater === undefined
+      ? patchHighWater
+      : patchHighWater === undefined
+        ? existingHighWater
+        : Math.max(existingHighWater, patchHighWater);
+  if (highWater === undefined) {
+    delete next.contextHighWaterContextTokens;
+    return;
+  }
+
+  next.contextHighWaterTokens = highWater;
+  const existingContextTokens = resolvePositiveTelemetryNumber(
+    existing.contextHighWaterContextTokens,
+  );
+  const patchContextTokens = resolvePositiveTelemetryNumber(patch.contextHighWaterContextTokens);
+  const patchWins =
+    patchHighWater !== undefined &&
+    (existingHighWater === undefined || patchHighWater > existingHighWater);
+  const contextTokens = patchWins ? patchContextTokens : existingContextTokens;
+  if (contextTokens === undefined) {
+    delete next.contextHighWaterContextTokens;
+  } else {
+    next.contextHighWaterContextTokens = contextTokens;
+  }
 }
 
 export function resolveSessionTotalTokens(

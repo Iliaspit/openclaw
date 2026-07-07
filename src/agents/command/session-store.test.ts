@@ -533,6 +533,220 @@ describe("updateSessionStoreAfterAgentRun", () => {
     });
   });
 
+  it("sets context high-water telemetry from a fresh totalTokens snapshot", async () => {
+    await withTempSessionStore(async ({ storePath }) => {
+      const cfg = {} as OpenClawConfig;
+      const sessionKey = "agent:main:explicit:test-context-high-water";
+      const sessionId = "test-context-high-water-session";
+      const sessionStore: Record<string, SessionEntry> = {
+        [sessionKey]: {
+          sessionId,
+          updatedAt: 1,
+        },
+      };
+      await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2));
+
+      await updateSessionStoreAfterAgentRun({
+        cfg,
+        sessionId,
+        sessionKey,
+        storePath,
+        sessionStore,
+        contextTokensOverride: 200_000,
+        defaultProvider: "openai",
+        defaultModel: "gpt-5.4",
+        result: {
+          meta: {
+            durationMs: 500,
+            agentMeta: {
+              sessionId,
+              provider: "openai",
+              model: "gpt-5.4",
+              promptTokens: 129_359,
+            },
+          },
+        },
+      });
+
+      expect(sessionStore[sessionKey]?.totalTokens).toBe(129_359);
+      expect(sessionStore[sessionKey]?.totalTokensFresh).toBe(true);
+      expect(sessionStore[sessionKey]?.contextHighWaterTokens).toBe(129_359);
+      expect(sessionStore[sessionKey]?.contextHighWaterContextTokens).toBe(200_000);
+
+      const persisted = loadSessionStore(storePath);
+      expect(persisted[sessionKey]?.contextHighWaterTokens).toBe(129_359);
+      expect(persisted[sessionKey]?.contextHighWaterContextTokens).toBe(200_000);
+    });
+  });
+
+  it("preserves context high-water telemetry when a later fresh totalTokens snapshot is lower", async () => {
+    await withTempSessionStore(async ({ storePath }) => {
+      const cfg = {} as OpenClawConfig;
+      const sessionKey = "agent:main:explicit:test-context-high-water-lower";
+      const sessionId = "test-context-high-water-lower-session";
+      const sessionStore: Record<string, SessionEntry> = {
+        [sessionKey]: {
+          sessionId,
+          updatedAt: 1,
+          totalTokens: 129_359,
+          totalTokensFresh: true,
+          contextHighWaterTokens: 129_359,
+          contextHighWaterContextTokens: 200_000,
+        },
+      };
+      await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2));
+
+      await updateSessionStoreAfterAgentRun({
+        cfg,
+        sessionId,
+        sessionKey,
+        storePath,
+        sessionStore,
+        contextTokensOverride: 200_000,
+        defaultProvider: "openai",
+        defaultModel: "gpt-5.4",
+        result: {
+          meta: {
+            durationMs: 500,
+            agentMeta: {
+              sessionId,
+              provider: "openai",
+              model: "gpt-5.4",
+              promptTokens: 14_615,
+            },
+          },
+        },
+      });
+
+      expect(sessionStore[sessionKey]?.totalTokens).toBe(14_615);
+      expect(sessionStore[sessionKey]?.totalTokensFresh).toBe(true);
+      expect(sessionStore[sessionKey]?.contextHighWaterTokens).toBe(129_359);
+      expect(sessionStore[sessionKey]?.contextHighWaterContextTokens).toBe(200_000);
+
+      const persisted = loadSessionStore(storePath);
+      expect(persisted[sessionKey]?.contextHighWaterTokens).toBe(129_359);
+      expect(persisted[sessionKey]?.contextHighWaterContextTokens).toBe(200_000);
+    });
+  });
+
+  it("does not raise context high-water telemetry from stale preserved totalTokens", async () => {
+    await withTempSessionStore(async ({ storePath }) => {
+      const cfg = {} as OpenClawConfig;
+      const sessionKey = "agent:main:explicit:test-context-high-water-stale";
+      const sessionId = "test-context-high-water-stale-session";
+      const sessionStore: Record<string, SessionEntry> = {
+        [sessionKey]: {
+          sessionId,
+          updatedAt: 1,
+          totalTokens: 129_359,
+          totalTokensFresh: false,
+          contextHighWaterTokens: 42_000,
+          contextHighWaterContextTokens: 200_000,
+        },
+      };
+      await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2));
+
+      await updateSessionStoreAfterAgentRun({
+        cfg,
+        sessionId,
+        sessionKey,
+        storePath,
+        sessionStore,
+        contextTokensOverride: 200_000,
+        defaultProvider: "openai",
+        defaultModel: "gpt-5.4",
+        result: {
+          meta: {
+            durationMs: 500,
+            agentMeta: {
+              sessionId,
+              provider: "openai",
+              model: "gpt-5.4",
+            },
+          },
+        },
+      });
+
+      expect(sessionStore[sessionKey]?.totalTokens).toBe(129_359);
+      expect(sessionStore[sessionKey]?.totalTokensFresh).toBe(false);
+      expect(sessionStore[sessionKey]?.contextHighWaterTokens).toBe(42_000);
+      expect(sessionStore[sessionKey]?.contextHighWaterContextTokens).toBe(200_000);
+
+      const persisted = loadSessionStore(storePath);
+      expect(persisted[sessionKey]?.contextHighWaterTokens).toBe(42_000);
+      expect(persisted[sessionKey]?.contextHighWaterContextTokens).toBe(200_000);
+    });
+  });
+
+  it("raises context high-water telemetry from compaction checkpoint tokensBefore without pairing the current context window", async () => {
+    await withTempSessionStore(async ({ storePath }) => {
+      const cfg = {} as OpenClawConfig;
+      const sessionKey = "agent:main:explicit:test-context-high-water-compaction";
+      const sessionId = "test-context-high-water-compaction-session";
+      const sessionStore: Record<string, SessionEntry> = {
+        [sessionKey]: {
+          sessionId,
+          updatedAt: 1,
+          totalTokens: 14_615,
+          totalTokensFresh: true,
+          compactionCheckpoints: [
+            {
+              checkpointId: "checkpoint-before-high-water",
+              sessionKey,
+              sessionId,
+              createdAt: 2,
+              reason: "manual",
+              tokensBefore: 129_359,
+              tokensAfter: 14_615,
+              preCompaction: {
+                sessionId: "pre-compaction-session",
+                sessionFile: "/tmp/pre-compaction.jsonl",
+                leafId: "pre-leaf",
+              },
+              postCompaction: {
+                sessionId,
+                sessionFile: "/tmp/post-compaction.jsonl",
+                leafId: "post-leaf",
+              },
+            },
+          ],
+        },
+      };
+      await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2));
+
+      await updateSessionStoreAfterAgentRun({
+        cfg,
+        sessionId,
+        sessionKey,
+        storePath,
+        sessionStore,
+        contextTokensOverride: 200_000,
+        defaultProvider: "openai",
+        defaultModel: "gpt-5.4",
+        result: {
+          meta: {
+            durationMs: 500,
+            agentMeta: {
+              sessionId,
+              provider: "openai",
+              model: "gpt-5.4",
+              promptTokens: 15_000,
+            },
+          },
+        },
+      });
+
+      expect(sessionStore[sessionKey]?.totalTokens).toBe(15_000);
+      expect(sessionStore[sessionKey]?.totalTokensFresh).toBe(true);
+      expect(sessionStore[sessionKey]?.contextHighWaterTokens).toBe(129_359);
+      expect(sessionStore[sessionKey]?.contextHighWaterContextTokens).toBeUndefined();
+
+      const persisted = loadSessionStore(storePath);
+      expect(persisted[sessionKey]?.contextHighWaterTokens).toBe(129_359);
+      expect(persisted[sessionKey]?.contextHighWaterContextTokens).toBeUndefined();
+    });
+  });
+
   it("snapshots cost instead of accumulating (fixes #69347)", async () => {
     await withTempSessionStore(async ({ storePath }) => {
       const cfg = {

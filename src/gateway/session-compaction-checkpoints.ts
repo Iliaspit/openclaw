@@ -31,6 +31,10 @@ function trimSessionCheckpoints(
   return checkpoints.slice(-MAX_COMPACTION_CHECKPOINTS_PER_SESSION);
 }
 
+function resolvePositiveTokenCount(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 function sessionStoreCheckpoints(
   entry: Pick<SessionEntry, "compactionCheckpoints"> | undefined,
 ): SessionCompactionCheckpoint[] {
@@ -170,11 +174,23 @@ export async function persistSessionCompactionCheckpoint(params: {
     }
     const checkpoints = sessionStoreCheckpoints(existing);
     checkpoints.push(checkpoint);
-    store[target.canonicalKey] = {
+    const tokensBefore = resolvePositiveTokenCount(params.tokensBefore);
+    const existingHighWater = resolvePositiveTokenCount(existing.contextHighWaterTokens);
+    const checkpointRaisesHighWater =
+      tokensBefore !== undefined &&
+      (existingHighWater === undefined || tokensBefore > existingHighWater);
+    const contextHighWaterTokens =
+      checkpointRaisesHighWater && tokensBefore !== undefined ? tokensBefore : existingHighWater;
+    const nextEntry: SessionEntry = {
       ...existing,
       updatedAt: Math.max(existing.updatedAt ?? 0, createdAt),
       compactionCheckpoints: trimSessionCheckpoints(checkpoints),
+      ...(contextHighWaterTokens !== undefined ? { contextHighWaterTokens } : {}),
     };
+    if (checkpointRaisesHighWater) {
+      delete nextEntry.contextHighWaterContextTokens;
+    }
+    store[target.canonicalKey] = nextEntry;
     stored = true;
   });
 

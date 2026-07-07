@@ -65,4 +65,42 @@ describe("SessionEntry cache fields", () => {
     expect(merged.cacheRead).toBeUndefined();
     expect(merged.cacheWrite).toBeUndefined();
   });
+
+  it("preserves context high-water context tokens when an equal patch is stale", () => {
+    const existing: SessionEntry = {
+      sessionId: "test-session",
+      updatedAt: Date.now(),
+      contextHighWaterTokens: 100_000,
+      contextHighWaterContextTokens: 200_000,
+    };
+
+    const patch: Partial<SessionEntry> = {
+      contextHighWaterTokens: 100_000,
+      contextHighWaterContextTokens: 128_000,
+    };
+
+    const merged = mergeSessionEntry(existing, patch);
+
+    expect(merged.contextHighWaterTokens).toBe(100_000);
+    expect(merged.contextHighWaterContextTokens).toBe(200_000);
+  });
+
+  it("uses patch context tokens only when the patch high-water is strictly newer", () => {
+    const existing: SessionEntry = {
+      sessionId: "test-session",
+      updatedAt: Date.now(),
+      contextHighWaterTokens: 100_000,
+      contextHighWaterContextTokens: 200_000,
+    };
+
+    const patch: Partial<SessionEntry> = {
+      contextHighWaterTokens: 125_000,
+      contextHighWaterContextTokens: 128_000,
+    };
+
+    const merged = mergeSessionEntry(existing, patch);
+
+    expect(merged.contextHighWaterTokens).toBe(125_000);
+    expect(merged.contextHighWaterContextTokens).toBe(128_000);
+  });
 });

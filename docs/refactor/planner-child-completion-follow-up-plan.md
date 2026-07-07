@@ -17,7 +17,7 @@ Current implementation slice: **none active**. Change 2A, Change 2B, Change 3A,
 Change 3B, and the E2E gate-placement guardrail were implemented as separate
 slices and should not be extended without opening a new written slice first.
 
-Next recommended implementation slice: Change 4, Context High-water Telemetry.
+Next recommended implementation slice: Change 5, Early Helper Context Protection.
 
 Latest investigation input:
 
@@ -60,6 +60,12 @@ Completed slices:
   it. Direct announce delivery caps repeated long gateway-timeout waits while
   preserving quick transient retries, and queued announce drains stop after
   bounded retry backoff with scalar-only diagnostics.
+- **4 Context High-water Telemetry:** session entries now persist scalar
+  context high-water telemetry separately from latest/current `totalTokens`.
+  Fresh current-run token evidence raises the high-water and can carry the
+  current context window, stale preserved totals cannot raise it, checkpoint
+  `tokensBefore` can preserve a higher scalar without inventing a paired window,
+  and merge logic keeps the high-water monotonic.
 - **E2E Gate-placement Guardrail:** planner-facing orchestration guidance and
   `sessions_spawn` slice-role descriptions now say that QA children should run
   manual/behavioral checks plus the smallest relevant smoke command, while the
@@ -298,7 +304,7 @@ Done:
   visible and actionable.
 - Announce retries cannot add unbounded wall-clock delay to a failed slice.
 
-## Later Change 4: Context High-water Telemetry
+## Completed Change 4: Context High-water Telemetry
 
 Problem:
 
@@ -316,6 +322,11 @@ Notes:
   records unhealthy post-run state, not full high-water telemetry.
 - This change should define one canonical source for effective context limit and
   reserve at the time compaction or preflight occurs.
+- First slice complete: `SessionEntry` now stores `contextHighWaterTokens` and
+  `contextHighWaterContextTokens` separately from latest `totalTokens`.
+  Persistence updates are monotonic, checkpoint-derived high-water does not
+  attach a guessed context window, and stale `totalTokensFresh=false` snapshots
+  do not raise the high-water.
 
 ## Later Change 5: Early Helper Context Protection
 
