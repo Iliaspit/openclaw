@@ -52,9 +52,11 @@ type AnnounceQueueState = {
   send: (item: AnnounceQueueItem) => Promise<void>;
   /** Consecutive drain failures — drives exponential backoff on errors. */
   consecutiveFailures: number;
+  retryReadyAt?: number;
 };
 
 const ANNOUNCE_QUEUES = new Map<string, AnnounceQueueState>();
+const MAX_ANNOUNCE_QUEUE_DRAIN_FAILURES = 3;
 
 export function resetAnnounceQueuesForTests() {
   // Test isolation: other suites may leave a draining queue behind in the worker.
@@ -64,6 +66,7 @@ export function resetAnnounceQueuesForTests() {
     queue.summaryLines.length = 0;
     queue.droppedCount = 0;
     queue.lastEnqueuedAt = 0;
+    queue.retryReadyAt = undefined;
   }
   ANNOUNCE_QUEUES.clear();
 }
@@ -94,6 +97,7 @@ function getAnnounceQueue(
     summaryLines: [],
     send,
     consecutiveFailures: 0,
+    retryReadyAt: undefined,
   };
   applyQueueRuntimeSettings({
     target: created,
@@ -115,6 +119,53 @@ function hasAnnounceCrossChannelItems(items: AnnounceQueueItem[]): boolean {
   });
 }
 
+function summarizeAnnounceQueueError(error: unknown): string {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : error === undefined || error === null
+          ? ""
+          : "non-error thrown";
+  const gatewayTimeoutMatch = message.match(/\bgateway timeout after\s+(\d+)ms\b/i);
+  if (gatewayTimeoutMatch?.[1]) {
+    return `gateway timeout after ${gatewayTimeoutMatch[1]}ms`;
+  }
+  if (/no active .* listener/i.test(message)) {
+    return "no active listener";
+  }
+  if (/gateway not connected/i.test(message)) {
+    return "gateway not connected";
+  }
+  const gatewayClosedMatch = message.match(/\bgateway closed \((\d+)/i);
+  if (gatewayClosedMatch?.[1]) {
+    return `gateway closed (${gatewayClosedMatch[1]})`;
+  }
+  const networkMatch = message.match(
+    /\b(econnreset|econnrefused|etimedout|enotfound|ehostunreach|network error)\b/i,
+  );
+  if (networkMatch?.[1]) {
+    return networkMatch[1].toLowerCase();
+  }
+  if (/\bunavailable\b/i.test(message)) {
+    return "unavailable";
+  }
+  return error instanceof Error ? error.name : "error";
+}
+
+async function waitForAnnounceRetryReady(queue: AnnounceQueueState): Promise<void> {
+  const retryReadyAt = queue.retryReadyAt;
+  if (retryReadyAt == null) {
+    return;
+  }
+  const waitMs = retryReadyAt - Date.now();
+  if (waitMs <= 0) {
+    return;
+  }
+  await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+}
+
 function scheduleAnnounceDrain(key: string) {
   const queue = beginQueueDrain(ANNOUNCE_QUEUES, key);
   if (!queue) {
@@ -127,6 +178,7 @@ function scheduleAnnounceDrain(key: string) {
         if (queue.items.length === 0 && queue.droppedCount === 0) {
           break;
         }
+        await waitForAnnounceRetryReady(queue);
         await waitForQueueDebounce(queue);
         if (queue.mode === "collect") {
           const collectDrainResult = await drainCollectQueueStep({
@@ -186,14 +238,26 @@ function scheduleAnnounceDrain(key: string) {
       }
       // Drain succeeded — reset failure counter.
       queue.consecutiveFailures = 0;
+      queue.retryReadyAt = undefined;
     } catch (err) {
       queue.consecutiveFailures++;
+      const errorSummary = summarizeAnnounceQueueError(err);
+      if (queue.consecutiveFailures >= MAX_ANNOUNCE_QUEUE_DRAIN_FAILURES) {
+        const pendingItems = queue.items.length;
+        const droppedCount = queue.droppedCount;
+        queue.items.length = 0;
+        clearQueueSummaryState(queue);
+        queue.retryReadyAt = undefined;
+        defaultRuntime.error?.(
+          `announce queue drain capped for ${key} failures=${queue.consecutiveFailures}/${MAX_ANNOUNCE_QUEUE_DRAIN_FAILURES} pending=${pendingItems} dropped=${droppedCount} reason=${errorSummary}`,
+        );
+        return;
+      }
       // Exponential backoff on consecutive failures: 2s, 4s, 8s, ... capped at 60s.
       const errorBackoffMs = Math.min(1000 * 2 ** queue.consecutiveFailures, 60_000);
-      const retryDelayMs = Math.max(errorBackoffMs, queue.debounceMs);
-      queue.lastEnqueuedAt = Date.now() + retryDelayMs - queue.debounceMs;
+      queue.retryReadyAt = Date.now() + errorBackoffMs;
       defaultRuntime.error?.(
-        `announce queue drain failed for ${key} (attempt ${queue.consecutiveFailures}, retry in ${Math.round(retryDelayMs / 1000)}s): ${String(err)}`,
+        `announce queue drain failed for ${key} failures=${queue.consecutiveFailures}/${MAX_ANNOUNCE_QUEUE_DRAIN_FAILURES} retrySeconds=${Math.round(errorBackoffMs / 1000)} reason=${errorSummary}`,
       );
     } finally {
       queue.draining = false;
@@ -241,7 +305,7 @@ export function enqueueAnnounce(params: {
   send: (item: AnnounceQueueItem) => Promise<void>;
 }): boolean {
   const queue = getAnnounceQueue(params.key, params.settings, params.send);
-  // Preserve any retry backoff marker already encoded in lastEnqueuedAt.
+  // Preserve debounce timing across closely spaced enqueues.
   queue.lastEnqueuedAt = Math.max(queue.lastEnqueuedAt, Date.now());
 
   if (coalesceDuplicateAnnounceItem(queue, params.item)) {

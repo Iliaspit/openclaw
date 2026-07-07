@@ -14,11 +14,10 @@ finalization, slice-budget guardrails, runtime diagnostics, context telemetry,
 early helper context protection, and child compaction controls in one patch.
 
 Current implementation slice: **none active**. Change 2A, Change 2B, Change 3A,
-and the E2E gate-placement guardrail were implemented as separate slices and
-should not be extended without opening a new written slice first.
+Change 3B, and the E2E gate-placement guardrail were implemented as separate
+slices and should not be extended without opening a new written slice first.
 
-Next recommended implementation slice: Change 3B, Stale Runtime Diagnostics Or
-Announce Retry Caps.
+Next recommended implementation slice: Change 4, Context High-water Telemetry.
 
 Latest investigation input:
 
@@ -55,6 +54,12 @@ Completed slices:
   subagent run registration now creates the detached/background task before
   tracking the run as accepted. If task creation throws, `sessions_spawn` uses
   the existing rollback/error path instead of returning a normal accepted child.
+- **3B Stale Runtime Diagnostics And Announce Retry Caps:** diagnostic
+  heartbeat/stuck-session reporting now reconciles stale `processing` state
+  against runtime queue, active-run, and durable session facts before surfacing
+  it. Direct announce delivery caps repeated long gateway-timeout waits while
+  preserving quick transient retries, and queued announce drains stop after
+  bounded retry backoff with scalar-only diagnostics.
 - **E2E Gate-placement Guardrail:** planner-facing orchestration guidance and
   `sessions_spawn` slice-role descriptions now say that QA children should run
   manual/behavioral checks plus the smallest relevant smoke command, while the
@@ -244,7 +249,7 @@ Done:
   recovery chain.
 - The behavior is covered without storing sensitive or large child output.
 
-## Active Change 3: Runtime Diagnostic And Spawn Reliability
+## Completed Change 3: Runtime Diagnostic And Spawn Reliability
 
 Problem:
 
@@ -278,12 +283,13 @@ Scope:
 
 Validation:
 
-- Add tests for stale `state=processing` diagnostics clearing when queue and
-  session state are terminal.
+- Added tests for stale `state=processing` diagnostics clearing when queue and
+  session state are terminal, while preserving active-run and queued-work states.
 - Added tests that a background task registration failure cannot be represented
   as a normal accepted native subagent run.
-- Add tests that announce retry caps produce a structured blocked/degraded issue
-  with bounded diagnostic text.
+- Added tests that announce retry caps bound repeated long-wait gateway timeouts,
+  preserve quick transient retries, space queued retry backoff independently of
+  debounce, and log bounded scalar diagnostic text.
 
 Done:
 

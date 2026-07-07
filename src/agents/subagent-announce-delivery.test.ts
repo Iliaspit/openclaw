@@ -5,6 +5,8 @@ import { resolveAnnounceOrigin } from "./subagent-announce-origin.js";
 
 afterEach(() => {
   __testing.setDepsForTest();
+  vi.unstubAllEnvs();
+  vi.useRealTimers();
 });
 
 const slackThreadOrigin = {
@@ -16,6 +18,12 @@ const slackThreadOrigin = {
 
 function createGatewayMock() {
   return vi.fn(async () => ({}) as Record<string, unknown>) as unknown as typeof runtimeCallGateway;
+}
+
+async function flushAsyncWork() {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 async function deliverSlackThreadAnnouncement(params: {
@@ -186,5 +194,75 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
         }),
       }),
     );
+  });
+
+  it("caps repeated long-wait gateway timeouts before all transient retries", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("OPENCLAW_TEST_FAST", "1");
+    const callGateway = vi.fn(async () => {
+      throw new Error("gateway timeout after 120000ms");
+    }) as unknown as typeof runtimeCallGateway;
+
+    const resultPromise = deliverSlackThreadAnnouncement({
+      callGateway,
+      sessionId: "requester-session-timeout-cap",
+      isActive: false,
+      expectsCompletionMessage: false,
+      directIdempotencyKey: "announce-timeout-cap",
+    });
+
+    await flushAsyncWork();
+    expect(callGateway).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(8);
+    await flushAsyncWork();
+    expect(callGateway).toHaveBeenCalledTimes(2);
+
+    await expect(resultPromise).resolves.toEqual(
+      expect.objectContaining({
+        delivered: false,
+        path: "direct",
+        error: "gateway timeout after 120000ms",
+      }),
+    );
+    expect(callGateway).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps quick transient direct retries available", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("OPENCLAW_TEST_FAST", "1");
+    let attempts = 0;
+    const callGateway = vi.fn(async () => {
+      attempts += 1;
+      if (attempts <= 3) {
+        throw new Error("gateway not connected");
+      }
+      return {};
+    }) as unknown as typeof runtimeCallGateway;
+
+    const resultPromise = deliverSlackThreadAnnouncement({
+      callGateway,
+      sessionId: "requester-session-quick-transient",
+      isActive: false,
+      expectsCompletionMessage: false,
+      directIdempotencyKey: "announce-quick-transient",
+    });
+
+    await flushAsyncWork();
+    expect(callGateway).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(8);
+    await flushAsyncWork();
+    expect(callGateway).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(16);
+    await flushAsyncWork();
+    expect(callGateway).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(32);
+
+    await expect(resultPromise).resolves.toEqual(
+      expect.objectContaining({
+        delivered: true,
+        path: "direct",
+      }),
+    );
+    expect(callGateway).toHaveBeenCalledTimes(4);
   });
 });

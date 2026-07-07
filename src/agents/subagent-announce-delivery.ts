@@ -46,6 +46,8 @@ export { resolveAnnounceOrigin } from "./subagent-announce-origin.js";
 
 const DEFAULT_SUBAGENT_ANNOUNCE_TIMEOUT_MS = 120_000;
 const MAX_TIMER_SAFE_TIMEOUT_MS = 2_147_000_000;
+const LONG_WAIT_ANNOUNCE_TIMEOUT_MS = 60_000;
+const MAX_LONG_WAIT_ANNOUNCE_RETRY_COUNT = 1;
 
 type SubagentAnnounceDeliveryDeps = {
   callGateway: typeof callGateway;
@@ -106,7 +108,7 @@ export function isInternalAnnounceRequesterSession(sessionKey: string | undefine
   return getSubagentDepthFromSessionStore(sessionKey) >= 1 || isCronSessionKey(sessionKey);
 }
 
-function summarizeDeliveryError(error: unknown): string {
+function formatDeliveryErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message || "error";
   }
@@ -121,6 +123,59 @@ function summarizeDeliveryError(error: unknown): string {
   } catch {
     return "error";
   }
+}
+
+function summarizeKnownDeliveryError(message: string): string | undefined {
+  const gatewayTimeoutMatch = message.match(/\bgateway timeout after\s+(\d+)ms\b/i);
+  if (gatewayTimeoutMatch?.[1]) {
+    return `gateway timeout after ${gatewayTimeoutMatch[1]}ms`;
+  }
+  if (/no active .* listener/i.test(message)) {
+    return "no active listener";
+  }
+  if (/gateway not connected/i.test(message)) {
+    return "gateway not connected";
+  }
+  const gatewayClosedMatch = message.match(/\bgateway closed \((\d+)/i);
+  if (gatewayClosedMatch?.[1]) {
+    return `gateway closed (${gatewayClosedMatch[1]})`;
+  }
+  const networkMatch = message.match(
+    /\b(econnreset|econnrefused|etimedout|enotfound|ehostunreach|network error)\b/i,
+  );
+  if (networkMatch?.[1]) {
+    return networkMatch[1].toLowerCase();
+  }
+  if (/\berrorcode=unavailable\b/i.test(message) || /\bUNAVAILABLE\b/.test(message)) {
+    return "unavailable";
+  }
+  if (/\bstatus\s*[:=]\s*"?unavailable\b/i.test(message)) {
+    return "status unavailable";
+  }
+  if (/unsupported channel/i.test(message)) {
+    return "unsupported channel";
+  }
+  if (/unknown channel/i.test(message)) {
+    return "unknown channel";
+  }
+  if (/chat not found/i.test(message)) {
+    return "chat not found";
+  }
+  if (/user not found/i.test(message)) {
+    return "user not found";
+  }
+  if (/outbound not configured for channel/i.test(message)) {
+    return "outbound not configured";
+  }
+  if (/forbidden|bot.*not.*member|bot was blocked|bot was kicked/i.test(message)) {
+    return "recipient unavailable";
+  }
+  return undefined;
+}
+
+function summarizeDeliveryError(error: unknown): string {
+  const message = formatDeliveryErrorMessage(error);
+  return summarizeKnownDeliveryError(message) ?? (error instanceof Error ? error.name : "error");
 }
 
 const TRANSIENT_ANNOUNCE_DELIVERY_ERROR_PATTERNS: readonly RegExp[] = [
@@ -147,7 +202,7 @@ const PERMANENT_ANNOUNCE_DELIVERY_ERROR_PATTERNS: readonly RegExp[] = [
 ];
 
 function isTransientAnnounceDeliveryError(error: unknown): boolean {
-  const message = summarizeDeliveryError(error);
+  const message = formatDeliveryErrorMessage(error);
   if (!message) {
     return false;
   }
@@ -155,6 +210,20 @@ function isTransientAnnounceDeliveryError(error: unknown): boolean {
     return false;
   }
   return TRANSIENT_ANNOUNCE_DELIVERY_ERROR_PATTERNS.some((re) => re.test(message));
+}
+
+function resolveGatewayTimeoutMs(error: unknown): number | undefined {
+  const match = formatDeliveryErrorMessage(error).match(/\bgateway timeout after\s+(\d+)ms\b/i);
+  if (!match?.[1]) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function isLongWaitAnnounceDeliveryError(error: unknown): boolean {
+  const timeoutMs = resolveGatewayTimeoutMs(error);
+  return timeoutMs != null && timeoutMs >= LONG_WAIT_ANNOUNCE_TIMEOUT_MS;
 }
 
 async function waitForAnnounceRetryDelay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -189,6 +258,7 @@ export async function runAnnounceDeliveryWithRetry<T>(params: {
 }): Promise<T> {
   const retryDelaysMs = resolveDirectAnnounceTransientRetryDelaysMs();
   let retryIndex = 0;
+  let longWaitRetryCount = 0;
   for (;;) {
     if (params.signal?.aborted) {
       throw new Error("announce delivery aborted");
@@ -197,14 +267,24 @@ export async function runAnnounceDeliveryWithRetry<T>(params: {
       return await params.run();
     } catch (err) {
       const delayMs = retryDelaysMs[retryIndex];
+      const isLongWait = isLongWaitAnnounceDeliveryError(err);
       if (delayMs == null || !isTransientAnnounceDeliveryError(err) || params.signal?.aborted) {
+        throw err;
+      }
+      if (isLongWait && longWaitRetryCount >= MAX_LONG_WAIT_ANNOUNCE_RETRY_COUNT) {
+        defaultRuntime.log(
+          `[warn] Subagent announce ${params.operation} long-wait retry cap reached attempt=${retryIndex + 1} cap=${MAX_LONG_WAIT_ANNOUNCE_RETRY_COUNT + 1} reason=${summarizeDeliveryError(err)}`,
+        );
         throw err;
       }
       const nextAttempt = retryIndex + 2;
       const maxAttempts = retryDelaysMs.length + 1;
       defaultRuntime.log(
-        `[warn] Subagent announce ${params.operation} transient failure, retrying ${nextAttempt}/${maxAttempts} in ${Math.round(delayMs / 1000)}s: ${summarizeDeliveryError(err)}`,
+        `[warn] Subagent announce ${params.operation} transient failure retrying attempt=${nextAttempt}/${maxAttempts} delaySeconds=${Math.round(delayMs / 1000)} longWaitRetries=${isLongWait ? longWaitRetryCount + 1 : longWaitRetryCount}/${MAX_LONG_WAIT_ANNOUNCE_RETRY_COUNT} reason=${summarizeDeliveryError(err)}`,
       );
+      if (isLongWait) {
+        longWaitRetryCount += 1;
+      }
       retryIndex += 1;
       await waitForAnnounceRetryDelay(delayMs, params.signal);
     }

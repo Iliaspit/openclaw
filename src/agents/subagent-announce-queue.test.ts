@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { defaultRuntime } from "../runtime.js";
 import { enqueueAnnounce, resetAnnounceQueuesForTests } from "./subagent-announce-queue.js";
 
 function createRetryingSend() {
@@ -26,12 +27,17 @@ function createRetryingSend() {
 }
 
 describe("subagent-announce-queue", () => {
+  const originalRuntimeError = defaultRuntime.error;
+
   afterEach(() => {
+    defaultRuntime.error = originalRuntimeError;
+    vi.unstubAllEnvs();
     vi.useRealTimers();
     resetAnnounceQueuesForTests();
   });
 
   it("retries failed sends without dropping queued announce items", async () => {
+    vi.useFakeTimers();
     const sender = createRetryingSend();
 
     enqueueAnnounce({
@@ -45,6 +51,11 @@ describe("subagent-announce-queue", () => {
       send: sender.send,
     });
 
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sender.send).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(sender.send).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
     await sender.waitForSecondAttempt;
     expect(sender.send).toHaveBeenCalledTimes(2);
     expect(sender.prompts).toEqual(["subagent completed", "subagent completed"]);
@@ -88,6 +99,7 @@ describe("subagent-announce-queue", () => {
   });
 
   it("preserves queue summary state across failed summary delivery retries", async () => {
+    vi.useFakeTimers();
     const sender = createRetryingSend();
 
     enqueueAnnounce({
@@ -113,6 +125,9 @@ describe("subagent-announce-queue", () => {
       send: sender.send,
     });
 
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sender.send).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2_000);
     await sender.waitForSecondAttempt;
     expect(sender.send).toHaveBeenCalledTimes(2);
     expect(sender.prompts[0]).toContain("[Queue overflow]");
@@ -120,6 +135,7 @@ describe("subagent-announce-queue", () => {
   });
 
   it("retries collect-mode batches without losing queued items", async () => {
+    vi.useFakeTimers();
     const sender = createRetryingSend();
 
     enqueueAnnounce({
@@ -143,6 +159,9 @@ describe("subagent-announce-queue", () => {
       send: sender.send,
     });
 
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sender.send).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2_000);
     await sender.waitForSecondAttempt;
     expect(sender.send).toHaveBeenCalledTimes(2);
     expect(sender.prompts[0]).toContain("Queued #1");
@@ -155,7 +174,7 @@ describe("subagent-announce-queue", () => {
     expect(sender.prompts[1]).toContain("queued item two");
   });
 
-  it("uses debounce floor for retries when debounce exceeds backoff", async () => {
+  it("keeps initial debounce while retry backoff is independent", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     const previousFast = process.env.OPENCLAW_TEST_FAST;
@@ -171,7 +190,7 @@ describe("subagent-announce-queue", () => {
       });
 
       enqueueAnnounce({
-        key: "announce:test:retry-debounce-floor",
+        key: "announce:test:retry-independent",
         item: {
           prompt: "subagent completed",
           enqueuedAt: Date.now(),
@@ -184,7 +203,7 @@ describe("subagent-announce-queue", () => {
       await vi.advanceTimersByTimeAsync(5_000);
       expect(send).toHaveBeenCalledTimes(1);
 
-      await vi.advanceTimersByTimeAsync(4_999);
+      await vi.advanceTimersByTimeAsync(1_999);
       expect(send).toHaveBeenCalledTimes(1);
 
       await vi.advanceTimersByTimeAsync(1);
@@ -193,7 +212,7 @@ describe("subagent-announce-queue", () => {
       if (firstAttempt === undefined || secondAttempt === undefined) {
         throw new Error("expected two retry attempts");
       }
-      expect(secondAttempt - firstAttempt).toBeGreaterThanOrEqual(5_000);
+      expect(secondAttempt - firstAttempt).toBe(2_000);
     } finally {
       if (previousFast === undefined) {
         delete process.env.OPENCLAW_TEST_FAST;
@@ -201,5 +220,52 @@ describe("subagent-announce-queue", () => {
         process.env.OPENCLAW_TEST_FAST = previousFast;
       }
     }
+  });
+
+  it("stops rescheduling after repeated drain failures and logs bounded scalar evidence", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const errorLogs: string[] = [];
+    defaultRuntime.error = vi.fn((message: unknown) => {
+      errorLogs.push(String(message));
+    }) as typeof defaultRuntime.error;
+    const send = vi.fn(async () => {
+      throw new Error("gateway timeout after 120000ms\nTOP_SECRET_PROMPT_BODY");
+    });
+
+    enqueueAnnounce({
+      key: "announce:test:failure-cap",
+      item: {
+        prompt: "TOP_SECRET_PROMPT_BODY",
+        enqueuedAt: Date.now(),
+        sessionKey: "agent:main:telegram:dm:u1",
+      },
+      settings: { mode: "followup", debounceMs: 0 },
+      send,
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(send).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(send).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(send).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(3_999);
+    expect(send).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(send).toHaveBeenCalledTimes(3);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(send).toHaveBeenCalledTimes(3);
+
+    const cappedLog = errorLogs.find((line) =>
+      line.includes("announce queue drain capped for announce:test:failure-cap"),
+    );
+    expect(cappedLog).toContain("failures=3/3");
+    expect(cappedLog).toContain("pending=1");
+    expect(cappedLog).toContain("reason=gateway timeout after 120000ms");
+    expect(errorLogs.join("\n")).not.toContain("TOP_SECRET_PROMPT_BODY");
   });
 });

@@ -19,6 +19,7 @@ import {
   pruneDiagnosticSessionStates,
   resetDiagnosticSessionStateForTest,
   type SessionRef,
+  type SessionState,
   type SessionStateValue,
 } from "./diagnostic-session-state.js";
 import {
@@ -56,9 +57,145 @@ type DiagnosticWorkSnapshot = {
   queuedCount: number;
 };
 
+export type DiagnosticSessionRuntimeStatus =
+  | "running"
+  | "done"
+  | "blocked"
+  | "failed"
+  | "killed"
+  | "timeout"
+  | "reset";
+
+export type DiagnosticSessionRuntimeSnapshot = {
+  activeRun?: boolean;
+  queueActive?: number;
+  queueQueued?: number;
+  queueDepth?: number;
+  sessionStatus?: DiagnosticSessionRuntimeStatus;
+  sessionReset?: boolean;
+};
+
+export type DiagnosticSessionRuntimeResolver = (
+  state: Readonly<SessionState>,
+) => DiagnosticSessionRuntimeSnapshot | undefined;
+
+let diagnosticSessionRuntimeResolver: DiagnosticSessionRuntimeResolver | undefined;
+let diagnosticSessionRuntimeResolverForTest: DiagnosticSessionRuntimeResolver | undefined;
+
+export function registerDiagnosticSessionRuntimeResolver(
+  resolver: DiagnosticSessionRuntimeResolver | undefined,
+): void {
+  diagnosticSessionRuntimeResolver = resolver;
+}
+
+export function setDiagnosticSessionRuntimeResolverForTest(
+  resolver?: DiagnosticSessionRuntimeResolver,
+): void {
+  diagnosticSessionRuntimeResolverForTest = resolver;
+}
+
 function loadCommandPollBackoffRuntime() {
   commandPollBackoffRuntimePromise ??= import("../agents/command-poll-backoff.runtime.js");
   return commandPollBackoffRuntimePromise;
+}
+
+function isTerminalRuntimeSessionStatus(
+  status: DiagnosticSessionRuntimeStatus | undefined,
+): boolean {
+  return (
+    status === "done" ||
+    status === "blocked" ||
+    status === "failed" ||
+    status === "killed" ||
+    status === "timeout" ||
+    status === "reset"
+  );
+}
+
+function resolveDiagnosticSessionRuntimeSnapshot(
+  state: Readonly<SessionState>,
+): DiagnosticSessionRuntimeSnapshot | undefined {
+  const resolver = diagnosticSessionRuntimeResolverForTest ?? diagnosticSessionRuntimeResolver;
+  if (!resolver) {
+    return undefined;
+  }
+  try {
+    return resolver(state);
+  } catch (err) {
+    diag.debug(
+      `session runtime reconcile skipped: sessionId=${state.sessionId ?? "unknown"} sessionKey=${
+        state.sessionKey ?? "unknown"
+      } error="${String(err)}"`,
+    );
+    return undefined;
+  }
+}
+
+function resolveRuntimeQueueEmpty(snapshot: DiagnosticSessionRuntimeSnapshot): boolean | undefined {
+  const queueValues = [snapshot.queueDepth, snapshot.queueActive, snapshot.queueQueued].filter(
+    (value): value is number => typeof value === "number" && Number.isFinite(value),
+  );
+  if (queueValues.length === 0) {
+    return undefined;
+  }
+  return queueValues.every((value) => value <= 0);
+}
+
+function reconcileProcessingSessionState(state: SessionState, now: number): boolean {
+  if (state.state !== "processing") {
+    return false;
+  }
+  const snapshot = resolveDiagnosticSessionRuntimeSnapshot(state);
+  if (!snapshot) {
+    return false;
+  }
+  const queueEmpty = resolveRuntimeQueueEmpty(snapshot);
+  if (queueEmpty !== true) {
+    return false;
+  }
+  const terminalSession =
+    snapshot.activeRun !== true &&
+    (snapshot.sessionReset === true || isTerminalRuntimeSessionStatus(snapshot.sessionStatus));
+  const missingActiveRun = Boolean(state.sessionId) && snapshot.activeRun === false;
+  if (!terminalSession && !missingActiveRun) {
+    return false;
+  }
+
+  const prevState = state.state;
+  const reason = terminalSession
+    ? "stale_reconciled_terminal"
+    : "stale_reconciled_no_active_run";
+  state.state = "idle";
+  state.queueDepth = 0;
+  state.lastActivity = now;
+  diag.debug(
+    `session state reconciled: sessionId=${state.sessionId ?? "unknown"} sessionKey=${
+      state.sessionKey ?? "unknown"
+    } prev=${prevState} new=idle reason="${reason}" queueDepth=0 runtimeQueueDepth=${
+      snapshot.queueDepth ?? "unknown"
+    } runtimeQueueActive=${snapshot.queueActive ?? "unknown"} runtimeQueueQueued=${
+      snapshot.queueQueued ?? "unknown"
+    } sessionStatus=${snapshot.sessionStatus ?? "unknown"} sessionReset=${
+      snapshot.sessionReset === true
+    } activeRun=${snapshot.activeRun ?? "unknown"}`,
+  );
+  emitDiagnosticEvent({
+    type: "session.state",
+    sessionId: state.sessionId,
+    sessionKey: state.sessionKey,
+    prevState,
+    state: "idle",
+    reason,
+    queueDepth: state.queueDepth,
+  });
+  markActivity();
+  return true;
+}
+
+function reconcileProcessingSessionStates(now: number): void {
+  for (const state of diagnosticSessionStates.values()) {
+    reconcileProcessingSessionState(state, now);
+  }
 }
 
 function getDiagnosticWorkSnapshot(): DiagnosticWorkSnapshot {
@@ -382,6 +519,7 @@ export function logActiveRuns() {
     return;
   }
   const now = Date.now();
+  reconcileProcessingSessionStates(now);
   const activeSessions = Array.from(diagnosticSessionStates.entries())
     .filter(([, s]) => s.state === "processing")
     .map(([id, s]) => `${id}(q=${s.queueDepth},age=${Math.round((now - s.lastActivity) / 1000)}s)`);
@@ -415,6 +553,7 @@ export function startDiagnosticHeartbeat(
     const stuckSessionWarnMs = resolveStuckSessionWarnMs(heartbeatConfig);
     const now = Date.now();
     pruneDiagnosticSessionStates(now, true);
+    reconcileProcessingSessionStates(now);
     const work = getDiagnosticWorkSnapshot();
     const shouldRecordMemorySample =
       hasRecentDiagnosticActivity(now) || hasOpenDiagnosticWork(work);
@@ -490,4 +629,5 @@ export function resetDiagnosticStateForTest(): void {
   resetDiagnosticMemoryForTest();
   resetDiagnosticStabilityRecorderForTest();
   resetDiagnosticStabilityBundleForTest();
+  setDiagnosticSessionRuntimeResolverForTest();
 }

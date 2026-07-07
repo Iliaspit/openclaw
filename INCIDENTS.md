@@ -288,3 +288,13 @@ Consult this before investigating a new issue or making a related change.
    - **Issue:** QA or recovery children could treat the full E2E suite as part of ordinary slice validation. When a broad E2E gate failed, the planner could keep the feature loop blocked while repeatedly spawning broad recovery children.
    - **Fix and why:** Tightened planner-facing orchestration guidance and `sessions_spawn.sliceRole` descriptions so QA children are for manual/behavioral checks plus the smallest relevant smoke command, while the full E2E suite belongs only to an explicit `sliceRole: "full_gate"` final-gate child. Native subagent and ACP children now receive child-visible role notices in their initial task context. A failing full gate must report the first failing spec/test id/artifact and stop so the planner can open a fresh narrow recovery slice.
    - **Result:** Full E2E remains the final landing gate, but normal development and QA slices should no longer run the whole suite or repair from broad full-gate failures in-place.
+
+4. **Stale runtime diagnostics outlived terminal planner state**
+   - **Issue:** Diagnostic session state could keep reporting `processing` after durable queue/session/run state showed the planner or child lane was idle or terminal.
+   - **Fix and why:** Added scalar runtime reconciliation before heartbeat/stuck-session reporting, using queue counts, terminal/reset session rows, and active run records to downgrade stale `processing` to `idle`.
+   - **Result:** Operator diagnostics should no longer keep surfacing stale `state=processing` when the runtime queue is empty and the session/run facts are terminal or no active run remains.
+
+5. **Announce retries could stack long waits and queue noise**
+   - **Issue:** Repeated announce delivery failures such as `gateway timeout after 120000ms` could still consume the normal transient retry budget, and queued announce drains could reschedule indefinitely after repeated send failures.
+   - **Fix and why:** Added a local long-wait retry cap for direct announce delivery while preserving quick transient retries, and capped queued announce drain rescheduling after repeated consecutive failures with scalar-only diagnostics.
+   - **Result:** Failed announce paths stop adding unbounded wall-clock delay or retry noise, while one flaky queue failure and quick listener/network transients can still recover.

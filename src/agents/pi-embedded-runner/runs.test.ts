@@ -1,5 +1,10 @@
+import fs from "node:fs";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { importFreshModule } from "../../../test/helpers/import-fresh.js";
+import { resetConfigRuntimeState, setRuntimeConfigSnapshot } from "../../config/config.js";
+import type { OpenClawConfig } from "../../config/config.js";
+import { withStateDirEnv } from "../../test-helpers/state-dir-env.js";
 import {
   __testing,
   abortEmbeddedPiRun,
@@ -29,6 +34,7 @@ function createRunHandle(
 describe("pi-embedded runner run registry", () => {
   afterEach(() => {
     __testing.resetActiveEmbeddedRuns();
+    resetConfigRuntimeState();
     vi.restoreAllMocks();
   });
 
@@ -158,6 +164,52 @@ describe("pi-embedded runner run registry", () => {
       authProfileIdSource: undefined,
     });
     expect(consumeEmbeddedRunModelSwitch("session-switch")).toBeUndefined();
+  });
+
+  it("uses alias-aware freshest session rows for diagnostic runtime snapshots", async () => {
+    await withStateDirEnv("pi-runs-diagnostic-session-entry-", async ({ stateDir }) => {
+      const sessionsDir = path.join(stateDir, "agents", "main", "sessions");
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sessionsDir, "sessions.json"),
+        JSON.stringify(
+          {
+            "agent:main:main": {
+              sessionId: "sess-stale",
+              status: "running",
+              updatedAt: 1,
+            },
+            "agent:main:MAIN": {
+              sessionId: "sess-fresh",
+              status: "done",
+              updatedAt: 2,
+            },
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+      const cfg = {
+        session: {
+          mainKey: "main",
+          store: path.join(stateDir, "agents", "{agentId}", "sessions", "sessions.json"),
+        },
+        agents: { list: [{ id: "main", default: true }] },
+      } as OpenClawConfig;
+      setRuntimeConfigSnapshot(cfg, cfg);
+
+      const snapshot = __testing.resolveEmbeddedRunDiagnosticSnapshotForTest({
+        sessionId: "sess-stale",
+        sessionKey: "agent:main:main",
+      });
+
+      expect(snapshot).toMatchObject({
+        activeRun: false,
+        sessionStatus: "done",
+        sessionReset: true,
+      });
+    });
   });
 
   it("drops pending live model switch requests when the run clears", () => {

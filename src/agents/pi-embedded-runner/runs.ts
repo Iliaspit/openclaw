@@ -9,13 +9,18 @@ import {
   resolveActiveReplyRunSessionId,
   waitForReplyRunEndBySessionId,
 } from "../../auto-reply/reply/reply-run-registry.js";
+import { loadSessionEntry } from "../../gateway/session-utils.js";
 import {
   diagnosticLogger as diag,
   logMessageQueued,
   logSessionStateChange,
+  registerDiagnosticSessionRuntimeResolver,
+  type DiagnosticSessionRuntimeSnapshot,
 } from "../../logging/diagnostic.js";
+import { getCommandQueueSnapshot } from "../../process/command-queue.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
+import { resolveSessionLane } from "./lanes.js";
 
 export type EmbeddedPiQueueHandle = {
   kind?: "embedded";
@@ -72,6 +77,61 @@ const EMBEDDED_RUN_WAITERS =
 const EMBEDDED_RUN_MODEL_SWITCH_REQUESTS =
   embeddedRunState.modelSwitchRequests ??
   (embeddedRunState.modelSwitchRequests = new Map<string, EmbeddedRunModelSwitchRequest>());
+
+function resolveEmbeddedRunDiagnosticSnapshot(
+  state: Readonly<{ sessionId?: string; sessionKey?: string }>,
+): DiagnosticSessionRuntimeSnapshot | undefined {
+  const sessionId = normalizeOptionalString(state.sessionId);
+  const sessionKey = normalizeOptionalString(state.sessionKey);
+  const laneKey = sessionKey ?? sessionId;
+  if (!sessionId && !sessionKey) {
+    return undefined;
+  }
+
+  const snapshot: DiagnosticSessionRuntimeSnapshot = {
+    activeRun: Boolean(
+      (sessionId && (ACTIVE_EMBEDDED_RUNS.has(sessionId) || isReplyRunActiveForSessionId(sessionId))) ||
+        (sessionKey &&
+          (resolveActiveReplyRunSessionId(sessionKey) ??
+            ACTIVE_EMBEDDED_RUN_SESSION_IDS_BY_KEY.get(sessionKey))),
+    ),
+  };
+
+  if (laneKey) {
+    try {
+      const [lane] = getCommandQueueSnapshot({ lane: resolveSessionLane(laneKey) }).lanes;
+      snapshot.queueActive = lane?.active ?? 0;
+      snapshot.queueQueued = lane?.queued ?? 0;
+      snapshot.queueDepth = lane?.depth ?? 0;
+    } catch (err) {
+      diag.debug(
+        `session runtime queue reconcile skipped: sessionId=${sessionId ?? "unknown"} sessionKey=${
+          sessionKey ?? "unknown"
+        } error="${String(err)}"`,
+      );
+    }
+  }
+
+  if (sessionKey) {
+    try {
+      const entry = loadSessionEntry(sessionKey).entry;
+      if (entry?.status) {
+        snapshot.sessionStatus = entry.status;
+      }
+      snapshot.sessionReset = Boolean(entry && sessionId && entry.sessionId !== sessionId);
+    } catch (err) {
+      diag.debug(
+        `session runtime store reconcile skipped: sessionId=${sessionId ?? "unknown"} sessionKey=${
+          sessionKey ?? "unknown"
+        } error="${String(err)}"`,
+      );
+    }
+  }
+
+  return snapshot;
+}
+
+registerDiagnosticSessionRuntimeResolver(resolveEmbeddedRunDiagnosticSnapshot);
 
 function setActiveRunSessionKey(sessionKey: string | undefined, sessionId: string): void {
   const normalizedSessionKey = sessionKey?.trim();
@@ -400,6 +460,7 @@ export function clearActiveEmbeddedRun(
 }
 
 export const __testing = {
+  resolveEmbeddedRunDiagnosticSnapshotForTest: resolveEmbeddedRunDiagnosticSnapshot,
   resetActiveEmbeddedRuns() {
     for (const waiters of EMBEDDED_RUN_WAITERS.values()) {
       for (const waiter of waiters) {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSubagentAnnounceDeliveryRuntimeMock } from "./subagent-announce.test-support.js";
 
 type GatewayCall = {
@@ -133,6 +133,7 @@ vi.mock("./subagent-announce-delivery.js", () => ({
     const retryDelaysMs =
       process.env.OPENCLAW_TEST_FAST === "1" ? [8, 16, 32] : [5_000, 10_000, 20_000];
     let retryIndex = 0;
+    let longWaitRetryCount = 0;
     for (;;) {
       const request = buildRequest();
       gatewayCalls.push(request);
@@ -141,9 +142,18 @@ vi.mock("./subagent-announce-delivery.js", () => ({
         return { delivered: true, path: "direct" };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        const timeoutMatch = message.match(/\bgateway timeout after\s+(\d+)ms\b/i);
+        const timeoutMs = timeoutMatch?.[1] ? Number.parseInt(timeoutMatch[1], 10) : undefined;
+        const isLongWaitTimeout = timeoutMs != null && timeoutMs >= 60_000;
         const delayMs = retryDelaysMs[retryIndex];
         if (!/gateway timeout/i.test(message) || delayMs == null) {
           return { delivered: false, path: "direct", error: message };
+        }
+        if (isLongWaitTimeout && longWaitRetryCount >= 1) {
+          return { delivered: false, path: "direct", error: message };
+        }
+        if (isLongWaitTimeout) {
+          longWaitRetryCount += 1;
         }
         retryIndex += 1;
       }
@@ -184,13 +194,17 @@ vi.mock("./subagent-announce.registry.runtime.js", () => ({
   countActiveDescendantRuns: () => 0,
   countPendingDescendantRuns: () => pendingDescendantRuns,
   countPendingDescendantRunsExcludingRun: () => 0,
+  getLatestSubagentRunByChildSessionKey: () => undefined,
   listSubagentRunsForRequester: () => [],
   isSubagentSessionRunActive: () => subagentSessionRunActive,
   shouldIgnorePostCompletionAnnounceForSession: () => shouldIgnorePostCompletion,
   replaceSubagentRunAfterSteer: () => true,
   resolveRequesterForChildSession: () => fallbackRequesterResolution,
 }));
-import { runSubagentAnnounceFlow } from "./subagent-announce.js";
+import {
+  __testing as subagentAnnounceTesting,
+  runSubagentAnnounceFlow,
+} from "./subagent-announce.js";
 type AnnounceFlowParams = Parameters<
   typeof import("./subagent-announce.js").runSubagentAnnounceFlow
 >[0];
@@ -276,6 +290,24 @@ describe("subagent announce timeout config", () => {
     isEmbeddedPiRunActiveMock.mockReset().mockReturnValue(false);
     waitForEmbeddedPiRunEndMock.mockReset().mockResolvedValue(true);
     fallbackRequesterResolution = null;
+    subagentAnnounceTesting.setDepsForTest({
+      loadSubagentRegistryRuntime: async () => ({
+        countActiveDescendantRuns: () => 0,
+        countPendingDescendantRuns: () => pendingDescendantRuns,
+        countPendingDescendantRunsExcludingRun: () => 0,
+        getLatestSubagentRunByChildSessionKey: () => undefined,
+        listSubagentRunsForRequester: () => [],
+        isSubagentSessionRunActive: () => subagentSessionRunActive,
+        shouldIgnorePostCompletionAnnounceForRun: () => false,
+        shouldIgnorePostCompletionAnnounceForSession: () => shouldIgnorePostCompletion,
+        replaceSubagentRunAfterSteer: () => true,
+        resolveRequesterForChildSession: () => fallbackRequesterResolution,
+      }),
+    });
+  });
+
+  afterEach(() => {
+    subagentAnnounceTesting.setDepsForTest();
   });
 
   it("uses 120s timeout by default for direct announce agent call", async () => {
@@ -313,7 +345,7 @@ describe("subagent announce timeout config", () => {
     expect(completionDirectAgentCall?.timeoutMs).toBe(120_000);
   });
 
-  it("retries gateway timeout for externally delivered completion announces before giving up", async () => {
+  it("caps repeated long-wait gateway timeouts for externally delivered completion announces", async () => {
     try {
       vi.stubEnv("OPENCLAW_TEST_FAST", "1");
       callGatewayImpl = async (request) => {
@@ -335,7 +367,7 @@ describe("subagent announce timeout config", () => {
       const directAgentCalls = gatewayCalls.filter(
         (call) => call.method === "agent" && call.expectFinal === true,
       );
-      expect(directAgentCalls).toHaveLength(4);
+      expect(directAgentCalls).toHaveLength(2);
     } finally {
       vi.unstubAllEnvs();
     }
