@@ -167,6 +167,7 @@ import {
 import { dropThinkingBlocks } from "../thinking.js";
 import { collectAllowedToolNames } from "../tool-name-allowlist.js";
 import {
+  PREEMPTIVE_CONTEXT_OVERFLOW_MESSAGE,
   installContextEngineLoopHook,
   installToolResultContextGuard,
 } from "../tool-result-context-guard.js";
@@ -245,6 +246,7 @@ import { buildAttemptReplayMetadata } from "./incomplete-turn.js";
 import { resolveLlmIdleTimeoutMs, streamWithIdleTimeout } from "./llm-idle-timeout.js";
 import {
   PREEMPTIVE_OVERFLOW_ERROR_TEXT,
+  calculatePreemptivePromptBudgetBeforeReserve,
   shouldPreemptivelyCompactBeforePrompt,
 } from "./preemptive-compaction.js";
 import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
@@ -1055,15 +1057,16 @@ export async function runEmbeddedAttempt(
       queueYieldInterruptForSession = () => {
         queueSessionsYieldInterruptMessage(activeSession);
       };
+      const contextTokenBudget = params.contextTokenBudget ?? DEFAULT_CONTEXT_TOKENS;
+      const reserveTokens = settingsManager.getCompactionReserveTokens();
+      const preemptiveBudget = calculatePreemptivePromptBudgetBeforeReserve({
+        contextTokenBudget,
+        reserveTokens,
+      });
       if (params.contextEngine?.info?.ownsCompaction !== true) {
         removeToolResultContextGuard = installToolResultContextGuard({
           agent: activeSession.agent,
-          contextWindowTokens: Math.max(
-            1,
-            Math.floor(
-              params.model.contextWindow ?? params.model.maxTokens ?? DEFAULT_CONTEXT_TOKENS,
-            ),
-          ),
+          contextWindowTokens: preemptiveBudget.promptBudgetBeforeReserve,
         });
       } else {
         removeToolResultContextGuard = installContextEngineLoopHook({
@@ -1988,8 +1991,6 @@ export async function runEmbeddedAttempt(
               });
           }
 
-          const reserveTokens = settingsManager.getCompactionReserveTokens();
-          const contextTokenBudget = params.contextTokenBudget ?? DEFAULT_CONTEXT_TOKENS;
           const preemptiveCompaction =
             params.contextEngine?.info?.ownsCompaction === true
               ? {
@@ -1998,7 +1999,14 @@ export async function runEmbeddedAttempt(
                   estimatedPromptTokens: 0,
                   promptBudgetBeforeReserve: 0,
                   overflowTokens: 0,
+                  promptOverflowTokens: 0,
+                  toolResultContextOverflowTokens: 0,
                   toolResultReducibleChars: 0,
+                  totalToolResultChars: 0,
+                  toolResultCount: 0,
+                  toolResultContextEstimatedChars: 0,
+                  toolResultContextMaxChars: 0,
+                  toolResultContextRatio: 0,
                   effectiveReserveTokens: reserveTokens,
                 }
               : shouldPreemptivelyCompactBeforePrompt({
@@ -2160,8 +2168,14 @@ export async function runEmbeddedAttempt(
               await persistSessionsYieldContextMessage(activeSession, yieldMessage);
             }
           } else {
-            promptError = err;
-            promptErrorSource = "prompt";
+            if (err instanceof Error && err.message.includes(PREEMPTIVE_CONTEXT_OVERFLOW_MESSAGE)) {
+              preflightRecovery = { route: "compact_then_truncate" };
+              promptError = new Error(PREEMPTIVE_OVERFLOW_ERROR_TEXT);
+              promptErrorSource = "precheck";
+            } else {
+              promptError = err;
+              promptErrorSource = "prompt";
+            }
           }
         } finally {
           log.debug(

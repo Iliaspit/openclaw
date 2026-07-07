@@ -31,6 +31,17 @@ type GuardableAgentRecord = {
   transformContext?: GuardableTransformContext;
 };
 
+export type ToolResultContextPressureEstimate = {
+  estimatedContextChars: number;
+  maxContextChars: number;
+  overflowChars: number;
+  ratio: number;
+  toolResultCount: number;
+  toolResultEstimatedChars: number;
+  toolResultOverflowChars: number;
+  toolResultRatio: number;
+};
+
 export function formatContextLimitTruncationNotice(truncatedChars: number): string {
   return `[... ${Math.max(1, Math.floor(truncatedChars))} ${CONTEXT_LIMIT_TRUNCATION_NOTICE}]`;
 }
@@ -138,12 +149,65 @@ function toolResultsNeedTruncation(params: {
   return false;
 }
 
+export function calculateToolResultContextGuardMaxChars(contextWindowTokens: number): number {
+  return Math.max(
+    1_024,
+    Math.floor(
+      Math.max(1, Math.floor(contextWindowTokens)) *
+        CHARS_PER_TOKEN_ESTIMATE *
+        PREEMPTIVE_OVERFLOW_RATIO,
+    ),
+  );
+}
+
+export function estimateToolResultContextPressure(params: {
+  messages: AgentMessage[];
+  maxContextChars: number;
+  additionalContextChars?: number;
+}): ToolResultContextPressureEstimate {
+  const estimateCache = createMessageCharEstimateCache();
+  let toolResultCount = 0;
+  let toolResultEstimatedChars = 0;
+  for (const message of params.messages) {
+    if (!isToolResultMessage(message)) {
+      continue;
+    }
+    const estimatedChars = estimateMessageCharsCached(message, estimateCache);
+    if (estimatedChars <= 0) {
+      continue;
+    }
+    toolResultCount += 1;
+    toolResultEstimatedChars += estimatedChars;
+  }
+
+  const additionalContextChars = Math.max(0, Math.floor(params.additionalContextChars ?? 0));
+  const estimatedContextChars =
+    estimateContextChars(params.messages, estimateCache) + additionalContextChars;
+  const maxContextChars = Math.max(1, Math.floor(params.maxContextChars));
+  const overflowChars = Math.max(0, estimatedContextChars - maxContextChars);
+  const toolResultOverflowChars = Math.max(0, toolResultEstimatedChars - maxContextChars);
+  return {
+    estimatedContextChars,
+    maxContextChars,
+    overflowChars,
+    ratio: estimatedContextChars / maxContextChars,
+    toolResultCount,
+    toolResultEstimatedChars,
+    toolResultOverflowChars,
+    toolResultRatio: toolResultEstimatedChars / maxContextChars,
+  };
+}
+
 function exceedsPreemptiveOverflowThreshold(params: {
   messages: AgentMessage[];
   maxContextChars: number;
 }): boolean {
-  const estimateCache = createMessageCharEstimateCache();
-  return estimateContextChars(params.messages, estimateCache) > params.maxContextChars;
+  return (
+    estimateToolResultContextPressure({
+      messages: params.messages,
+      maxContextChars: params.maxContextChars,
+    }).toolResultOverflowChars > 0
+  );
 }
 
 function applyMessageMutationInPlace(
@@ -297,10 +361,7 @@ export function installToolResultContextGuard(params: {
   contextWindowTokens: number;
 }): () => void {
   const contextWindowTokens = Math.max(1, Math.floor(params.contextWindowTokens));
-  const maxContextChars = Math.max(
-    1_024,
-    Math.floor(contextWindowTokens * CHARS_PER_TOKEN_ESTIMATE * PREEMPTIVE_OVERFLOW_RATIO),
-  );
+  const maxContextChars = calculateToolResultContextGuardMaxChars(contextWindowTokens);
   const maxSingleToolResultChars = Math.max(
     1_024,
     Math.floor(

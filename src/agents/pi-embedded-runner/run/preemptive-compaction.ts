@@ -5,6 +5,10 @@ import {
   MIN_PROMPT_BUDGET_RATIO,
   MIN_PROMPT_BUDGET_TOKENS,
 } from "../../pi-compaction-constants.js";
+import {
+  calculateToolResultContextGuardMaxChars,
+  estimateToolResultContextPressure,
+} from "../tool-result-context-guard.js";
 import { estimateToolResultReductionPotential } from "../tool-result-truncation.js";
 import type { PreemptiveCompactionRoute } from "./preemptive-compaction.types.js";
 
@@ -38,6 +42,31 @@ export function estimatePrePromptTokens(params: {
   return Math.max(0, Math.ceil(estimated * SAFETY_MARGIN));
 }
 
+export function calculatePreemptivePromptBudgetBeforeReserve(params: {
+  contextTokenBudget: number;
+  reserveTokens: number;
+}): {
+  contextTokenBudget: number;
+  promptBudgetBeforeReserve: number;
+  effectiveReserveTokens: number;
+} {
+  const contextTokenBudget = Math.max(1, Math.floor(params.contextTokenBudget));
+  const requestedReserveTokens = Math.max(0, Math.floor(params.reserveTokens));
+  const minPromptBudget = Math.min(
+    MIN_PROMPT_BUDGET_TOKENS,
+    Math.max(1, Math.floor(contextTokenBudget * MIN_PROMPT_BUDGET_RATIO)),
+  );
+  const effectiveReserveTokens = Math.min(
+    requestedReserveTokens,
+    Math.max(0, contextTokenBudget - minPromptBudget),
+  );
+  return {
+    contextTokenBudget,
+    promptBudgetBeforeReserve: Math.max(1, contextTokenBudget - effectiveReserveTokens),
+    effectiveReserveTokens,
+  };
+}
+
 export function shouldPreemptivelyCompactBeforePrompt(params: {
   messages: AgentMessage[];
   systemPrompt?: string;
@@ -51,28 +80,42 @@ export function shouldPreemptivelyCompactBeforePrompt(params: {
   estimatedPromptTokens: number;
   promptBudgetBeforeReserve: number;
   overflowTokens: number;
+  promptOverflowTokens: number;
+  toolResultContextOverflowTokens: number;
   toolResultReducibleChars: number;
+  totalToolResultChars: number;
+  toolResultCount: number;
+  toolResultContextEstimatedChars: number;
+  toolResultContextMaxChars: number;
+  toolResultContextRatio: number;
   effectiveReserveTokens: number;
 } {
   const estimatedPromptTokens = estimatePrePromptTokens(params);
-  const contextTokenBudget = Math.max(1, Math.floor(params.contextTokenBudget));
-  const requestedReserveTokens = Math.max(0, Math.floor(params.reserveTokens));
-  const minPromptBudget = Math.min(
-    MIN_PROMPT_BUDGET_TOKENS,
-    Math.max(1, Math.floor(contextTokenBudget * MIN_PROMPT_BUDGET_RATIO)),
-  );
-  const effectiveReserveTokens = Math.min(
-    requestedReserveTokens,
-    Math.max(0, contextTokenBudget - minPromptBudget),
-  );
-  const promptBudgetBeforeReserve = Math.max(1, contextTokenBudget - effectiveReserveTokens);
-  const overflowTokens = Math.max(0, estimatedPromptTokens - promptBudgetBeforeReserve);
+  const { contextTokenBudget, promptBudgetBeforeReserve, effectiveReserveTokens } =
+    calculatePreemptivePromptBudgetBeforeReserve(params);
+  const promptOverflowTokens = Math.max(0, estimatedPromptTokens - promptBudgetBeforeReserve);
   const toolResultPotential = estimateToolResultReductionPotential({
     messages: params.messages,
     contextWindowTokens: params.contextTokenBudget,
     maxCharsOverride: params.toolResultMaxChars,
   });
-  const overflowChars = overflowTokens * ESTIMATED_CHARS_PER_TOKEN;
+  const promptSideChars = Math.max(
+    0,
+    (typeof params.systemPrompt === "string" ? params.systemPrompt.length : 0) +
+      params.prompt.length,
+  );
+  const toolResultContextPressure = estimateToolResultContextPressure({
+    messages: params.messages,
+    maxContextChars: calculateToolResultContextGuardMaxChars(promptBudgetBeforeReserve),
+    additionalContextChars: promptSideChars,
+  });
+  const toolResultContextOverflowTokens =
+    toolResultPotential.maxReducibleChars > 0 &&
+    toolResultContextPressure.toolResultOverflowChars > 0
+      ? Math.ceil(toolResultContextPressure.toolResultOverflowChars / ESTIMATED_CHARS_PER_TOKEN)
+      : 0;
+  const overflowTokens = Math.max(promptOverflowTokens, toolResultContextOverflowTokens);
+  const overflowChars = promptOverflowTokens * ESTIMATED_CHARS_PER_TOKEN;
   const truncationBufferChars = TRUNCATION_ROUTE_BUFFER_TOKENS * ESTIMATED_CHARS_PER_TOKEN;
   const truncateOnlyThresholdChars = Math.max(
     overflowChars + truncationBufferChars,
@@ -81,7 +124,7 @@ export function shouldPreemptivelyCompactBeforePrompt(params: {
   const toolResultReducibleChars = toolResultPotential.maxReducibleChars;
 
   let route: PreemptiveCompactionRoute = "fits";
-  if (overflowTokens > 0) {
+  if (promptOverflowTokens > 0) {
     if (toolResultReducibleChars <= 0) {
       route = "compact_only";
     } else if (toolResultReducibleChars >= truncateOnlyThresholdChars) {
@@ -89,6 +132,8 @@ export function shouldPreemptivelyCompactBeforePrompt(params: {
     } else {
       route = "compact_then_truncate";
     }
+  } else if (toolResultContextOverflowTokens > 0) {
+    route = "compact_then_truncate";
   }
   return {
     route,
@@ -96,7 +141,14 @@ export function shouldPreemptivelyCompactBeforePrompt(params: {
     estimatedPromptTokens,
     promptBudgetBeforeReserve,
     overflowTokens,
+    promptOverflowTokens,
+    toolResultContextOverflowTokens,
     toolResultReducibleChars,
+    totalToolResultChars: toolResultPotential.totalToolResultChars,
+    toolResultCount: toolResultPotential.toolResultCount,
+    toolResultContextEstimatedChars: toolResultContextPressure.estimatedContextChars,
+    toolResultContextMaxChars: toolResultContextPressure.maxContextChars,
+    toolResultContextRatio: toolResultContextPressure.ratio,
     effectiveReserveTokens,
   };
 }

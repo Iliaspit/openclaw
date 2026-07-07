@@ -37,6 +37,25 @@ function makeToolResultMessage(...texts: string[]): AgentMessage {
   } as AgentMessage;
 }
 
+function makeToolResultWithDetails(
+  id: string,
+  visibleText: string,
+  detailText: string,
+): AgentMessage {
+  return {
+    role: "toolResult",
+    toolCallId: id,
+    toolName: "read",
+    content: [{ type: "text", text: visibleText }],
+    details: {
+      outputChars: detailText.length,
+      content: detailText,
+    },
+    isError: false,
+    timestamp: timestamp++,
+  } as AgentMessage;
+}
+
 describe("preemptive-compaction", () => {
   const verboseHistory =
     "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu ".repeat(40);
@@ -211,6 +230,81 @@ describe("preemptive-compaction", () => {
     expect(potential.oversizedReducibleChars).toBeLessThan(potential.maxReducibleChars);
     expect(potential.maxReducibleChars).toBeGreaterThan(desiredOverflowTokens * 4);
     expect(result.route).toBe("truncate_tool_results_only");
+    expect(result.shouldCompact).toBe(false);
+  });
+
+  it("routes aggregate modest tool-result pressure through preemptive compaction before prompt overflow", () => {
+    const messages = Array.from({ length: 10 }, (_, index) =>
+      makeToolResultWithDetails(
+        `call_modest_${index}`,
+        `visible result ${index}`,
+        "detail payload ".repeat(650),
+      ),
+    );
+    const latestBefore = JSON.stringify(messages[messages.length - 1]);
+
+    const result = shouldPreemptivelyCompactBeforePrompt({
+      messages,
+      systemPrompt: "sys",
+      prompt: "continue",
+      contextTokenBudget: 40_000,
+      reserveTokens: 4_000,
+      toolResultMaxChars: 12_000,
+    });
+
+    expect(result.estimatedPromptTokens).toBeLessThan(result.promptBudgetBeforeReserve);
+    expect(result.promptOverflowTokens).toBe(0);
+    expect(result.toolResultContextOverflowTokens).toBeGreaterThan(0);
+    expect(result.route).toBe("compact_then_truncate");
+    expect(result.shouldCompact).toBe(true);
+    expect(result.toolResultCount).toBe(10);
+    expect(result.toolResultContextEstimatedChars).toBeGreaterThan(
+      result.toolResultContextMaxChars,
+    );
+    expect(result.totalToolResultChars).toBeGreaterThan(12_000);
+    expect(result.toolResultReducibleChars).toBeGreaterThan(0);
+    expect(JSON.stringify(messages[messages.length - 1])).toBe(latestBefore);
+  });
+
+  it("allows large non-tool context that remains under the high-water mark", () => {
+    const result = shouldPreemptivelyCompactBeforePrompt({
+      messages: [makeAssistantHistory("non tool context ".repeat(6_000))],
+      systemPrompt: "sys",
+      prompt: "continue",
+      contextTokenBudget: 40_000,
+      reserveTokens: 4_000,
+    });
+
+    expect(result.estimatedPromptTokens).toBeLessThan(result.promptBudgetBeforeReserve);
+    expect(result.toolResultContextOverflowTokens).toBe(0);
+    expect(result.route).toBe("fits");
+    expect(result.shouldCompact).toBe(false);
+  });
+
+  it("does not route incidental tool tails when non-tool history is the context pressure", () => {
+    const messages = [
+      makeAssistantHistory("non tool context ".repeat(6_500)),
+      makeToolResultWithDetails("call_small_1", "visible 1", "tool detail ".repeat(1_500)),
+      makeToolResultWithDetails("call_small_2", "visible 2", "tool detail ".repeat(1_500)),
+    ];
+
+    const result = shouldPreemptivelyCompactBeforePrompt({
+      messages,
+      systemPrompt: "sys",
+      prompt: "continue",
+      contextTokenBudget: 40_000,
+      reserveTokens: 4_000,
+      toolResultMaxChars: 12_000,
+    });
+
+    expect(result.estimatedPromptTokens).toBeLessThan(result.promptBudgetBeforeReserve);
+    expect(result.promptOverflowTokens).toBe(0);
+    expect(result.toolResultReducibleChars).toBeGreaterThan(0);
+    expect(result.toolResultContextEstimatedChars).toBeGreaterThan(
+      result.toolResultContextMaxChars,
+    );
+    expect(result.toolResultContextOverflowTokens).toBe(0);
+    expect(result.route).toBe("fits");
     expect(result.shouldCompact).toBe(false);
   });
 });

@@ -192,49 +192,51 @@ describe("installToolResultContextGuard", () => {
     expect((contextForNextCall[0] as { details?: unknown }).details).toBeDefined();
   });
 
-  it("throws a preemptive overflow when total context still exceeds the high-water mark", async () => {
+  it("does not throw when non-tool context is the pressure source after tool truncation", async () => {
     const agent = makeGuardableAgent();
     const contextForNextCall = [
       makeUser("u".repeat(50_000)),
       makeToolResult("call_big", "x".repeat(5_000)),
     ];
 
-    await expect(applyGuardToContext(agent, contextForNextCall)).rejects.toThrow(
-      PREEMPTIVE_CONTEXT_OVERFLOW_MESSAGE,
-    );
+    const transformed = (await applyGuardToContext(agent, contextForNextCall)) as AgentMessage[];
+
+    expect(transformed).not.toBe(contextForNextCall);
+    expectPiStyleTruncation(getToolResultText(transformed[1]));
     expect(getToolResultText(contextForNextCall[1])).toBe("x".repeat(5_000));
   });
 
   it("throws instead of rewriting older tool results under aggregate pressure", async () => {
     const agent = makeGuardableAgent();
     const contextForNextCall = [
-      makeUser("u".repeat(50_000)),
-      makeToolResult("call_1", "a".repeat(500)),
-      makeToolResult("call_2", "b".repeat(500)),
-      makeToolResult("call_3", "c".repeat(500)),
+      makeUser("hello"),
+      ...Array.from({ length: 20 }, (_, index) =>
+        makeToolResult(`call_${index}`, String.fromCharCode(97 + (index % 26)).repeat(1_000)),
+      ),
     ];
 
-    await expect(applyGuardToContext(agent, contextForNextCall)).rejects.toThrow(
+    await expect(applyGuardToContext(agent, contextForNextCall, 10_000)).rejects.toThrow(
       PREEMPTIVE_CONTEXT_OVERFLOW_MESSAGE,
     );
-    expect(getToolResultText(contextForNextCall[1])).toBe("a".repeat(500));
-    expect(getToolResultText(contextForNextCall[2])).toBe("b".repeat(500));
-    expect(getToolResultText(contextForNextCall[3])).toBe("c".repeat(500));
+    expect(getToolResultText(contextForNextCall[1])).toBe("a".repeat(1_000));
+    expect(getToolResultText(contextForNextCall[20])).toHaveLength(1_000);
   });
 
   it("does not special-case the latest read result before throwing under aggregate pressure", async () => {
     const agent = makeGuardableAgent();
     const contextForNextCall = [
-      makeUser("u".repeat(50_000)),
-      makeToolResult("call_old", "x".repeat(400)),
-      makeReadToolResult("call_new", "y".repeat(500)),
+      makeUser("hello"),
+      ...Array.from({ length: 19 }, (_, index) =>
+        makeToolResult(`call_old_${index}`, "x".repeat(1_000)),
+      ),
+      makeReadToolResult("call_new", "y".repeat(1_000)),
     ];
 
-    await expect(applyGuardToContext(agent, contextForNextCall)).rejects.toThrow(
+    await expect(applyGuardToContext(agent, contextForNextCall, 10_000)).rejects.toThrow(
       PREEMPTIVE_CONTEXT_OVERFLOW_MESSAGE,
     );
-    expect(getToolResultText(contextForNextCall[1])).toBe("x".repeat(400));
-    expect(getToolResultText(contextForNextCall[2])).toBe("y".repeat(500));
+    expect(getToolResultText(contextForNextCall[1])).toBe("x".repeat(1_000));
+    expect(getToolResultText(contextForNextCall[20])).toBe("y".repeat(1_000));
   });
 
   it("supports model-window-specific truncation for large but otherwise valid tool results", async () => {

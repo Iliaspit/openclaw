@@ -14,10 +14,11 @@ finalization, slice-budget guardrails, runtime diagnostics, context telemetry,
 early helper context protection, and child compaction controls in one patch.
 
 Current implementation slice: **none active**. Change 2A, Change 2B, Change 3A,
-Change 3B, and the E2E gate-placement guardrail were implemented as separate
-slices and should not be extended without opening a new written slice first.
+Change 3B, Change 4, Change 5, and the E2E gate-placement guardrail were
+implemented as separate slices and should not be extended without opening a new
+written slice first.
 
-Next recommended implementation slice: Change 5, Early Helper Context Protection.
+Next recommended implementation slice: Change 6, Planner-safe Child Compaction.
 
 Latest investigation input:
 
@@ -66,6 +67,12 @@ Completed slices:
   current context window, stale preserved totals cannot raise it, checkpoint
   `tokensBefore` can preserve a higher scalar without inventing a paired window,
   and merge logic keeps the high-water monotonic.
+- **5 Early Helper Context Protection:** helper sessions now evaluate cumulative
+  tool-result context pressure before prompt submission and during live tool
+  loops using the same detail-aware accounting as tool-result truncation. The
+  tool-result path is gated on accumulated tool-result pressure, not incidental
+  non-tool history, and routes through `compact_then_truncate` before provider
+  overflow recovery.
 - **E2E Gate-placement Guardrail:** planner-facing orchestration guidance and
   `sessions_spawn` slice-role descriptions now say that QA children should run
   manual/behavioral checks plus the smallest relevant smoke command, while the
@@ -328,7 +335,7 @@ Notes:
   attach a guessed context window, and stale `totalTokensFresh=false` snapshots
   do not raise the high-water.
 
-## Later Change 5: Early Helper Context Protection
+## Completed Change 5: Early Helper Context Protection
 
 Problem:
 
@@ -346,6 +353,23 @@ Notes:
 - The completed guardrail is post-run and route-safety oriented.
 - This change should be preflight or in-run protection, not only a warning after
   a helper is already unsafe to reuse.
+
+Validation:
+
+- Added regression coverage for aggregate details-heavy tool results that trigger
+  `compact_then_truncate` before prompt-token overflow.
+- Added regression coverage proving incidental tool tails do not trigger the
+  special route when non-tool history is the pressure source.
+- Added in-loop guard coverage proving aggregate tool-result pressure throws a
+  bounded preemptive overflow without rewriting older or latest tool evidence.
+
+Done:
+
+- Pre-prompt and in-loop helper protection use the reserve-aware prompt budget.
+- The latest tool-result evidence is not mutated by the precheck decision.
+- The recovery route stays narrow: tool-result accumulation routes to
+  `compact_then_truncate`; unrelated non-tool context remains on the normal
+  prompt-overflow path.
 
 ## Later Change 6: Planner-safe Child Compaction
 
