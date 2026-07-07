@@ -10,6 +10,11 @@ import {
   normalizeOptionalLowercaseString,
 } from "../shared/string-coerce.js";
 import { listDeliverableMessageChannels } from "../utils/message-channel.js";
+import type { BootstrapMode } from "./bootstrap-mode.js";
+import {
+  buildFullBootstrapPromptLines,
+  buildLimitedBootstrapPromptLines,
+} from "./bootstrap-prompt.js";
 import type { ResolvedTimeFormat } from "./date-time.js";
 import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
 import type {
@@ -296,6 +301,23 @@ function buildOverridablePromptSection(params: {
   return params.fallback;
 }
 
+function buildSubagentOrchestrationGuidance(params: { availableTools: Set<string> }) {
+  if (!params.availableTools.has("sessions_spawn")) {
+    return [];
+  }
+  const hasSubagents = params.availableTools.has("subagents");
+  return [
+    hasSubagents
+      ? '- Sub-agent orchestration → use `sessions_spawn(...)` to start delegated work; omit `context` for isolated children, set `context:"fork"` only when the child needs the current transcript; use `subagents(action=list|steer|kill)` to manage already-spawned children.'
+      : '- Sub-agent orchestration → use `sessions_spawn(...)` to start delegated work; omit `context` for isolated children, set `context:"fork"` only when the child needs the current transcript.',
+    "- Before spawning for multi-step recovery, split the work into small sequential slices and give a child only the current slice. Do not combine dirty-diff classification, implementation, unit coverage, focused E2E, and final gate in one child brief.",
+    '- QA children are for manual/behavioral checks plus the smallest relevant smoke command. Do not assign a full E2E suite to QA, testing, or review children; only spawn full E2E as an explicit final-gate child with `sliceRole:"full_gate"` after implementation, focused tests, and review are complete.',
+    "- If a final-gate/full E2E child fails, do not ask that child to repair or run broad recovery. Have it report the first failing spec, test id, and artifact, then create a fresh narrow implementation slice for that single failure; rerun the failed test or smoke check before another full gate.",
+    "- Keep implementation, testing, and adversarial review as separate child phases when the repo or user asks for phase separation.",
+    "- Child briefs should include one objective, the likely files or surfaces, explicit non-goals, one validation target, and the expected deliverable. If a child times out, has no visible final answer, or returns partial evidence, treat that slice as blocked or poisoned and open a smaller fresh slice instead of broadening it.",
+  ];
+}
+
 function buildMessagingSection(params: {
   isMinimal: boolean;
   availableTools: Set<string>;
@@ -311,8 +333,10 @@ function buildMessagingSection(params: {
     "## Messaging",
     "- Reply in current session → automatically routes to the source channel (Signal, Telegram, etc.)",
     "- Cross-session messaging → use sessions_send(sessionKey, message) for plain inter-session messages",
-    "- Sub-agent orchestration (tracked completion, restarting finished child sessions, kill/list control) → use subagents(action=list|steer|kill) and sessions_spawn",
-    "- Do not use fire-and-forget sessions_send to stale or untracked subagent sessions; it cannot create tracked child completion events. Spawn a fresh child when the old child is no longer tracked.",
+    ...buildSubagentOrchestrationGuidance({ availableTools: params.availableTools }),
+    params.availableTools.has("sessions_spawn")
+      ? "- Do not use fire-and-forget sessions_send to stale or untracked subagent sessions; it cannot create tracked child completion events. Spawn a fresh child when the old child is no longer tracked."
+      : "",
     `- Runtime-generated completion events may ask for a user update. Rewrite those in your normal assistant voice and send the update (do not forward raw internal metadata or default to ${SILENT_REPLY_TOKEN}).`,
     "- Never use exec/curl for provider messaging; OpenClaw handles all routing internally.",
     params.availableTools.has("message")
@@ -378,6 +402,34 @@ function formatFullAccessBlockedReason(reason?: EmbeddedFullAccessBlockedReason)
   }
   return "runtime constraints";
 }
+
+export function buildAgentUserPromptPrefix(params: {
+  bootstrapMode?: BootstrapMode;
+}): string | undefined {
+  if (params.bootstrapMode === "full") {
+    return [
+      "[Bootstrap pending]",
+      ...buildFullBootstrapPromptLines({
+        readLine: "Please read BOOTSTRAP.md from the workspace before your first normal reply.",
+        firstReplyLine:
+          "Your first user-visible reply for a bootstrap-pending workspace must follow BOOTSTRAP.md, not a generic greeting.",
+      }),
+    ].join("\n");
+  }
+  if (params.bootstrapMode === "limited") {
+    return [
+      "[Bootstrap pending]",
+      ...buildLimitedBootstrapPromptLines({
+        introLine:
+          "This run cannot safely complete the full BOOTSTRAP.md workflow here.",
+        nextStepLine:
+          "If bootstrap still needs work, recommend switching to a primary interactive run with normal workspace access.",
+      }),
+    ].join("\n");
+  }
+  return undefined;
+}
+
 export function buildAgentSystemPrompt(params: {
   workspaceDir: string;
   defaultThinkLevel?: ThinkLevel;
@@ -663,6 +715,7 @@ export function buildAgentSystemPrompt(params: {
     ...(acpHarnessSpawnAllowed
       ? [
           'For requests like "do this in codex/claude code/cursor/gemini" or similar ACP harnesses, treat it as ACP harness intent and call `sessions_spawn` with `runtime: "acp"`.',
+          "For Codex conversation binding/control, prefer the native Codex app-server plugin path when it is available.",
           'On Discord, default ACP harness requests to thread-bound persistent sessions (`thread: true`, `mode: "session"`) unless the user asks otherwise.',
           "Set `agentId` explicitly unless `acp.defaultAgent` is configured, and do not route ACP harness requests through `subagents`/`agents_list` or local PTY exec flows.",
           'For ACP harness thread spawns, do not call `message` with `action=thread-create`; use `sessions_spawn` (`runtime: "acp"`, `thread: true`) as the single thread creation path.',

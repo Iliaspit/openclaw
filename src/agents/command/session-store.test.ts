@@ -1,13 +1,19 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { loadSessionStore } from "../../config/sessions.js";
 import type { EmbeddedPiRunResult } from "../pi-embedded.js";
 import { clearCliSessionInStore, updateSessionStoreAfterAgentRun } from "./session-store.js";
 import { resolveSession } from "./session.js";
+
+const recordAgentRuntimeIssueMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../../infra/agent-runtime-health.js", () => ({
+  recordAgentRuntimeIssue: recordAgentRuntimeIssueMock,
+}));
 
 vi.mock("../model-selection.js", () => ({
   isCliProvider: (provider: string, cfg?: OpenClawConfig) =>
@@ -144,6 +150,10 @@ async function withTempSessionStore<T>(
 }
 
 describe("updateSessionStoreAfterAgentRun", () => {
+  beforeEach(() => {
+    recordAgentRuntimeIssueMock.mockClear();
+  });
+
   it("persists the selected embedded harness id on the session", async () => {
     await withTempSessionStore(async ({ storePath }) => {
       const cfg = {} as OpenClawConfig;
@@ -605,6 +615,294 @@ describe("updateSessionStoreAfterAgentRun", () => {
 
       const persisted = loadSessionStore(storePath);
       expect(persisted[sessionKey]?.estimatedCostUsd).toBeCloseTo(0.25, 4);
+    });
+  });
+
+  it("records a child context overflow issue when the fresh prompt snapshot reaches 90% of the context window", async () => {
+    await withTempSessionStore(async ({ storePath }) => {
+      const cfg = {} as OpenClawConfig;
+      const sessionKey = "agent:worker:subagent:test-context-overflow";
+      const sessionId = "child-context-overflow-session";
+      const sessionStore: Record<string, SessionEntry> = {
+        [sessionKey]: {
+          sessionId,
+          updatedAt: 1,
+          spawnedBy: "agent:planner:main",
+        },
+      };
+      await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2));
+
+      await updateSessionStoreAfterAgentRun({
+        cfg,
+        runId: "run-child-context-overflow",
+        sessionId,
+        sessionKey,
+        storePath,
+        sessionStore,
+        contextTokensOverride: 200_000,
+        defaultProvider: "openai",
+        defaultModel: "gpt-5.5",
+        result: {
+          meta: {
+            durationMs: 500,
+            agentMeta: {
+              sessionId,
+              provider: "openai",
+              model: "gpt-5.5",
+              promptTokens: 180_000,
+            },
+          },
+        },
+      });
+
+      expect(recordAgentRuntimeIssueMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          runId: "run-child-context-overflow",
+          code: "context_overflow",
+          severity: "error",
+          sessionKey,
+          message: expect.stringContaining("near its model window"),
+        }),
+      );
+    });
+  });
+
+  it("does not record child context overflow from a stale persisted total without fresh run tokens", async () => {
+    await withTempSessionStore(async ({ storePath }) => {
+      const cfg = {} as OpenClawConfig;
+      const sessionKey = "agent:worker:subagent:test-stale-context-total";
+      const sessionId = "child-stale-context-total-session";
+      const sessionStore: Record<string, SessionEntry> = {
+        [sessionKey]: {
+          sessionId,
+          updatedAt: 1,
+          spawnedBy: "agent:planner:main",
+          totalTokens: 190_000,
+          totalTokensFresh: false,
+          contextTokens: 200_000,
+        },
+      };
+      await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2));
+
+      await updateSessionStoreAfterAgentRun({
+        cfg,
+        runId: "run-child-stale-context-total",
+        sessionId,
+        sessionKey,
+        storePath,
+        sessionStore,
+        contextTokensOverride: 200_000,
+        defaultProvider: "openai",
+        defaultModel: "gpt-5.5",
+        result: {
+          meta: {
+            durationMs: 500,
+            agentMeta: {
+              sessionId,
+              provider: "openai",
+              model: "gpt-5.5",
+            },
+          },
+        },
+      });
+
+      expect(recordAgentRuntimeIssueMock).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: "context_overflow",
+          sessionKey,
+        }),
+      );
+      expect(sessionStore[sessionKey]?.totalTokens).toBe(190_000);
+      expect(sessionStore[sessionKey]?.totalTokensFresh).toBe(false);
+    });
+  });
+
+  it("does not record child context overflow below the 90% context threshold", async () => {
+    await withTempSessionStore(async ({ storePath }) => {
+      const cfg = {} as OpenClawConfig;
+      const sessionKey = "agent:worker:subagent:test-context-below-threshold";
+      const sessionId = "child-context-below-threshold-session";
+      const sessionStore: Record<string, SessionEntry> = {
+        [sessionKey]: {
+          sessionId,
+          updatedAt: 1,
+          spawnedBy: "agent:planner:main",
+        },
+      };
+      await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2));
+
+      await updateSessionStoreAfterAgentRun({
+        cfg,
+        runId: "run-child-context-below-threshold",
+        sessionId,
+        sessionKey,
+        storePath,
+        sessionStore,
+        contextTokensOverride: 200_000,
+        defaultProvider: "openai",
+        defaultModel: "gpt-5.5",
+        result: {
+          meta: {
+            durationMs: 500,
+            agentMeta: {
+              sessionId,
+              provider: "openai",
+              model: "gpt-5.5",
+              promptTokens: 179_999,
+            },
+          },
+        },
+      });
+
+      expect(recordAgentRuntimeIssueMock).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: "context_overflow",
+          sessionKey,
+        }),
+      );
+    });
+  });
+
+  it("does not record child guardrails for a top-level session", async () => {
+    await withTempSessionStore(async ({ storePath }) => {
+      const cfg = {} as OpenClawConfig;
+      const sessionKey = "agent:planner:main";
+      const sessionId = "top-level-context-session";
+      const sessionStore: Record<string, SessionEntry> = {
+        [sessionKey]: {
+          sessionId,
+          updatedAt: 1,
+        },
+      };
+      await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2));
+
+      await updateSessionStoreAfterAgentRun({
+        cfg,
+        runId: "run-top-context-overflow",
+        sessionId,
+        sessionKey,
+        storePath,
+        sessionStore,
+        contextTokensOverride: 200_000,
+        defaultProvider: "openai",
+        defaultModel: "gpt-5.5",
+        result: {
+          meta: {
+            durationMs: 500,
+            agentMeta: {
+              sessionId,
+              provider: "openai",
+              model: "gpt-5.5",
+              promptTokens: 180_000,
+            },
+            toolSummary: {
+              calls: 80,
+              tools: ["exec"],
+            },
+          },
+        },
+      });
+
+      expect(recordAgentRuntimeIssueMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("does not record child guardrails for a persistent ACP-shaped session without child lineage", async () => {
+    await withTempSessionStore(async ({ storePath }) => {
+      const cfg = {} as OpenClawConfig;
+      const sessionKey = "agent:codex:acp:test-persistent-top-level";
+      const sessionId = "top-level-acp-session";
+      const sessionStore: Record<string, SessionEntry> = {
+        [sessionKey]: {
+          sessionId,
+          updatedAt: 1,
+          acp: acpMeta(),
+        },
+      };
+      await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2));
+
+      await updateSessionStoreAfterAgentRun({
+        cfg,
+        runId: "run-top-level-acp",
+        sessionId,
+        sessionKey,
+        storePath,
+        sessionStore,
+        contextTokensOverride: 200_000,
+        defaultProvider: "openai",
+        defaultModel: "gpt-5.5",
+        result: {
+          meta: {
+            durationMs: 500,
+            agentMeta: {
+              sessionId,
+              provider: "openai",
+              model: "gpt-5.5",
+              promptTokens: 180_000,
+            },
+            toolSummary: {
+              calls: 80,
+              tools: ["exec"],
+            },
+          },
+        },
+      });
+
+      expect(recordAgentRuntimeIssueMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("records a child lifecycle issue when a single child run reaches the tool-call guardrail", async () => {
+    await withTempSessionStore(async ({ storePath }) => {
+      const cfg = {} as OpenClawConfig;
+      const sessionKey = "agent:worker:subagent:test-tool-loop";
+      const sessionId = "child-tool-loop-session";
+      const sessionStore: Record<string, SessionEntry> = {
+        [sessionKey]: {
+          sessionId,
+          updatedAt: 1,
+          spawnedBy: "agent:planner:main",
+        },
+      };
+      await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2));
+
+      await updateSessionStoreAfterAgentRun({
+        cfg,
+        runId: "run-child-tool-loop",
+        sessionId,
+        sessionKey,
+        storePath,
+        sessionStore,
+        contextTokensOverride: 200_000,
+        defaultProvider: "openai",
+        defaultModel: "gpt-5.5",
+        result: {
+          meta: {
+            durationMs: 500,
+            agentMeta: {
+              sessionId,
+              provider: "openai",
+              model: "gpt-5.5",
+              promptTokens: 10_000,
+            },
+            toolSummary: {
+              calls: 80,
+              tools: ["exec", "edit"],
+            },
+          },
+        },
+      });
+
+      expect(recordAgentRuntimeIssueMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          runId: "run-child-tool-loop",
+          code: "agent_lifecycle_blocked",
+          severity: "error",
+          sessionKey,
+          livenessState: "blocked",
+          message: expect.stringContaining("80-call guardrail"),
+        }),
+      );
     });
   });
 });

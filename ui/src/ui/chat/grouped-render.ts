@@ -397,6 +397,7 @@ function extractGroupMeta(group: MessageGroup, contextWindow: number | null): Gr
   let cost = 0;
   let model: string | null = null;
   let hasUsage = false;
+  let maxPromptTokens = 0;
 
   for (const { message } of group.messages) {
     const m = message as Record<string, unknown>;
@@ -406,10 +407,19 @@ function extractGroupMeta(group: MessageGroup, contextWindow: number | null): Gr
     const usage = m.usage as Record<string, number> | undefined;
     if (usage) {
       hasUsage = true;
-      input += usage.input ?? usage.inputTokens ?? 0;
-      output += usage.output ?? usage.outputTokens ?? 0;
-      cacheRead += usage.cacheRead ?? usage.cache_read_input_tokens ?? 0;
-      cacheWrite += usage.cacheWrite ?? usage.cache_creation_input_tokens ?? 0;
+      const messageInput = usage.input ?? usage.inputTokens ?? 0;
+      const messageOutput = usage.output ?? usage.outputTokens ?? 0;
+      const messageCacheRead = usage.cacheRead ?? usage.cache_read_input_tokens ?? 0;
+      const messageCacheWrite = usage.cacheWrite ?? usage.cache_creation_input_tokens ?? 0;
+
+      input += messageInput;
+      output += messageOutput;
+      cacheRead += messageCacheRead;
+      cacheWrite += messageCacheWrite;
+      maxPromptTokens = Math.max(
+        maxPromptTokens,
+        messageInput + messageCacheRead + messageCacheWrite,
+      );
     }
     const c = m.cost as Record<string, number> | undefined;
     if (c?.total) {
@@ -424,10 +434,9 @@ function extractGroupMeta(group: MessageGroup, contextWindow: number | null): Gr
     return null;
   }
 
-  const promptTokens = input + cacheRead + cacheWrite;
   const contextPercent =
-    contextWindow && promptTokens > 0
-      ? Math.min(Math.round((promptTokens / contextWindow) * 100), 100)
+    contextWindow && maxPromptTokens > 0
+      ? Math.min(Math.round((maxPromptTokens / contextWindow) * 100), 100)
       : null;
 
   return { input, output, cacheRead, cacheWrite, cost, model, contextPercent };

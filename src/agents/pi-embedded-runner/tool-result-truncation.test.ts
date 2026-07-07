@@ -12,6 +12,7 @@ let truncateToolResultMessage: typeof import("./tool-result-truncation.js").trun
 let calculateMaxToolResultChars: typeof import("./tool-result-truncation.js").calculateMaxToolResultChars;
 let calculateMaxToolResultCharsWithCap: typeof import("./tool-result-truncation.js").calculateMaxToolResultCharsWithCap;
 let getToolResultTextLength: typeof import("./tool-result-truncation.js").getToolResultTextLength;
+let getToolResultContextLength: typeof import("./tool-result-truncation.js").getToolResultContextLength;
 let truncateOversizedToolResultsInMessages: typeof import("./tool-result-truncation.js").truncateOversizedToolResultsInMessages;
 let truncateOversizedToolResultsInSession: typeof import("./tool-result-truncation.js").truncateOversizedToolResultsInSession;
 let isOversizedToolResult: typeof import("./tool-result-truncation.js").isOversizedToolResult;
@@ -29,6 +30,7 @@ async function loadFreshToolResultTruncationModuleForTest() {
     calculateMaxToolResultChars,
     calculateMaxToolResultCharsWithCap,
     getToolResultTextLength,
+    getToolResultContextLength,
     truncateOversizedToolResultsInMessages,
     truncateOversizedToolResultsInSession,
     isOversizedToolResult,
@@ -66,6 +68,10 @@ function makeToolResult(text: string, toolCallId = "call_1"): ToolResultMessage 
   };
 }
 
+function withDetails(message: ToolResultMessage, details: unknown): ToolResultMessage {
+  return { ...message, details } as ToolResultMessage;
+}
+
 function makeUserMessage(text: string): UserMessage {
   return {
     role: "user",
@@ -94,6 +100,20 @@ function getFirstToolResultText(message: AgentMessage | ToolResultMessage): stri
 async function createTmpDir(): Promise<string> {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "tool-result-truncation-test-"));
   return tmpDir;
+}
+
+function readToolResultMessages(sessionFile: string): ToolResultMessage[] {
+  return SessionManager.open(sessionFile)
+    .getBranch()
+    .flatMap((entry) =>
+      entry.type === "message" && entry.message.role === "toolResult"
+        ? [entry.message as ToolResultMessage]
+        : [],
+    );
+}
+
+function sumToolResultContextLength(messages: readonly ToolResultMessage[]): number {
+  return messages.reduce((sum, message) => sum + getToolResultContextLength(message), 0);
 }
 
 describe("truncateToolResultText", () => {
@@ -188,6 +208,44 @@ describe("truncateToolResultMessage", () => {
     }
     expect(getFirstToolResultText(result)).toContain("[persist-truncated]");
   });
+
+  it("truncates oversized structured details even when text content is small", () => {
+    const msg = withDetails(makeToolResult("ok"), {
+      status: "completed",
+      exitCode: 0,
+      cwd: "/workspace/project",
+      aggregated: "diff --git a/file.ts b/file.ts\n".repeat(5_000),
+    });
+
+    const beforeLength = getToolResultContextLength(msg);
+    const result = truncateToolResultMessage(msg, 8_000);
+
+    expect(result.role).toBe("toolResult");
+    expect(getToolResultContextLength(result)).toBeLessThan(beforeLength);
+    expect(getToolResultContextLength(result)).toBeLessThanOrEqual(8_000);
+    const details = (result as { details?: Record<string, unknown> }).details;
+    expect(details?.status).toBe("completed");
+    expect(details?.detailsTruncated).toBe(true);
+    expect(String(details?.aggregated ?? details?.preview ?? "").length).toBeLessThan(5_000);
+  });
+
+  it("keeps tight fallback details within the requested context budget", () => {
+    const manyScalars = Object.fromEntries(
+      Array.from({ length: 20 }, (_, index) => [`field_${index}`, "metadata".repeat(20)]),
+    );
+    const msg = withDetails(makeToolResult("ok"), {
+      ...manyScalars,
+      status: "completed",
+      aggregated: "x".repeat(50_000),
+    });
+
+    const result = truncateToolResultMessage(msg, 500);
+
+    expect(getToolResultContextLength(result)).toBeLessThanOrEqual(500);
+    const details = (result as { details?: Record<string, unknown> }).details;
+    expect(details?.detailsTruncated).toBe(true);
+    expect(details?.originalDetailsChars).toEqual(expect.any(Number));
+  });
 });
 
 describe("calculateMaxToolResultChars", () => {
@@ -252,6 +310,15 @@ describe("isOversizedToolResult", () => {
     expect(isOversizedToolResult(msg, 128_000, 24_000)).toBe(false);
   });
 
+  it("treats oversized details as oversized tool-result context", () => {
+    const msg = withDetails(makeToolResult("ok"), {
+      status: "completed",
+      aggregated: "x".repeat(50_000),
+    });
+
+    expect(isOversizedToolResult(msg, 128_000, 16_000)).toBe(true);
+  });
+
   it("returns false for non-toolResult messages", () => {
     const msg = makeUserMessage("x".repeat(500_000));
     expect(isOversizedToolResult(msg, 128_000)).toBe(false);
@@ -269,9 +336,9 @@ describe("sessionLikelyHasOversizedToolResults", () => {
   it("returns true for aggregate medium tool results that exceed the shared budget", () => {
     const medium = "alpha beta gamma delta epsilon ".repeat(600);
     const messages: AgentMessage[] = [
-      makeToolResult(medium, "call_1"),
-      makeToolResult(medium, "call_2"),
-      makeToolResult(medium, "call_3"),
+      makeToolResult(`${medium}first tail`, "call_1"),
+      makeToolResult(`${medium}second tail`, "call_2"),
+      makeToolResult(`${medium}third tail`, "call_3"),
     ];
     expect(sessionLikelyHasOversizedToolResults({ messages, contextWindowTokens: 128_000 })).toBe(
       true,
@@ -295,9 +362,9 @@ describe("estimateToolResultReductionPotential", () => {
   it("estimates reducible chars for aggregate medium tool-result tails", () => {
     const medium = "alpha beta gamma delta epsilon ".repeat(400);
     const messages: AgentMessage[] = [
-      makeToolResult(medium, "call_1"),
-      makeToolResult(medium, "call_2"),
-      makeToolResult(medium, "call_3"),
+      makeToolResult(`${medium}first tail`, "call_1"),
+      makeToolResult(`${medium}second tail`, "call_2"),
+      makeToolResult(`${medium}third tail`, "call_3"),
     ];
 
     const estimate = estimateToolResultReductionPotential({
@@ -316,8 +383,8 @@ describe("estimateToolResultReductionPotential", () => {
     const medium = "alpha beta gamma delta epsilon ".repeat(800);
     const messages: AgentMessage[] = [
       makeToolResult(oversized, "call_1"),
-      makeToolResult(medium, "call_2"),
-      makeToolResult(medium, "call_3"),
+      makeToolResult(`${medium}first tail`, "call_2"),
+      makeToolResult(`${medium}second tail`, "call_3"),
     ];
 
     const estimate = estimateToolResultReductionPotential({
@@ -336,9 +403,9 @@ describe("estimateToolResultReductionPotential", () => {
   it("lets tiny caps drive aggregate recovery estimates without the old floor", () => {
     const medium = "alpha beta gamma delta epsilon ".repeat(600);
     const messages: AgentMessage[] = [
-      makeToolResult(medium, "call_1"),
-      makeToolResult(medium, "call_2"),
-      makeToolResult(medium, "call_3"),
+      makeToolResult(`${medium}first tail`, "call_1"),
+      makeToolResult(`${medium}second tail`, "call_2"),
+      makeToolResult(`${medium}third tail`, "call_3"),
     ];
 
     const estimate = estimateToolResultReductionPotential({
@@ -419,6 +486,102 @@ describe("truncateOversizedToolResultsInMessages", () => {
   });
 });
 
+describe("duplicate large tool result suppression", () => {
+  it("compacts older repeated large identical tool results and preserves the newest copy", async () => {
+    const dir = await createTmpDir();
+    const sm = SessionManager.create(dir, dir);
+    sm.appendMessage(makeUserMessage("hello"));
+    sm.appendMessage(makeAssistantMessage("running tests"));
+    const repeatedFailure =
+      "Error: repeated test failure\n" +
+      Array.from({ length: 900 }, (_, index) => `stack frame ${index}: expected true\n`).join("");
+    sm.appendMessage(makeToolResult(repeatedFailure, "call_1"));
+    sm.appendMessage(makeToolResult(repeatedFailure, "call_2"));
+    sm.appendMessage(makeToolResult(repeatedFailure, "call_3"));
+    const sessionFile = sm.getSessionFile()!;
+
+    const beforeToolResults = readToolResultMessages(sessionFile);
+    const beforeContextLength = sumToolResultContextLength(beforeToolResults);
+
+    const result = await truncateOversizedToolResultsInSession({
+      sessionFile,
+      contextWindowTokens: 128_000,
+      maxCharsOverride: 80_000,
+    });
+
+    expect(result.truncated).toBe(true);
+    expect(result.truncatedCount).toBe(2);
+
+    const afterToolResults = readToolResultMessages(sessionFile);
+    const afterTexts = afterToolResults.map(getFirstToolResultText);
+    expect(afterToolResults.map((message) => message.toolCallId)).toEqual([
+      "call_1",
+      "call_2",
+      "call_3",
+    ]);
+    expect(afterTexts[0]).toContain("[tool result duplicate omitted]");
+    expect(afterTexts[0]).toContain("toolCallId=call_3");
+    expect(afterTexts[1]).toContain("[tool result duplicate omitted]");
+    expect(afterTexts[1]).toContain("toolCallId=call_3");
+    expect(afterTexts[2]).toBe(repeatedFailure);
+    expect(sumToolResultContextLength(afterToolResults)).toBeLessThan(beforeContextLength);
+  });
+
+  it("preserves the newest duplicate even when it exceeds the per-result cap", async () => {
+    const dir = await createTmpDir();
+    const sm = SessionManager.create(dir, dir);
+    sm.appendMessage(makeUserMessage("hello"));
+    sm.appendMessage(makeAssistantMessage("running tests"));
+    const repeatedOversizedFailure = "Error: repeated oversized failure\n" + "x".repeat(20_000);
+    sm.appendMessage(makeToolResult(repeatedOversizedFailure, "call_1"));
+    sm.appendMessage(makeToolResult(repeatedOversizedFailure, "call_2"));
+    const sessionFile = sm.getSessionFile()!;
+
+    const result = await truncateOversizedToolResultsInSession({
+      sessionFile,
+      contextWindowTokens: 128_000,
+      maxCharsOverride: 12_000,
+    });
+
+    expect(result.truncated).toBe(true);
+    expect(result.truncatedCount).toBe(1);
+
+    const afterToolResults = readToolResultMessages(sessionFile);
+    const afterTexts = afterToolResults.map(getFirstToolResultText);
+    expect(afterToolResults.map((message) => message.toolCallId)).toEqual(["call_1", "call_2"]);
+    expect(afterTexts[0]).toContain("[tool result duplicate omitted]");
+    expect(afterTexts[0]).toContain("toolCallId=call_2");
+    expect(afterTexts[1]).toBe(repeatedOversizedFailure);
+    expect(afterTexts[1]).not.toContain("truncated");
+  });
+
+  it("leaves distinct large tool results unchanged", async () => {
+    const dir = await createTmpDir();
+    const sm = SessionManager.create(dir, dir);
+    sm.appendMessage(makeUserMessage("hello"));
+    sm.appendMessage(makeAssistantMessage("running tests"));
+    const commonPrefix = Array.from(
+      { length: 850 },
+      (_, index) => `stack frame ${index}: expected true\n`,
+    ).join("");
+    const firstFailure = `${commonPrefix}unique failure: expected button to be enabled\n`;
+    const secondFailure = `${commonPrefix}unique failure: expected status text to update\n`;
+    sm.appendMessage(makeToolResult(firstFailure, "call_1"));
+    sm.appendMessage(makeToolResult(secondFailure, "call_2"));
+    const sessionFile = sm.getSessionFile()!;
+
+    const result = await truncateOversizedToolResultsInSession({
+      sessionFile,
+      contextWindowTokens: 128_000,
+      maxCharsOverride: 80_000,
+    });
+
+    expect(result.truncated).toBe(false);
+    const afterTexts = readToolResultMessages(sessionFile).map(getFirstToolResultText);
+    expect(afterTexts).toEqual([firstFailure, secondFailure]);
+  });
+});
+
 describe("truncateOversizedToolResultsInSession", () => {
   it("readably truncates aggregate medium tool results in a session file", async () => {
     const dir = await createTmpDir();
@@ -426,9 +589,9 @@ describe("truncateOversizedToolResultsInSession", () => {
     sm.appendMessage(makeUserMessage("hello"));
     sm.appendMessage(makeAssistantMessage("calling tools"));
     const medium = "alpha beta gamma delta epsilon ".repeat(600);
-    sm.appendMessage(makeToolResult(medium, "call_1"));
-    sm.appendMessage(makeToolResult(medium, "call_2"));
-    sm.appendMessage(makeToolResult(medium, "call_3"));
+    sm.appendMessage(makeToolResult(`${medium}first tail`, "call_1"));
+    sm.appendMessage(makeToolResult(`${medium}second tail`, "call_2"));
+    sm.appendMessage(makeToolResult(`${medium}third tail`, "call_3"));
     const sessionFile = sm.getSessionFile()!;
 
     const beforeBranch = SessionManager.open(sessionFile).getBranch();
@@ -542,6 +705,50 @@ describe("truncateOversizedToolResultsInSession", () => {
     expect(text.length).toBeLessThan(2_000);
     expect(text).toContain("truncated");
   });
+
+  it("rewrites oversized persisted tool-result details during recovery", async () => {
+    const dir = await createTmpDir();
+    const sm = SessionManager.create(dir, dir);
+    sm.appendMessage(makeUserMessage("hello"));
+    sm.appendMessage(makeAssistantMessage("calling tools"));
+    sm.appendMessage(
+      withDetails(makeToolResult("ok", "call_1"), {
+        status: "completed",
+        exitCode: 0,
+        aggregated: "diff --git a/file.ts b/file.ts\n".repeat(5_000),
+      }),
+    );
+    const sessionFile = sm.getSessionFile()!;
+
+    const beforeBranch = SessionManager.open(sessionFile).getBranch();
+    const beforeToolResult = beforeBranch.find(
+      (entry) => entry.type === "message" && entry.message.role === "toolResult",
+    );
+    if (!beforeToolResult || beforeToolResult.type !== "message") {
+      throw new Error("expected tool result before rewrite");
+    }
+    const beforeLength = getToolResultContextLength(beforeToolResult.message);
+
+    const result = await truncateOversizedToolResultsInSession({
+      sessionFile,
+      contextWindowTokens: 128_000,
+      maxCharsOverride: 8_000,
+    });
+
+    expect(result.truncated).toBe(true);
+    const afterBranch = SessionManager.open(sessionFile).getBranch();
+    const afterToolResult = afterBranch.find(
+      (entry) => entry.type === "message" && entry.message.role === "toolResult",
+    );
+    if (!afterToolResult || afterToolResult.type !== "message") {
+      throw new Error("expected tool result after rewrite");
+    }
+    expect(getToolResultContextLength(afterToolResult.message)).toBeLessThan(beforeLength);
+    expect(getToolResultContextLength(afterToolResult.message)).toBeLessThanOrEqual(8_000);
+    const details = (afterToolResult.message as { details?: Record<string, unknown> }).details;
+    expect(details?.detailsTruncated).toBe(true);
+  });
+
   it("combines oversized and aggregate recovery truncation in the same session rewrite", async () => {
     const dir = await createTmpDir();
     const sm = SessionManager.create(dir, dir);
@@ -549,8 +756,8 @@ describe("truncateOversizedToolResultsInSession", () => {
     sm.appendMessage(makeAssistantMessage("calling tools"));
     sm.appendMessage(makeToolResult("x".repeat(500_000), "call_1"));
     const medium = "alpha beta gamma delta epsilon ".repeat(800);
-    sm.appendMessage(makeToolResult(medium, "call_2"));
-    sm.appendMessage(makeToolResult(medium, "call_3"));
+    sm.appendMessage(makeToolResult(`${medium}first tail`, "call_2"));
+    sm.appendMessage(makeToolResult(`${medium}second tail`, "call_3"));
     const sessionFile = sm.getSessionFile()!;
 
     const result = await truncateOversizedToolResultsInSession({
@@ -580,9 +787,9 @@ describe("truncateOversizedToolResultsInSession", () => {
     sm.appendMessage(makeUserMessage("hello"));
     sm.appendMessage(makeAssistantMessage("calling tools"));
     const medium = "alpha beta gamma delta epsilon ".repeat(800);
-    sm.appendMessage(makeToolResult(medium, "call_1"));
-    sm.appendMessage(makeToolResult(medium, "call_2"));
-    sm.appendMessage(makeToolResult(medium, "call_3"));
+    sm.appendMessage(makeToolResult(`${medium}first tail`, "call_1"));
+    sm.appendMessage(makeToolResult(`${medium}second tail`, "call_2"));
+    sm.appendMessage(makeToolResult(`${medium}third tail`, "call_3"));
     const sessionFile = sm.getSessionFile()!;
 
     const result = await truncateOversizedToolResultsInSession({

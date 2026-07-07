@@ -145,3 +145,146 @@ Consult this before investigating a new issue or making a related change.
    - **Issue:** Fresh child reroute could synthesize a sparse handoff instead of requiring planner-authored semantics, drop attachment/provider facts, accept active child follow-ups through announce-mode delivery, leak ACP key/value backend option secrets, lose receipt hydration when run rows were pruned, or let old top-level child completions/wakes race a newer replacement generation.
    - **Fix and why:** Required planner handoff input before fresh reroute, attached runtime-owned provider/auth/attachment facts, routed controlled child follow-ups through tracked restart delivery, added a locked durable result-receipt store and prompt-time receipt hydration, redacted ACP secret-labeled backend option values while marking them non-replay-safe, preserved session-mode replay through thread-bound fresh spawns with the original requester origin and runtime controls, marked superseded old runs as `fresh-reroute`, and fenced steer/wake replacement against newer child generations with deterministic latest-row selection.
    - **Result:** Fresh reroute now has bounded factual handoff metadata and accepted child work has a tracked generation/receipt path instead of relying on stale-child announce behavior; late old completions are ignored or attached only to the old generation.
+
+## 2026-07-03
+
+1. **Control UI planner notifications needed session-scoped orchestration filtering**
+   - **Issue:** Planner completion popups need `session.activity`, which requires the Control UI to opt into orchestration events. That also exposes global `agent` orchestration events, and the existing compaction handler accepted compaction events without first checking whether they belonged to the visible session/run.
+   - **Fix and why:** Added the planner completion toast/chime from terminal top-level planner `session.activity` events, deduped by run, and filtered compaction events through the same visible-session/run acceptance path already used by fallback lifecycle state.
+   - **Result:** Top-level planner completions can notify the page without unrelated planner/session compaction events changing the visible UI state.
+
+2. **Docker dependency install missed the package-manager preinstall script**
+   - **Issue:** Local `openclaw:local` rebuilds failed during the early Docker `pnpm install --frozen-lockfile` layer because `package.json` runs `scripts/preinstall-package-manager-warning.mjs`, but the Dockerfile copied only a subset of scripts before dependency installation.
+   - **Fix and why:** Added `scripts/preinstall-package-manager-warning.mjs` to the early Docker build-stage script copy list, matching the package lifecycle contract before the full source tree is copied.
+   - **Result:** Docker rebuilds can pass the preinstall lifecycle step without waiting for the later `COPY . .` layer.
+
+3. **Memory embedding SDK barrel exported removed provider modules**
+   - **Issue:** Docker `pnpm build:docker` failed because `src/memory-host-sdk/engine-embeddings.ts` still re-exported old host provider modules that had moved into bundled plugins or no longer existed in core.
+   - **Fix and why:** Changed the barrel to export the remaining core embedding runtime helpers and current host utilities consumed by plugin SDK callers, while leaving provider-specific implementations owned by their bundled plugins.
+   - **Result:** The Docker build no longer fails on missing memory embedding provider files, and plugin implementations keep using the SDK helper exports without unresolved memory-core-host-engine-embeddings warnings.
+
+4. **Queue idle hid planner yield waits**
+   - **Issue:** A selected planner lane could show `Queue idle` while the latest visible planner status was a `sessions_yield` wait on another agent or follow-up. The scheduler snapshot was accurate, but the pill gave the wrong operator cue.
+   - **Fix and why:** Added a selected-lane-only `waitHint` from the latest transcript `openclaw.sessions_yield` status and taught the Control UI pill/hover text to show `Waiting on agent` with the yielded status while preserving runtime degraded/error precedence.
+   - **Result:** Operators can distinguish an actually idle lane from a planner that intentionally yielded while waiting, without exposing extra transcript or task payload fields in `queue.health`.
+
+5. **Planner context overflow came from unbounded tool-result details**
+   - **Issue:** Planner 1 overflowed after large `exec`, `sessions_list`, and `sessions_history` results. Text content was capped, but structured `toolResult.details` still persisted full payloads such as `details.aggregated` diffs and session arrays, so recovery heuristics undercounted and failed to shrink the actual transcript bloat.
+   - **Fix and why:** Made live tool-result truncation count text plus structured details, summarize oversized details while preserving small scalar metadata, apply the cap at the tool-definition adapter before transcript persistence, and use the same context-length accounting in overflow recovery.
+   - **Result:** New tool results cannot silently carry huge details into planner transcripts, and persisted overflow recovery can now shrink details-heavy tool results instead of only trimming visible text blocks.
+
+6. **Docker gateway crash-looped on a missing subagent spawn export**
+   - **Issue:** The local `openclaw:local` gateway image started from `dist/index.js` but crashed before binding `18789` with `ReferenceError: SUBAGENT_SPAWN_CONTEXT_MODES is not defined`. The spawn tool imported the context-mode constant through `src/agents/subagent-spawn.ts`, but that module only re-exported the spawn and sandbox mode constants.
+   - **Fix and why:** Re-exported `SUBAGENT_SPAWN_CONTEXT_MODES` and its type from `src/agents/subagent-spawn.ts`, keeping the existing tool import path valid and avoiding a broader import refactor.
+   - **Result:** Rebuilding and recreating the Docker gateway image restores the `localhost:18789` listener instead of repeatedly writing startup-failed stability bundles.
+
+7. **Bonjour discovery registration missed the plugin record field**
+   - **Issue:** After the subagent export crash was fixed, the rebuilt Docker gateway still failed during Bonjour plugin registration with `Cannot read properties of undefined (reading 'push')`. `PluginRecord` required `gatewayDiscoveryServiceIds`, but the loader-created record did not initialize it, and snapshot/capability capture also ignored gateway discovery services.
+   - **Fix and why:** Initialized `gatewayDiscoveryServiceIds` for loaded plugin records and taught captured registration plus bundled capability runtime to preserve gateway discovery services.
+   - **Result:** The bundled Bonjour discovery plugin can register without aborting gateway startup, and registry snapshots retain the same discovery-service surface as activating loads.
+
+8. **Channel compatibility exports drifted after presence-policy extraction**
+   - **Issue:** The rebuilt gateway served the Control UI, but the `health` RPC failed with `listConfiguredChannelIdsForReadOnlyScope is not defined`. Channel presence helpers still had callers importing through `src/plugins/channel-plugin-ids.ts`, and bundled channel legacy setup helpers were expected by state migration code but were no longer exported.
+   - **Fix and why:** Restored channel presence re-exports, typed `openclaw.setupFeatures`, preserved legacy setup-entry loader refs, and added setup-entry-only bundled helper exports so health/status and migration callers stay on the light path.
+   - **Result:** Health/status callers can resolve the compatibility exports again without forcing full bundled channel runtime loads.
+
+## 2026-07-04
+
+1. **Embedded Codex ACP rejected legacy service tier**
+   - **Issue:** The Docker gateway served `/chat`, but talking to `agent:planner-2:main` produced no useful response because the embedded `codex-acp` backend failed its startup probe with `/home/node/.codex/config.toml:6:16: unknown variant `priority`, expected `fast`or`flex``.
+   - **Fix and why:** Updated the host-mounted Codex config from `service_tier = "priority"` to `service_tier = "fast"`, which preserves the intended low-latency tier using the current ACP config enum.
+   - **Result:** A gateway restart is enough to make the bind-mounted config visible to the embedded ACP backend; future Docker image rebuilds are not required for this specific config fix.
+
+2. **Control UI could ghost-send before websocket handshake was ready**
+   - **Issue:** The Control UI could optimistically show a user chat bubble while the browser client only had an open WebSocket, not a completed Gateway `connect` handshake. In that gap, `chat.send` could be attempted without the gateway accepting it, so talking to the agent looked like it did nothing. Realtime Talk also surfaced the separate setup error `Realtime voice provider "openai" is not configured` when no OpenAI API key was available.
+   - **Fix and why:** Made `GatewayBrowserClient.connected` mean handshake-ready, reset handshake state on reconnect, and reject non-`connect` RPCs until `hello-ok` arrives. This converts ghost-sends into normal disconnected/error handling instead of silently dropping operator intent.
+   - **Result:** The fixed Control UI only sends chat RPCs after the gateway has accepted the connection. Browser Realtime Talk still requires `talk.provider: "openai"` plus an OpenAI API key before it can create voice sessions.
+
+3. **Planner 2 pointed at a missing transcript after an empty or silent webchat run**
+   - **Issue:** `agent:planner-2:main` was repeatedly marked `done` with `systemSent: true` and a freshly generated system prompt report, but its `sessionFile` pointed at a `.jsonl` that did not exist on the host mount or inside the Docker gateway. Deleting the stale row only helped briefly because the auto-reply CLI path could record prompt/model metadata and lifecycle completion without first materializing a transcript; a `NO_REPLY`-only result then normalized to no visible UI message and looked like a chat restart. The Control UI picker also hid configured top-level planners when their session rows were absent from `sessions.list`.
+   - **Fix and why:** Added empty/no-visible-reply guards in `runReplyAgent`: if an agent turn produces no visible reply, no out-of-band send/tool/cron side effect, and no expected silent mode, the session is marked `failed`, `systemSent` is cleared, prompt metadata is removed, and the user gets a visible retryable error. The auto-reply CLI branch now persists the CLI turn transcript through the existing transcript helper before emitting lifecycle `end`, so successful CLI turns cannot be metadata-only. The Control UI also includes configured top-level planner keys in the chat picker even when session rows are missing.
+   - **Result:** Empty or silent-only webchat CLI runs can no longer masquerade as successful first turns or pin a top-level planner to a missing transcript. The planner dropdown remains populated from agent config even if a row has not been materialized yet.
+
+4. **Control UI ghost-sent before chat.send ACK**
+   - **Issue:** A webchat send could append the user bubble and enter running/Stop state before the Gateway acknowledged `chat.send`. If the WebSocket request was stuck or dropped, gateway logs showed no `chat.send` while the UI looked sent/running, making follow-up sends look lost or like an empty/new chat.
+   - **Fix and why:** Made `chat.send` ACK-gated in the Control UI, added a 15s per-request ACK timeout through `GatewayBrowserClient.request`, and kept user bubble/run state creation until the server ACK returns.
+   - **Result:** A send is no longer shown as accepted until the gateway accepts it; stuck sends become visible retryable errors instead of ghost runs.
+
+## 2026-07-05
+
+1. **Planner ACP runs could finish before transcript proof existed**
+   - **Issue:** `agent:planner:main` could be marked `done` with `systemSent: true` while its `sessionFile` was missing or had no assistant message. The Control UI then reloaded an empty completed planner session, and the next send looked like it started a new chat instead of continuing the selected planner.
+   - **Fix and why:** Moved ACP lifecycle `end` emission after transcript persistence, fail ACP turns that complete with no visible assistant reply, and made gateway lifecycle persistence downgrade terminal `done` events to `failed` when no assistant transcript can be found.
+   - **Result:** Successful planner turns now require persisted assistant transcript proof before the session is recorded as complete; failed/empty turns clear `systemSent` so retries can rebuild the prompt instead of pinning a missing transcript.
+
+2. **Bound ACP bare reset skipped the startup turn**
+   - **Issue:** Bound ACP `/new` or `/reset` reset the configured binding target, returned a reset-only reply, and stopped before the normal runner could build the bare session startup prompt. The Control UI picker also exposed configured planner keys with no `sessions.list` row as ordinary selectable targets.
+   - **Fix and why:** Let successful bare bound ACP resets continue into the normal agent path while keeping reset-tail dispatch on the ACP same-turn path, and render missing configured planner session rows as disabled picker options.
+   - **Result:** Bare ACP resets start a real startup turn, while missing planner rows remain visible for operator context without becoming normal send targets.
+
+3. **Docker rebuild left gateway unstarted after Astino bootstrap OOM**
+   - **Issue:** `clawdock-rebuild`/Compose recreated `openclaw-openclaw-gateway-1`, but `astino-deps-bootstrap` was OOM-killed during Yarn fetch and the gateway stayed in `Created` because `docker-compose.extra.yml` gates it on `service_completed_successfully`. Bypassing the dependency started the gateway, but `/chat` still returned empty replies until the long plugin startup finished; profiling showed Jiti/TypeBox loading during gateway plugin bootstrap, and readiness took about 60-75 seconds.
+   - **Fix and why:** Started `openclaw-gateway` with `docker compose -f docker-compose.yml -f docker-compose.extra.yml up -d --no-deps openclaw-gateway`, then waited for `/readyz` before using the Control UI. This bypass is an operational recovery path only; the bootstrap OOM and slow plugin load remain separate startup friction.
+   - **Result:** `http://127.0.0.1:18789/chat?session=agent%3Aplanner%3Amain` serves again once the gateway is healthy. Future rebuild triage should check `docker compose ... ps -a` first for `Created` gateway plus `astino-deps-bootstrap` exit 137, then check logs for the `ready (...; Ns)` line before treating `/chat` as broken.
+
+4. **ACP pre-completion failures left hollow planner session rows**
+   - **Issue:** `agent:planner:main` could still be marked `failed` after a very short ACP run while its `sessionFile` pointed at a `.jsonl` that did not exist. This happened when `acpManager.runTurn` failed before the ACP post-run transcript persistence block ran; lifecycle error handling updated the session row, but nothing materialized the transcript, so the Control UI reloaded an empty lane and the next message looked like a brand-new chat again.
+   - **Fix and why:** Persist a durable ACP failure transcript from the pre-completion catch path, using the original user prompt plus a visible failure message, before emitting the lifecycle error. The existing successful ACP path now reuses the same transcript helper so success and failure resolve session cwd/store state consistently.
+   - **Result:** ACP startup/backend failures can no longer leave a planner row with metadata but no transcript file. Reloading the selected planner lane should show the failed turn instead of collapsing back to an empty first-turn view.
+
+5. **Accepted webchat sends dropped fast agent failure replies**
+   - **Issue:** A `chat.send` `/new` could be ACKed with `status: "started"` and rotate the planner session, but the agent run then failed in a few milliseconds before writing an assistant transcript. The webchat dispatcher received a final error reply, but because `onAgentRunStart` had fired, the gateway assumed the agent-owned transcript path had persisted the assistant message and only broadcast the transient event. Reloading showed an empty failed session again.
+   - **Fix and why:** When an accepted webchat send completes with delivered final replies, the gateway now checks whether the transcript already contains an assistant message. If not, it appends the final reply itself with `createIfMissing: true` before broadcasting the final event.
+   - **Result:** Fast post-ACK agent failures become durable visible chat messages instead of disappearing into an empty failed planner lane.
+
+6. **Codex Responses payloads were forced to provider-managed store**
+   - **Issue:** After the missing `isOpenAIResponsesApi` export was restored, the embedded Codex Responses request reached the backend but failed with `{"detail":"Store must be set to false"}`. `openai-codex` had been included in the provider-managed Responses store allowlist, so the post-plugin OpenAI Responses wrapper changed Codex payloads from `store: false` to `store: true`.
+   - **Fix and why:** Kept `openai-codex-responses` recognized as a Responses API that supports the `store` field, but removed `openai-codex` from the provider-managed store allowlist. Codex still emits `store: false`, while direct OpenAI Responses can continue opting into provider-managed store and server compaction.
+   - **Result:** Docker CLI `/new` for `agent:planner:main` now produces a persisted Astino planner greeting, and a follow-up `hi` appends to the same session instead of creating another startup turn.
+
+7. **Planner tool tags rendered without executable child creation**
+   - **Issue:** `agent:planner-2:main` could show `sessions_spawn` / `sessions_yield` as tool-looking UI cards while no helper session row was created. Two failures overlapped: the embedded Pi runner passed an empty `tools` allowlist while registering OpenClaw tools as custom tools, so converted or native tool calls could be rejected as unavailable; and a stale route-health file containing a complete JSON document plus trailing garbage made fresh helper spawns fail with `Auth route health is unavailable`.
+   - **Fix and why:** Normal planner turns now pass the exact registered custom tool names as Pi's session allowlist and activate that allowlist after session creation, matching the compaction runner. Leading XML-style OpenClaw text tool tags are normalized into real tool calls before final text is persisted. Route-health reads now recover the narrow corruption case of a complete valid JSON document followed by trailing garbage, while still failing closed for truly invalid JSON.
+   - **Result:** Rebuilding `openclaw:local`, recreating `openclaw-gateway`, and testing through `openclaw gateway call chat.send` now creates a real `planner-helper` child row in `sessions.list`; the child transcript replied `CLI_SPAWN_CHILD_OK`, and the mounted route-health JSON was rewritten valid.
+
+8. **Docker planner startup guessed `/root/.codex`**
+   - **Issue:** After bare `/new` started a real startup turn again, Planner 2 exposed a first-turn read of `/root/.codex/AGENTS.md`. The Docker gateway runs as `node` with `CODEX_HOME=/home/node/.codex`, so the upstream read tool returned `EACCES` for the wrong home directory and the planner surfaced that as a startup read failure.
+   - **Fix and why:** Wrapped host read operations with an OpenClaw fallback that maps `/root/.codex/...` to the active `CODEX_HOME` or OS-home `.codex` path before reporting failure. This preserves the model's requested path while honoring the Docker-mounted Codex home.
+   - **Result:** After rebuilding `openclaw:local` and force-recreating `openclaw-gateway`, a CLI-forced read of `/root/.codex/AGENTS.md` returned the mounted global guidance, and a CLI `/new` for `planner-2` completed with startup tool calls plus a final greeting instead of `EACCES`.
+
+9. **Startup context included empty or stock template files**
+   - **Issue:** Once bare `/new` again produced a real startup turn, planners could spend tool calls and tokens on `IDENTITY.md`, `USER.md`, `TOOLS.md`, and `HEARTBEAT.md` files that were still blank scaffolds or unchanged stock templates. The reset prompt also told the model to read startup files even when the runtime had already injected available context.
+   - **Fix and why:** Filtered missing, blank, header-only, and template-only bootstrap files out of model run context while preserving substantive notes, `AGENTS.md`, `BOOTSTRAP.md`, and real `MEMORY.md` content. Updated the bare `/new` prompt to use provided startup context and read startup files only when context is truncated/missing, `BOOTSTRAP.md` is present, or the current request needs more detail.
+   - **Result:** Startup can still run as a real turn, but stock scaffolding no longer burns context or encourages visible rereads before the greeting.
+
+10. **Planner helper lanes needed live rebuild, child guardrails, and shared auth**
+   - **Issue:** The live Docker gateway could lag the checkout because Compose did not build `openclaw:local`; helper/planner lanes could keep stale per-agent OAuth credentials; and child sessions that crossed context or tool-loop risk did not leave a clear post-run route/runtime issue.
+   - **Fix and why:** Rebuilt `openclaw:local` explicitly with Docker, recreated the gateway, added post-run child guardrails for context overflow and excessive tool-call loops, refreshed prompt-token-only `SessionEntry.totalTokens`, and made non-main agents inherit and heal from fresher usable main-agent OAuth credentials when identity matches.
+   - **Result:** The rebuilt gateway passed health/readiness and a Planner 3 delegation smoke with a real helper child. Remaining work is split into `docs/refactor/planner-child-completion-follow-up-plan.md`, starting with child result finalization.
+
+11. **Failed helper attempts could leave stale running session rows**
+   - **Issue:** A helper attempt that failed around a gateway restart could report failure to the parent while the durable child session row stayed `running`. The stale row could make the UI look like the helper was still active or context-full and could block same-label retry metadata with `label already in use`.
+   - **Fix and why:** Persist child terminal timing/status as soon as terminal completion mutates the run record, make route-health terminal recording best-effort, terminalize unexpected `agent.wait` errors instead of swallowing them, and let `sessions.patch` reuse labels held only by terminal old rows.
+   - **Result:** Failed helper attempts now have a durable `failed` child row even when best-effort telemetry has trouble, and a clean retry can keep the same operator-facing label.
+
+12. **Tool-output-only helpers could be recorded as successful child results**
+   - **Issue:** A completion-message helper could finish with `ok` while only raw tool output, timeout partial progress, or no visible assistant final reply was available. That could create a successful child result receipt or a misleading `Full child result` pointer even though the parent never received a real child report.
+   - **Fix and why:** Strict completion capture for success-required children now reads only visible assistant replies; no-visible-reply success is downgraded to a failed child outcome, receipts are cleared, task finalization sees failure, and route health records an error. Timeout partial progress remains inline and no longer masquerades as a full result receipt.
+   - **Result:** Accepted child work now needs an actual visible final answer before it can produce a successful receipt, while valid final replies still keep the receipt path.
+
+## 2026-07-07
+
+1. **Planner 2 recovery chain ended blocked while diagnostics still said processing**
+   - **Issue:** Planner 2 spent hours on the Astino Contract V2 E2E recovery chain by spawning repeated helper children. The final T31 child timed out after 30 minutes, produced no trusted final report, and left partial dirty state; Planner 2 then hit context overflow, auto-compacted, and correctly reported the task blocked. Docker diagnostics continued logging `agent:planner-2:main state=processing` even after `queue.health` showed the Planner 2 lane idle and the session row was `done`.
+   - **Fix and why:** No code fix applied during diagnostics. The evidence separates the real task failure from the stale operator signal: the gateway was healthy, Planner 2 was no longer active, and the remaining work is a fresh focused Contract V2 recovery starting from the failed CP-PW-12 state.
+   - **Result:** Future triage should check `queue.health` and the planner/child session rows before trusting repeated `stuck session` diagnostics. Treat timed-out helper children as unavailable/poisoned unless they produced a visible final assistant report and a trusted receipt.
+
+2. **Planner prompts overpacked helper recovery briefs**
+   - **Issue:** A planner recovery handoff bundled dirty-diff classification, an individual failing-test fix, unit coverage, focused E2E, and the full final gate into one implementer child. The child timed out or hit context pressure, leaving partial evidence and forcing the parent to treat it as poisoned.
+   - **Fix and why:** Added full-prompt sub-agent orchestration guidance that tells planners to split multi-step recovery into small sequential slices, keep implementation/testing/adversarial review as separate child phases, and treat timeout/no-final/partial children as blocked slices instead of broadening the same child brief.
+   - **Result:** Top-level planners with `sessions_spawn` receive stable prompt guidance to start with the current failing test or smallest recovery target before widening to broader gates.
+
+3. **Full E2E gates were too easy to run inside QA loops**
+   - **Issue:** QA or recovery children could treat the full E2E suite as part of ordinary slice validation. When a broad E2E gate failed, the planner could keep the feature loop blocked while repeatedly spawning broad recovery children.
+   - **Fix and why:** Tightened planner-facing orchestration guidance and `sessions_spawn.sliceRole` descriptions so QA children are for manual/behavioral checks plus the smallest relevant smoke command, while the full E2E suite belongs only to an explicit `sliceRole: "full_gate"` final-gate child. Native subagent and ACP children now receive child-visible role notices in their initial task context. A failing full gate must report the first failing spec/test id/artifact and stop so the planner can open a fresh narrow recovery slice.
+   - **Result:** Full E2E remains the final landing gate, but normal development and QA slices should no longer run the whole suite or repair from broad full-gate failures in-place.

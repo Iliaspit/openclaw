@@ -740,6 +740,27 @@ describe("spawnAcpDirect", () => {
     );
   });
 
+  it("includes slice role guidance in ACP initial task messages", async () => {
+    const result = await spawnAcpDirect(
+      {
+        task: "Run the full E2E suite",
+        agentId: "codex",
+        sliceRole: "full_gate",
+      },
+      {
+        agentSessionKey: "agent:main:main",
+      },
+    );
+
+    expectAcceptedSpawn(result);
+    const agentCall = findAgentGatewayCall();
+    const message = String(agentCall?.params?.message ?? "");
+    expect(message).toContain("[Child Slice Role]: full_gate");
+    expect(message).toContain("report the first failing spec, test id, artifact, and command");
+    expect(message).toContain("do not repair");
+    expect(message).toContain("[ACP Task]: Run the full E2E suite");
+  });
+
   it("inherits subagent envelope fields onto ACP children", async () => {
     replaceSpawnConfig({
       ...hoisted.state.cfg,

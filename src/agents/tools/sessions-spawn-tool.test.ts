@@ -223,6 +223,7 @@ describe("sessions_spawn tool", () => {
       cwd: "/workspace",
       thread: true,
       mode: "session",
+      sliceRole: "full_gate",
       streamTo: "parent",
     });
 
@@ -238,6 +239,7 @@ describe("sessions_spawn tool", () => {
         cwd: "/workspace",
         thread: true,
         mode: "session",
+        sliceRole: "full_gate",
         streamTo: "parent",
       }),
       expect.objectContaining({
@@ -430,5 +432,21 @@ describe("sessions_spawn tool", () => {
     const contentSchema = schema.properties?.attachments?.items?.properties?.content;
     expect(contentSchema?.type).toBe("string");
     expect(contentSchema?.maxLength).toBeUndefined();
+  });
+
+  it("documents full-gate-only semantics for planner slice roles", () => {
+    const tool = createSessionsSpawnTool();
+    const schema = tool.parameters as {
+      properties?: {
+        sliceRole?: {
+          description?: string;
+        };
+      };
+    };
+
+    const description = schema.properties?.sliceRole?.description ?? "";
+    expect(description).toContain("smallest relevant smoke check");
+    expect(description).toContain('Do not use "qa", "testing", or "review" for the full E2E suite');
+    expect(description).toContain('use "full_gate" only for the explicit final gate');
   });
 });

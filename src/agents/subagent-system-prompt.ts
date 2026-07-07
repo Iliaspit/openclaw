@@ -1,5 +1,92 @@
 import { DEFAULT_SUBAGENT_MAX_SPAWN_DEPTH } from "../config/agent-limits.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
+import type { SubagentSliceRole } from "./subagent-registry.types.js";
+
+export function buildSubagentSliceRoleGuidance(sliceRole?: SubagentSliceRole): string[] {
+  if (sliceRole === "qa") {
+    return [
+      "## Slice Role",
+      "- Role: qa.",
+      "- Run manual/behavioral QA plus the smallest relevant smoke command only.",
+      "- Do not run the full E2E suite; leave that to an explicit final-gate child.",
+      "",
+    ];
+  }
+  if (sliceRole === "full_gate") {
+    return [
+      "## Slice Role",
+      "- Role: full_gate.",
+      "- Run only the explicit final gate or full E2E verification assigned to you.",
+      "- Do not repair failures or broaden into recovery work.",
+      "- If the gate fails, report the first failing spec, test id, artifact, and command, then stop.",
+      "",
+    ];
+  }
+  if (sliceRole === "testing") {
+    return [
+      "## Slice Role",
+      "- Role: testing.",
+      "- Run focused unit or integration validation for the touched surface.",
+      "- Do not run the full E2E suite unless you were explicitly assigned sliceRole full_gate.",
+      "",
+    ];
+  }
+  if (sliceRole === "review") {
+    return [
+      "## Slice Role",
+      "- Role: review.",
+      "- Review independently and report findings, residual risks, and test gaps.",
+      "- Do not run the full E2E suite unless you were explicitly assigned sliceRole full_gate.",
+      "",
+    ];
+  }
+  if (sliceRole === "implementation") {
+    return [
+      "## Slice Role",
+      "- Role: implementation.",
+      "- Implement only the assigned slice and keep validation focused on that slice.",
+      "- Do not run the full E2E suite unless you were explicitly assigned sliceRole full_gate.",
+      "",
+    ];
+  }
+  return [];
+}
+
+export function buildSubagentSliceRoleTaskNotice(
+  sliceRole?: SubagentSliceRole,
+): string | undefined {
+  if (sliceRole === "qa") {
+    return [
+      "[Child Slice Role]: qa",
+      "[Child Slice Rule]: Run manual/behavioral QA plus the smallest relevant smoke command only. Do not run the full E2E suite.",
+    ].join("\n");
+  }
+  if (sliceRole === "full_gate") {
+    return [
+      "[Child Slice Role]: full_gate",
+      "[Child Slice Rule]: Run the explicit final gate only. If it fails, report the first failing spec, test id, artifact, and command, then stop; do not repair.",
+    ].join("\n");
+  }
+  if (sliceRole === "testing") {
+    return [
+      "[Child Slice Role]: testing",
+      "[Child Slice Rule]: Run focused unit or integration validation only. Do not run the full E2E suite.",
+    ].join("\n");
+  }
+  if (sliceRole === "review") {
+    return [
+      "[Child Slice Role]: review",
+      "[Child Slice Rule]: Review independently and report findings. Do not run the full E2E suite.",
+    ].join("\n");
+  }
+  if (sliceRole === "implementation") {
+    return [
+      "[Child Slice Role]: implementation",
+      "[Child Slice Rule]: Implement only the assigned slice. Do not run the full E2E suite.",
+    ].join("\n");
+  }
+  return undefined;
+}
 
 export function buildSubagentSystemPrompt(params: {
   requesterSessionKey?: string;
@@ -7,6 +94,7 @@ export function buildSubagentSystemPrompt(params: {
   childSessionKey: string;
   label?: string;
   task?: string;
+  sliceRole?: SubagentSliceRole;
   /** Whether ACP-specific routing guidance should be included. Defaults to true. */
   acpEnabled?: boolean;
   /** Depth of the child being spawned (1 = sub-agent, 2 = sub-sub-agent). */
@@ -37,6 +125,7 @@ export function buildSubagentSystemPrompt(params: {
     "- Complete this task. That's your entire purpose.",
     `- You are NOT the ${parentLabel}. Don't try to be.`,
     "",
+    ...buildSubagentSliceRoleGuidance(params.sliceRole),
     "## Rules",
     "1. **Stay focused** - Do your assigned task, nothing else",
     `2. **Complete the task** - Your final message will be automatically reported to the ${parentLabel}`,

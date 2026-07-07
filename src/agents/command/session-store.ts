@@ -5,6 +5,8 @@ import {
   updateSessionStore,
 } from "../../config/sessions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { recordAgentRuntimeIssue } from "../../infra/agent-runtime-health.js";
+import { isSubagentSessionKey } from "../../routing/session-key.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import { clearCliSession, setCliSessionBinding, setCliSessionId } from "../cli-session.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../defaults.js";
@@ -26,13 +28,70 @@ async function getContextModule() {
   return await contextModulePromise;
 }
 
+const CHILD_CONTEXT_WINDOW_DANGER_RATIO = 0.9;
+const CHILD_TOOL_CALL_GUARDRAIL_LIMIT = 80;
+
 function resolveNonNegativeNumber(value: number | undefined): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function isChildSession(
+  sessionKey: string,
+  entry: Pick<SessionEntry, "spawnedBy" | "parentSessionKey">,
+) {
+  return Boolean(
+    normalizeOptionalString(entry.spawnedBy) ||
+    normalizeOptionalString(entry.parentSessionKey) ||
+    isSubagentSessionKey(sessionKey),
+  );
+}
+
+function recordChildRunGuardrails(params: {
+  runId?: string;
+  sessionKey: string;
+  entry: SessionEntry;
+  result: RunResult;
+  currentRunTotalTokens?: number;
+  contextTokens?: number;
+}) {
+  if (!params.runId || !isChildSession(params.sessionKey, params.entry)) {
+    return;
+  }
+
+  const totalTokens = resolveNonNegativeNumber(params.currentRunTotalTokens);
+  const contextTokens = resolveNonNegativeNumber(params.contextTokens);
+  if (
+    totalTokens !== undefined &&
+    contextTokens !== undefined &&
+    contextTokens > 0 &&
+    totalTokens >= contextTokens * CHILD_CONTEXT_WINDOW_DANGER_RATIO
+  ) {
+    recordAgentRuntimeIssue({
+      runId: params.runId,
+      code: "context_overflow",
+      severity: "error",
+      message: `Child session context is near its model window (${totalTokens}/${contextTokens} tokens). Spawn a fresh child before assigning follow-up work.`,
+      sessionKey: params.sessionKey,
+    });
+  }
+
+  const toolCalls = resolveNonNegativeNumber(params.result.meta.toolSummary?.calls);
+  if (toolCalls !== undefined && toolCalls >= CHILD_TOOL_CALL_GUARDRAIL_LIMIT) {
+    recordAgentRuntimeIssue({
+      runId: params.runId,
+      code: "agent_lifecycle_blocked",
+      severity: "error",
+      message: `Child run used ${toolCalls} tool calls, reaching the ${CHILD_TOOL_CALL_GUARDRAIL_LIMIT}-call guardrail. Spawn a fresh child before assigning follow-up work.`,
+      sessionKey: params.sessionKey,
+      livenessState: "blocked",
+    });
+  }
 }
 
 export async function updateSessionStoreAfterAgentRun(params: {
   cfg: OpenClawConfig;
   contextTokensOverride?: number;
+  runId?: string;
   sessionId: string;
   sessionKey: string;
   storePath: string;
@@ -107,15 +166,15 @@ export async function updateSessionStoreAfterAgentRun(params: {
   if (result.meta.systemPromptReport) {
     next.systemPromptReport = result.meta.systemPromptReport;
   }
+  const totalTokens = deriveSessionTotalTokens({
+    usage: promptTokens ? undefined : usage,
+    contextTokens,
+    promptTokens,
+  });
   if (hasNonzeroUsage(usage)) {
     const { estimateUsageCost, resolveModelCostConfig } = await getUsageFormatModule();
     const input = usage.input ?? 0;
     const output = usage.output ?? 0;
-    const totalTokens = deriveSessionTotalTokens({
-      usage: promptTokens ? undefined : usage,
-      contextTokens,
-      promptTokens,
-    });
     const runEstimatedCostUsd = resolveNonNegativeNumber(
       estimateUsageCost({
         usage,
@@ -143,6 +202,9 @@ export async function updateSessionStoreAfterAgentRun(params: {
     if (runEstimatedCostUsd !== undefined) {
       next.estimatedCostUsd = runEstimatedCostUsd;
     }
+  } else if (typeof totalTokens === "number" && Number.isFinite(totalTokens) && totalTokens > 0) {
+    next.totalTokens = totalTokens;
+    next.totalTokensFresh = true;
   } else if (
     typeof entry.totalTokens === "number" &&
     Number.isFinite(entry.totalTokens) &&
@@ -160,6 +222,14 @@ export async function updateSessionStoreAfterAgentRun(params: {
     return merged;
   });
   sessionStore[sessionKey] = persisted;
+  recordChildRunGuardrails({
+    runId: params.runId,
+    sessionKey,
+    entry: persisted,
+    result,
+    currentRunTotalTokens: totalTokens,
+    contextTokens,
+  });
 }
 
 export async function clearCliSessionInStore(params: {

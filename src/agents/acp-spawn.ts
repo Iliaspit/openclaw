@@ -87,6 +87,8 @@ import {
 } from "./subagent-capabilities.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import { countActiveRunsForSession, getSubagentRunByChildSessionKey } from "./subagent-registry.js";
+import type { SubagentSliceRole } from "./subagent-registry.types.js";
+import { buildSubagentSliceRoleTaskNotice } from "./subagent-system-prompt.js";
 import { resolveInternalSessionKey, resolveMainSessionAlias } from "./tools/sessions-helpers.js";
 
 const log = createSubsystemLogger("agents/acp-spawn");
@@ -107,6 +109,7 @@ export type SpawnAcpParams = {
   cwd?: string;
   mode?: SpawnAcpMode;
   thread?: boolean;
+  sliceRole?: SubagentSliceRole;
   sandbox?: SpawnAcpSandboxMode;
   streamTo?: SpawnAcpStreamTarget;
 };
@@ -1305,11 +1308,17 @@ export async function spawnAcpDirect(
       emitStartNotice: false,
     });
   }
+  const childTaskMessage = [
+    buildSubagentSliceRoleTaskNotice(params.sliceRole),
+    params.sliceRole ? `[ACP Task]: ${params.task}` : params.task,
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n\n");
   try {
     const response = await callGateway({
       method: "agent",
       params: {
-        message: params.task,
+        message: childTaskMessage,
         sessionKey,
         channel: deliveryPlan.channel,
         to: deliveryPlan.to,

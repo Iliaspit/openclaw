@@ -307,6 +307,49 @@ describe("grouped chat rendering", () => {
     expect(container.querySelector(".msg-meta__ctx")?.textContent).toBe("10% ctx");
   });
 
+  it("uses the largest single assistant call when rendering grouped context usage", () => {
+    const container = document.createElement("div");
+    const group: MessageGroup = {
+      kind: "group",
+      key: "assistant-group",
+      role: "assistant",
+      messages: [
+        {
+          key: "assistant-1",
+          message: {
+            role: "assistant",
+            content: "First",
+            usage: {
+              input: 6_000,
+              output: 100,
+            },
+            timestamp: 1000,
+          },
+        },
+        {
+          key: "assistant-2",
+          message: {
+            role: "assistant",
+            content: "Second",
+            usage: {
+              input: 6_000,
+              output: 200,
+            },
+            timestamp: 1001,
+          },
+        },
+      ],
+      timestamp: 1000,
+      isStreaming: false,
+    };
+
+    renderMessageGroups(container, [group], { contextWindow: 10_000 });
+
+    expect(container.querySelector(".msg-meta__ctx")?.textContent).toBe("60% ctx");
+    expect(container.textContent).toContain("↑12k");
+    expect(container.textContent).toContain("↓300");
+  });
+
   it("renders the configured local user name in user message footers", () => {
     const container = document.createElement("div");
 

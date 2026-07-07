@@ -332,7 +332,7 @@ describe("buildAgentSystemPrompt", () => {
     });
 
     expect(prompt).toContain(
-      'For requests like "do this in claude code/cursor/gemini" or similar ACP harnesses, treat it as ACP harness intent',
+      'For requests like "do this in codex/claude code/cursor/gemini" or similar ACP harnesses, treat it as ACP harness intent',
     );
     expect(prompt).toContain(
       "For Codex conversation binding/control, prefer the native Codex app-server plugin path",
@@ -655,7 +655,7 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("message: Send messages and channel actions");
     expect(prompt).toContain("### message tool");
     expect(prompt).toContain("Use `message` for proactive sends + channel actions");
-    expect(prompt).toContain("For `action=send`, include `target` and `message`.");
+    expect(prompt).toContain("For `action=send`, include `to` and `message`.");
     expect(prompt).toContain(`respond with ONLY: ${SILENT_REPLY_TOKEN}`);
   });
 
@@ -684,6 +684,27 @@ describe("buildAgentSystemPrompt", () => {
 
     expect(orchestrationPrompt).toContain(
       '- Sub-agent orchestration → use `sessions_spawn(...)` to start delegated work; omit `context` for isolated children, set `context:"fork"` only when the child needs the current transcript; use `subagents(action=list|steer|kill)` to manage already-spawned children.',
+    );
+    expect(orchestrationPrompt).toContain(
+      "Before spawning for multi-step recovery, split the work into small sequential slices and give a child only the current slice.",
+    );
+    expect(orchestrationPrompt).toContain(
+      "Do not combine dirty-diff classification, implementation, unit coverage, focused E2E, and final gate in one child brief.",
+    );
+    expect(orchestrationPrompt).toContain(
+      "QA children are for manual/behavioral checks plus the smallest relevant smoke command.",
+    );
+    expect(orchestrationPrompt).toContain(
+      'only spawn full E2E as an explicit final-gate child with `sliceRole:"full_gate"`',
+    );
+    expect(orchestrationPrompt).toContain(
+      "If a final-gate/full E2E child fails, do not ask that child to repair or run broad recovery.",
+    );
+    expect(orchestrationPrompt).toContain(
+      "Keep implementation, testing, and adversarial review as separate child phases",
+    );
+    expect(orchestrationPrompt).toContain(
+      "If a child times out, has no visible final answer, or returns partial evidence, treat that slice as blocked or poisoned",
     );
   });
 
@@ -984,6 +1005,26 @@ describe("buildSubagentSystemPrompt", () => {
     expect(prompt).not.toContain("For ACP harness sessions (codex/claudecode/gemini)");
     expect(prompt).not.toContain("set `agentId` unless `acp.defaultAgent` is configured");
     expect(prompt).toContain("You CAN spawn your own sub-agents");
+  });
+
+  it("renders child-visible slice role guidance for QA and full-gate children", () => {
+    const qaPrompt = buildSubagentSystemPrompt({
+      childSessionKey: "agent:main:subagent:qa",
+      task: "QA the feature",
+      sliceRole: "qa",
+    });
+    const fullGatePrompt = buildSubagentSystemPrompt({
+      childSessionKey: "agent:main:subagent:gate",
+      task: "run final gate",
+      sliceRole: "full_gate",
+    });
+
+    expect(qaPrompt).toContain("Role: qa.");
+    expect(qaPrompt).toContain("smallest relevant smoke command only");
+    expect(qaPrompt).toContain("Do not run the full E2E suite");
+    expect(fullGatePrompt).toContain("Role: full_gate.");
+    expect(fullGatePrompt).toContain("If the gate fails, report the first failing spec");
+    expect(fullGatePrompt).toContain("Do not repair failures or broaden into recovery work");
   });
 
   it("renders depth-2 leaf guidance with parent orchestrator labels", () => {

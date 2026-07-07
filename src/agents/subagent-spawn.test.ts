@@ -1,8 +1,11 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveChildRouteHealthPath } from "./child-route-health.js";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  resetChildRouteHealthForTest,
+  resolveChildRouteHealthPath,
+} from "./child-route-health.js";
 import {
   createSubagentSpawnTestConfig,
   expectPersistedRuntimeModel,
@@ -22,6 +25,8 @@ const hoisted = vi.hoisted(() => ({
 
 let resetSubagentRegistryForTests: typeof import("./subagent-registry.js").resetSubagentRegistryForTests;
 let spawnSubagentDirect: typeof import("./subagent-spawn.js").spawnSubagentDirect;
+const originalStateDir = process.env.OPENCLAW_STATE_DIR;
+let routeHealthStateDir: string | undefined;
 
 function createConfigOverride(overrides?: Record<string, unknown>) {
   return createSubagentSpawnTestConfig(os.tmpdir(), {
@@ -57,7 +62,10 @@ describe("spawnSubagentDirect seam flow", () => {
     }));
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    routeHealthStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-spawn-"));
+    process.env.OPENCLAW_STATE_DIR = routeHealthStateDir;
+    resetChildRouteHealthForTest();
     resetSubagentRegistryForTests();
     hoisted.callGatewayMock.mockReset();
     hoisted.updateSessionStoreMock.mockReset();
@@ -79,9 +87,27 @@ describe("spawnSubagentDirect seam flow", () => {
     );
   });
 
+  afterEach(async () => {
+    resetChildRouteHealthForTest();
+    if (originalStateDir === undefined) {
+      delete process.env.OPENCLAW_STATE_DIR;
+    } else {
+      process.env.OPENCLAW_STATE_DIR = originalStateDir;
+    }
+    if (routeHealthStateDir) {
+      await fs.rm(routeHealthStateDir, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 50,
+      });
+      routeHealthStateDir = undefined;
+    }
+  });
+
   it("accepts a spawned run across session patching, runtime-model persistence, registry registration, and lifecycle emission", async () => {
     const operations: string[] = [];
-    let persistedStore: Record<string, Record<string, unknown>> | undefined;
+    const persistedStores: Array<Record<string, Record<string, unknown>>> = [];
 
     hoisted.callGatewayMock.mockImplementation(async (request: { method?: string }) => {
       operations.push(`gateway:${request.method ?? "unknown"}`);
@@ -96,7 +122,7 @@ describe("spawnSubagentDirect seam flow", () => {
     installSessionStoreCaptureMock(hoisted.updateSessionStoreMock, {
       operations,
       onStore: (store) => {
-        persistedStore = store;
+        persistedStores.push({ ...store });
       },
     });
 
@@ -125,7 +151,7 @@ describe("spawnSubagentDirect seam flow", () => {
 
     const childSessionKey = result.childSessionKey as string;
     expect(hoisted.pruneLegacyStoreKeysMock).toHaveBeenCalledTimes(1);
-    expect(hoisted.updateSessionStoreMock).toHaveBeenCalledTimes(1);
+    expect(hoisted.updateSessionStoreMock).toHaveBeenCalledTimes(2);
     expect(hoisted.registerSubagentRunMock).toHaveBeenCalledWith(
       expect.objectContaining({
         runId: "run-1",
@@ -154,7 +180,7 @@ describe("spawnSubagentDirect seam flow", () => {
     });
 
     expectPersistedRuntimeModel({
-      persistedStore,
+      persistedStore: persistedStores.find((store) => childSessionKey in store),
       sessionKey: childSessionKey,
       provider: "openai-codex",
       model: "gpt-5.4",
@@ -169,7 +195,8 @@ describe("spawnSubagentDirect seam flow", () => {
         method: "agent",
         params: expect.objectContaining({
           sessionKey: childSessionKey,
-          cleanupBundleMcpOnRunEnd: true,
+          deliver: false,
+          lane: "subagent",
         }),
       }),
     );
@@ -207,7 +234,7 @@ describe("spawnSubagentDirect seam flow", () => {
       accountId: "acct-1",
       to: "user-1",
     });
-    expect(registerInput?.requesterOrigin).not.toHaveProperty("threadId");
+    expect((registerInput?.requesterOrigin as { threadId?: unknown } | undefined)?.threadId).toBeUndefined();
   });
 
   it("pins admin-only methods to operator.admin and preserves least-privilege for others (#59428)", async () => {
@@ -290,6 +317,46 @@ describe("spawnSubagentDirect seam flow", () => {
     expect(agentCall?.params).toMatchObject({
       thinking: "high",
     });
+  });
+
+  it("passes planner slice role guidance into child prompt and task message", async () => {
+    const calls: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+    hoisted.callGatewayMock.mockImplementation(async (request: {
+      method?: string;
+      params?: Record<string, unknown>;
+    }) => {
+      calls.push(request);
+      if (request.method === "agent") {
+        return { runId: "run-qa" };
+      }
+      if (request.method?.startsWith("sessions.")) {
+        return { ok: true };
+      }
+      return {};
+    });
+    installSessionStoreCaptureMock(hoisted.updateSessionStoreMock);
+
+    const result = await spawnSubagentDirect(
+      {
+        task: "QA the feature without broad gates",
+        sliceRole: "qa",
+      },
+      {
+        agentSessionKey: "agent:main:main",
+        agentChannel: "discord",
+      },
+    );
+
+    expect(result).toMatchObject({ status: "accepted" });
+    const agentCall = calls.find((call) => call.method === "agent");
+    const message = String(agentCall?.params?.message ?? "");
+    const extraSystemPrompt = String(agentCall?.params?.extraSystemPrompt ?? "");
+    expect(message).toContain("[Child Slice Role]: qa");
+    expect(message).toContain("smallest relevant smoke command only");
+    expect(message).toContain("Do not run the full E2E suite");
+    expect(extraSystemPrompt).toContain("Role: qa.");
+    expect(extraSystemPrompt).toContain("smallest relevant smoke command only");
+    expect(extraSystemPrompt).toContain("Do not run the full E2E suite");
   });
 
   it("returns an error when the initial model patch is rejected", async () => {

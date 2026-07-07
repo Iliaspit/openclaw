@@ -110,6 +110,28 @@ export function expectPersistedRuntimeModel(params: {
   });
 }
 
+function buildMockSubagentSliceRoleTaskNotice(sliceRole: unknown): string | undefined {
+  if (sliceRole === "qa") {
+    return [
+      "[Child Slice Role]: qa",
+      "[Child Slice Rule]: Run manual/behavioral QA plus the smallest relevant smoke command only. Do not run the full E2E suite.",
+    ].join("\n");
+  }
+  return undefined;
+}
+
+function buildMockSubagentSystemPrompt(params: { sliceRole?: unknown }) {
+  if (params.sliceRole === "qa") {
+    return [
+      "system-prompt",
+      "Role: qa.",
+      "Run manual/behavioral QA plus the smallest relevant smoke command only.",
+      "Do not run the full E2E suite; leave that to an explicit final-gate child.",
+    ].join("\n");
+  }
+  return "system-prompt";
+}
+
 export async function loadSubagentSpawnModuleForTest(params: {
   callGatewayMock: MockFn;
   loadConfig?: () => Record<string, unknown>;
@@ -158,7 +180,8 @@ export async function loadSubagentSpawnModuleForTest(params: {
 
   vi.doMock("./subagent-spawn.runtime.js", () => ({
     callGateway: (opts: unknown) => params.callGatewayMock(opts),
-    buildSubagentSystemPrompt: () => "system-prompt",
+    buildSubagentSliceRoleTaskNotice: buildMockSubagentSliceRoleTaskNotice,
+    buildSubagentSystemPrompt: buildMockSubagentSystemPrompt,
     forkSessionFromParent:
       params.forkSessionFromParentMock ??
       (async () => ({ sessionId: "forked-session-id", sessionFile: "/tmp/forked-session.jsonl" })),
@@ -234,6 +257,7 @@ export async function loadSubagentSpawnModuleForTest(params: {
   }));
 
   vi.doMock("./subagent-registry.js", () => ({
+    assessSubagentSliceBudgetForSpawn: () => ({ ok: true, sliceKey: "test-slice" }),
     countActiveRunsForSession: params.countActiveRunsForSession ?? (() => 0),
     registerSubagentRun:
       params.registerSubagentRunMock ?? vi.fn((_record: Record<string, unknown>) => undefined),

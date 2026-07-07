@@ -25,6 +25,14 @@ import {
 
 const SESSIONS_SPAWN_RUNTIMES = ["subagent", "acp"] as const;
 const SESSIONS_SPAWN_SANDBOX_MODES = ["inherit", "require"] as const;
+const SESSIONS_SPAWN_SLICE_ROLES = [
+  "implementation",
+  "testing",
+  "review",
+  "qa",
+  "full_gate",
+] as const;
+const SESSIONS_SPAWN_SLICE_CONTINUATIONS = ["default", "same"] as const;
 // Keep the schema local to avoid a circular import through acp-spawn/openclaw-tools.
 const SESSIONS_SPAWN_ACP_STREAM_TARGETS = ["parent"] as const;
 const UNSUPPORTED_SESSIONS_SPAWN_PARAM_KEYS = [
@@ -117,6 +125,14 @@ const SessionsSpawnToolSchema = Type.Object({
   thread: Type.Optional(Type.Boolean()),
   mode: optionalStringEnum(SUBAGENT_SPAWN_MODES),
   cleanup: optionalStringEnum(["delete", "keep"] as const),
+  sliceRole: optionalStringEnum(SESSIONS_SPAWN_SLICE_ROLES, {
+    description:
+      'Optional planner slice role. Use "testing" for focused unit/integration validation, "qa" for manual/behavioral QA or the smallest relevant smoke check, and "review" for independent review. Do not use "qa", "testing", or "review" for the full E2E suite; use "full_gate" only for the explicit final gate after focused validation is complete.',
+  }),
+  sliceContinuation: optionalStringEnum(SESSIONS_SPAWN_SLICE_CONTINUATIONS, {
+    description:
+      'Optional planner slice continuation. Use "same" only when the user explicitly wants post-green review/QA work to continue the same recovery slice.',
+  }),
   sandbox: optionalStringEnum(SESSIONS_SPAWN_SANDBOX_MODES),
   context: optionalStringEnum(SUBAGENT_SPAWN_CONTEXT_MODES, {
     description:
@@ -191,6 +207,15 @@ export function createSessionsSpawnTool(
       const mode = params.mode === "run" || params.mode === "session" ? params.mode : undefined;
       const cleanup =
         params.cleanup === "keep" || params.cleanup === "delete" ? params.cleanup : "keep";
+      const sliceRole = SESSIONS_SPAWN_SLICE_ROLES.includes(
+        params.sliceRole as (typeof SESSIONS_SPAWN_SLICE_ROLES)[number],
+      )
+        ? (params.sliceRole as (typeof SESSIONS_SPAWN_SLICE_ROLES)[number])
+        : undefined;
+      const sliceContinuation =
+        params.sliceContinuation === "same" || params.sliceContinuation === "default"
+          ? params.sliceContinuation
+          : undefined;
       const expectsCompletionMessage = params.expectsCompletionMessage !== false;
       const sandbox = params.sandbox === "require" ? "require" : "inherit";
       const context =
@@ -262,6 +287,7 @@ export function createSessionsSpawnTool(
             cwd,
             mode: mode === "run" || mode === "session" ? mode : undefined,
             thread,
+            sliceRole,
             sandbox,
             streamTo,
           },
@@ -320,6 +346,8 @@ export function createSessionsSpawnTool(
               task,
               cleanup: trackedCleanup,
               label: label || undefined,
+              sliceRole,
+              sliceContinuation,
               runTimeoutSeconds,
               expectsCompletionMessage,
               spawnMode: trackedSpawnMode,
@@ -351,6 +379,8 @@ export function createSessionsSpawnTool(
           thread,
           mode,
           cleanup,
+          sliceRole,
+          sliceContinuation,
           sandbox,
           context,
           lightContext,
