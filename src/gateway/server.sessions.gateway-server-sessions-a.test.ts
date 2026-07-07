@@ -1925,13 +1925,24 @@ describe("gateway server sessions", () => {
         },
       },
     });
+    embeddedRunMock.compactEmbeddedPiSession.mockResolvedValueOnce({
+      ok: true,
+      compacted: true,
+      result: {
+        summary: "summary",
+        firstKeptEntryId: "entry-1",
+        checkpointId: "checkpoint-manual",
+        tokensBefore: 120,
+        tokensAfter: 80,
+      },
+    });
 
     const { ws } = await openClient();
     const compacted = await rpcReq<{
       ok: true;
       key: string;
       compacted: boolean;
-      result?: { tokensAfter?: number };
+      result?: { checkpointId?: string; tokensAfter?: number };
     }>(ws, "sessions.compact", {
       key: "main",
     });
@@ -1939,6 +1950,7 @@ describe("gateway server sessions", () => {
     expect(compacted.ok).toBe(true);
     expect(compacted.payload?.key).toBe("agent:main:main");
     expect(compacted.payload?.compacted).toBe(true);
+    expect(compacted.payload?.result?.checkpointId).toBe("checkpoint-manual");
     expect(embeddedRunMock.compactEmbeddedPiSession).toHaveBeenCalledTimes(1);
     expect(embeddedRunMock.compactEmbeddedPiSession).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2020,12 +2032,15 @@ describe("gateway server sessions", () => {
     });
 
     const { ws } = await openClient();
-    const compacted = await rpcReq<{ ok: true; compacted: boolean }>(ws, "sessions.compact", {
-      key: childSessionKey,
-    });
+    const compacted = await rpcReq<{
+      ok: true;
+      compacted: boolean;
+      routeHealthRepairStatus?: string;
+    }>(ws, "sessions.compact", { key: childSessionKey });
 
     expect(compacted.ok).toBe(true);
     expect(compacted.payload?.compacted).toBe(true);
+    expect(compacted.payload?.routeHealthRepairStatus).toBe("cleared");
     await expect(
       assessChildRouteHealth(childSessionKey, {
         routeIntent: "followup_reuse",
@@ -2051,6 +2066,109 @@ describe("gateway server sessions", () => {
       status: "unhealthy",
       codes: ["auth_profile_session_expired"],
       recommendedAction: "reauth",
+    });
+
+    ws.close();
+  });
+
+  test("sessions.compact keeps child-local overflow repair active when manual compaction no-ops", async () => {
+    const { dir } = await createSessionStoreDir();
+    const childSessionKey = "agent:main:subagent:compact-noop";
+    await fs.writeFile(
+      path.join(dir, "sess-child-noop.jsonl"),
+      `${JSON.stringify({ role: "user", content: "small child transcript" })}\n`,
+      "utf-8",
+    );
+    await writeSessionStore({
+      entries: {
+        [childSessionKey]: {
+          sessionId: "sess-child-noop",
+          updatedAt: Date.now(),
+        },
+      },
+    });
+    await expect(
+      recordChildRouteHealthEvent({
+        code: "context_overflow",
+        status: "active",
+        source: "context_overflow",
+        childSessionKey,
+        runId: "run-child-noop",
+      }),
+    ).resolves.toEqual(expect.objectContaining({ ok: true }));
+    embeddedRunMock.compactEmbeddedPiSession.mockResolvedValueOnce({
+      ok: true,
+      compacted: false,
+      reason: "no real conversation messages",
+    });
+
+    const { ws } = await openClient();
+    const compacted = await rpcReq<{
+      ok: true;
+      compacted: boolean;
+      routeHealthRepairStatus?: string;
+    }>(ws, "sessions.compact", { key: childSessionKey });
+
+    expect(compacted.ok).toBe(true);
+    expect(compacted.payload?.compacted).toBe(false);
+    expect(compacted.payload?.routeHealthRepairStatus).toBe("active");
+    await expect(
+      assessChildRouteHealth(childSessionKey, {
+        routeIntent: "followup_reuse",
+        targetMethod: "sessions.send",
+        childTargetKind: "subagent",
+        registryRecord: { childSessionKey, runId: "run-child-noop" },
+      }),
+    ).resolves.toMatchObject({
+      status: "unhealthy",
+      codes: ["context_overflow"],
+    });
+
+    ws.close();
+  });
+
+  test("sessions.compact no-op does not create child-local overflow repair for a healthy child", async () => {
+    const { dir } = await createSessionStoreDir();
+    const childSessionKey = "agent:main:subagent:compact-healthy-noop";
+    await fs.writeFile(
+      path.join(dir, "sess-child-healthy-noop.jsonl"),
+      `${JSON.stringify({ role: "user", content: "small child transcript" })}\n`,
+      "utf-8",
+    );
+    await writeSessionStore({
+      entries: {
+        [childSessionKey]: {
+          sessionId: "sess-child-healthy-noop",
+          updatedAt: Date.now(),
+        },
+      },
+    });
+    embeddedRunMock.compactEmbeddedPiSession.mockResolvedValueOnce({
+      ok: true,
+      compacted: false,
+      reason: "no real conversation messages",
+    });
+
+    const { ws } = await openClient();
+    const compacted = await rpcReq<{
+      ok: true;
+      compacted: boolean;
+      routeHealthRepairStatus?: string;
+    }>(ws, "sessions.compact", { key: childSessionKey });
+
+    expect(compacted.ok).toBe(true);
+    expect(compacted.payload?.compacted).toBe(false);
+    expect(compacted.payload?.routeHealthRepairStatus).toBeUndefined();
+    await expect(
+      assessChildRouteHealth(childSessionKey, {
+        routeIntent: "followup_reuse",
+        targetMethod: "sessions.send",
+        childTargetKind: "subagent",
+        registryRecord: { childSessionKey, runId: "run-child-healthy-noop" },
+      }),
+    ).resolves.toMatchObject({
+      status: "ok",
+      codes: [],
     });
 
     ws.close();

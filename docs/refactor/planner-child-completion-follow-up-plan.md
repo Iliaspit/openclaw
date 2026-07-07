@@ -14,11 +14,13 @@ finalization, slice-budget guardrails, runtime diagnostics, context telemetry,
 early helper context protection, and child compaction controls in one patch.
 
 Current implementation slice: **none active**. Change 2A, Change 2B, Change 3A,
-Change 3B, Change 4, Change 5, and the E2E gate-placement guardrail were
-implemented as separate slices and should not be extended without opening a new
-written slice first.
+Change 3B, Change 4, Change 5, Change 6, and the E2E gate-placement guardrail
+were implemented as separate slices and should not be extended without opening a
+new written slice first.
 
-Next recommended implementation slice: Change 6, Planner-safe Child Compaction.
+Next recommended implementation slice: none in this plan; run the relevant
+focused validation and final landing checks before opening any new recovery
+slice.
 
 Latest investigation input:
 
@@ -73,6 +75,11 @@ Completed slices:
   tool-result path is gated on accumulated tool-result pressure, not incidental
   non-tool history, and routes through `compact_then_truncate` before provider
   overflow recovery.
+- **6 Planner-safe Child Compaction:** `subagents(action: "compact")` now
+  exposes a narrow compaction control for self or currently controlled children.
+  Child compaction preserves ownership/latest-generation checks, leaf helpers can
+  only compact themselves, and responses are scalar-only while carrying
+  checkpoint, token, and route-health repair evidence.
 - **E2E Gate-placement Guardrail:** planner-facing orchestration guidance and
   `sessions_spawn` slice-role descriptions now say that QA children should run
   manual/behavioral checks plus the smallest relevant smoke command, while the
@@ -371,7 +378,7 @@ Done:
   `compact_then_truncate`; unrelated non-tool context remains on the normal
   prompt-overflow path.
 
-## Later Change 6: Planner-safe Child Compaction
+## Completed Change 6: Planner-safe Child Compaction
 
 Problem:
 
@@ -389,3 +396,23 @@ Constraints:
 - Do not expose broad planner session-control tools to leaf helpers.
 - Return checkpoint id, tokens before/after, and route-health repair status.
 - Do not let child compaction masquerade as child final output.
+
+Validation:
+
+- Added subagents wrapper coverage for controlled-child compaction, leaf-child
+  rejection, self compaction, scalar-only output, and mutating-tool tracking.
+- Added gateway coverage that manual compaction returns checkpoint evidence,
+  clears child-local context-overflow repair on success, and keeps the repair
+  active when compaction no-ops.
+- Added queued engine-owned compaction coverage that the host-persisted
+  checkpoint id is returned, including when the context engine omits result
+  details.
+
+Done:
+
+- Planners have an explicit `subagents(action: "compact")` operation for self or
+  controlled child sessions.
+- Controlled-child compaction uses existing ownership and latest-generation
+  checks before calling `sessions.compact`.
+- The child-visible result is a bounded scalar control result, not a child final
+  answer or nested compaction payload.

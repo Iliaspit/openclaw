@@ -164,7 +164,8 @@ export type EmbeddedPiCompactResult = {
   result?: {
     summary: string;
     firstKeptEntryId: string;
-    tokensBefore: number;
+    checkpointId?: string;
+    tokensBefore?: number;
     tokensAfter?: number;
     details?: unknown;
   };

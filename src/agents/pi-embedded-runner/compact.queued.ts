@@ -100,6 +100,7 @@ export async function compactEmbeddedPiSession(
     enqueueGlobal(async () => {
       let checkpointSnapshot: CapturedCompactionCheckpointSnapshot | null = null;
       let checkpointSnapshotRetained = false;
+      let checkpointId: string | undefined;
       try {
         // When the context engine owns compaction, its compact() implementation
         // bypasses compactEmbeddedPiSessionDirect (which fires the hooks internally).
@@ -180,6 +181,7 @@ export async function compactEmbeddedPiSession(
                 postEntryId: postLeafId,
               });
               checkpointSnapshotRetained = storedCheckpoint !== null;
+              checkpointId = storedCheckpoint?.checkpointId;
             } catch (err) {
               log.warn("failed to persist compaction checkpoint", {
                 errorMessage: formatErrorMessage(err),
@@ -224,19 +226,27 @@ export async function compactEmbeddedPiSession(
             });
           }
         }
+        const resultPayload = result.result
+          ? {
+              summary: result.result.summary ?? "",
+              firstKeptEntryId: result.result.firstKeptEntryId ?? "",
+              checkpointId: checkpointId ?? result.result.checkpointId,
+              tokensBefore: result.result.tokensBefore,
+              tokensAfter: result.result.tokensAfter,
+              details: result.result.details,
+            }
+          : checkpointId
+            ? {
+                summary: "",
+                firstKeptEntryId: "",
+                checkpointId,
+              }
+            : undefined;
         return {
           ok: result.ok,
           compacted: result.compacted,
           reason: result.reason,
-          result: result.result
-            ? {
-                summary: result.result.summary ?? "",
-                firstKeptEntryId: result.result.firstKeptEntryId ?? "",
-                tokensBefore: result.result.tokensBefore,
-                tokensAfter: result.result.tokensAfter,
-                details: result.result.details,
-              }
-            : undefined,
+          result: resultPayload,
         };
       } finally {
         if (!checkpointSnapshotRetained) {

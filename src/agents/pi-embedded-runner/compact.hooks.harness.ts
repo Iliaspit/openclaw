@@ -24,6 +24,15 @@ export const contextEngineCompactMock = vi.fn(async () => ({
     | { summary: string; tokensAfter: number }
     | undefined,
 }));
+export const captureCompactionCheckpointSnapshotMock = vi.fn(() => ({
+  sessionId: "checkpoint-session",
+  sessionFile: "/tmp/checkpoint-session.jsonl",
+  leafId: "leaf-before-compaction",
+}));
+export const cleanupCompactionCheckpointSnapshotMock = vi.fn(async () => undefined);
+export const persistSessionCompactionCheckpointMock = vi.fn(async () => ({
+  checkpointId: "checkpoint-test",
+}));
 
 export const hookRunner = {
   hasHooks: vi.fn<(hookName?: string) => boolean>(),
@@ -163,6 +172,18 @@ export function resetCompactHooksHarnessMocks(): void {
     reason: undefined,
     result: { summary: "engine-summary", tokensAfter: 50 },
   });
+  captureCompactionCheckpointSnapshotMock.mockReset();
+  captureCompactionCheckpointSnapshotMock.mockReturnValue({
+    sessionId: "checkpoint-session",
+    sessionFile: "/tmp/checkpoint-session.jsonl",
+    leafId: "leaf-before-compaction",
+  });
+  cleanupCompactionCheckpointSnapshotMock.mockReset();
+  cleanupCompactionCheckpointSnapshotMock.mockResolvedValue(undefined);
+  persistSessionCompactionCheckpointMock.mockReset();
+  persistSessionCompactionCheckpointMock.mockResolvedValue({
+    checkpointId: "checkpoint-test",
+  });
 
   resolveModelMock.mockReset();
   resolveModelMock.mockReturnValue({
@@ -271,7 +292,10 @@ export async function loadCompactHooksHarness(): Promise<{
     }),
     DefaultResourceLoader: function DefaultResourceLoader() {},
     SessionManager: {
-      open: vi.fn(() => ({})),
+      open: vi.fn(() => ({
+        getLeafId: vi.fn(() => "leaf-after-compaction"),
+        getSessionId: vi.fn(() => "session-1"),
+      })),
     },
     SettingsManager: {
       create: vi.fn(() => ({})),
@@ -321,6 +345,13 @@ export async function loadCompactHooksHarness(): Promise<{
 
   vi.doMock("../../context-engine/registry.js", () => ({
     resolveContextEngine: resolveContextEngineMock,
+  }));
+
+  vi.doMock("../../gateway/session-compaction-checkpoints.js", () => ({
+    captureCompactionCheckpointSnapshot: captureCompactionCheckpointSnapshotMock,
+    cleanupCompactionCheckpointSnapshot: cleanupCompactionCheckpointSnapshotMock,
+    persistSessionCompactionCheckpoint: persistSessionCompactionCheckpointMock,
+    resolveSessionCompactionCheckpointReason: vi.fn(() => "manual"),
   }));
 
   vi.doMock("../../process/command-queue.js", () => ({

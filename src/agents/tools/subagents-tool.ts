@@ -5,6 +5,7 @@ import { resolveChildRouteProviderContextFromSession } from "../child-route-prov
 import { optionalStringEnum } from "../schema/typebox.js";
 import {
   DEFAULT_RECENT_MINUTES,
+  compactControlledSubagentSession,
   killAllControlledSubagentRuns,
   killControlledSubagentRun,
   listControlledSubagentRuns,
@@ -23,8 +24,9 @@ import {
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readNumberParam, readStringParam } from "./common.js";
 
-const SUBAGENT_ACTIONS = ["list", "kill", "steer"] as const;
+const SUBAGENT_ACTIONS = ["list", "kill", "steer", "compact"] as const;
 type SubagentAction = (typeof SUBAGENT_ACTIONS)[number];
+const SELF_COMPACTION_TARGETS = new Set(["self", "current", "caller"]);
 
 const SubagentsToolSchema = Type.Object({
   action: optionalStringEnum(SUBAGENT_ACTIONS),
@@ -38,7 +40,7 @@ export function createSubagentsTool(opts?: { agentSessionKey?: string }): AnyAge
     label: "Subagents",
     name: "subagents",
     description:
-      "List, kill, or steer spawned sub-agents for this requester session, including restarting finished child sessions with tracked completion. Use this for sub-agent orchestration.",
+      "List, kill, steer, or compact spawned sub-agents for this requester session, including restarting finished child sessions with tracked completion. Use this for sub-agent orchestration.",
     parameters: SubagentsToolSchema,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
@@ -131,6 +133,70 @@ export function createSubagentsTool(opts?: { agentSessionKey?: string }): AnyAge
           cascadeKilled: "cascadeKilled" in result ? result.cascadeKilled : undefined,
           cascadeLabels: "cascadeLabels" in result ? result.cascadeLabels : undefined,
           error: "error" in result ? result.error : undefined,
+          text: result.text,
+        });
+      }
+
+      if (action === "compact") {
+        const target = readStringParam(params, "target", { required: true });
+        const selfTarget = SELF_COMPACTION_TARGETS.has(target.toLowerCase());
+        if (selfTarget) {
+          const result = await compactControlledSubagentSession({
+            cfg,
+            controller,
+            target: {
+              kind: "self",
+              sessionKey: controller.callerSessionKey,
+            },
+          });
+          return jsonResult({
+            status: result.status,
+            action: "compact",
+            target,
+            sessionKey: result.sessionKey,
+            key: result.key,
+            compacted: result.compacted,
+            reason: result.reason,
+            checkpointId: result.checkpointId,
+            tokensBefore: result.tokensBefore,
+            tokensAfter: result.tokensAfter,
+            routeHealthRepairStatus: result.routeHealthRepairStatus,
+            text: result.text,
+          });
+        }
+
+        const resolved = resolveControlledSubagentTarget(runs, target, {
+          recentMinutes,
+          isActive,
+        });
+        if (!resolved.entry) {
+          return jsonResult({
+            status: "error",
+            action: "compact",
+            target,
+            reason: resolved.error ?? "Unknown subagent target.",
+          });
+        }
+        const result = await compactControlledSubagentSession({
+          cfg,
+          controller,
+          target: {
+            kind: "child",
+            entry: resolved.entry,
+          },
+        });
+        return jsonResult({
+          status: result.status,
+          action: "compact",
+          target,
+          sessionKey: result.sessionKey,
+          key: result.key,
+          compacted: result.compacted,
+          reason: result.reason,
+          checkpointId: result.checkpointId,
+          tokensBefore: result.tokensBefore,
+          tokensAfter: result.tokensAfter,
+          routeHealthRepairStatus: result.routeHealthRepairStatus,
           text: result.text,
         });
       }

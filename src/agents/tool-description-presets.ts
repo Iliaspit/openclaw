@@ -30,7 +30,7 @@ export function describeSessionsSendTool(): string {
   return [
     "Send a message into another visible session by sessionKey or label.",
     "Use this for direct cross-session messaging; waits for the target run and returns the updated assistant reply when available.",
-    "For spawned child-session orchestration with push-based completion, use `subagents(action=steer|kill|list)` or `sessions_spawn` instead of pairing `sessions_send` with `sessions_yield`.",
+    "For spawned child-session orchestration with push-based completion, use `subagents(action=steer|kill|list|compact)` or `sessions_spawn` instead of pairing `sessions_send` with `sessions_yield`.",
     "Fire-and-forget delivery to stale/untracked subagent sessions is rejected because it cannot produce a tracked child completion event.",
   ].join(" ");
 }

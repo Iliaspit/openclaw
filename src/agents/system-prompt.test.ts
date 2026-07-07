@@ -675,7 +675,7 @@ describe("buildAgentSystemPrompt", () => {
 
     expect(messagingPrompt).not.toContain("Sub-agent orchestration");
     expect(messagingPrompt).not.toContain("sessions_spawn(...)");
-    expect(messagingPrompt).not.toContain("subagents(action=list|steer|kill)");
+    expect(messagingPrompt).not.toContain("subagents(action=list|steer|kill|compact)");
 
     expect(spawnOnlyPrompt).toContain(
       '- Sub-agent orchestration → use `sessions_spawn(...)` to start delegated work; omit `context` for isolated children, set `context:"fork"` only when the child needs the current transcript.',
@@ -683,7 +683,7 @@ describe("buildAgentSystemPrompt", () => {
     expect(spawnOnlyPrompt).not.toContain("manage already-spawned children");
 
     expect(orchestrationPrompt).toContain(
-      '- Sub-agent orchestration → use `sessions_spawn(...)` to start delegated work; omit `context` for isolated children, set `context:"fork"` only when the child needs the current transcript; use `subagents(action=list|steer|kill)` to manage already-spawned children.',
+      '- Sub-agent orchestration → use `sessions_spawn(...)` to start delegated work; omit `context` for isolated children, set `context:"fork"` only when the child needs the current transcript; use `subagents(action=list|steer|kill|compact)` to manage already-spawned children.',
     );
     expect(orchestrationPrompt).toContain(
       "Before spawning for multi-step recovery, split the work into small sequential slices and give a child only the current slice.",

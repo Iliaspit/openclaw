@@ -19,6 +19,7 @@ export type CompactResult = {
   result?: {
     summary?: string;
     firstKeptEntryId?: string;
+    checkpointId?: string;
     tokensBefore: number;
     tokensAfter?: number;
     details?: unknown;

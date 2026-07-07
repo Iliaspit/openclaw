@@ -131,7 +131,7 @@ export function isMutatingToolCall(toolName: string, args: unknown): boolean {
         typeof record?.message === "string"
       );
     case "subagents":
-      return action === "kill" || action === "steer";
+      return action === "kill" || action === "steer" || action === "compact";
     case "session_status":
       return typeof record?.model === "string" && record.model.trim().length > 0;
     default: {

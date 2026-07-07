@@ -308,7 +308,7 @@ function buildSubagentOrchestrationGuidance(params: { availableTools: Set<string
   const hasSubagents = params.availableTools.has("subagents");
   return [
     hasSubagents
-      ? '- Sub-agent orchestration → use `sessions_spawn(...)` to start delegated work; omit `context` for isolated children, set `context:"fork"` only when the child needs the current transcript; use `subagents(action=list|steer|kill)` to manage already-spawned children.'
+      ? '- Sub-agent orchestration → use `sessions_spawn(...)` to start delegated work; omit `context` for isolated children, set `context:"fork"` only when the child needs the current transcript; use `subagents(action=list|steer|kill|compact)` to manage already-spawned children.'
       : '- Sub-agent orchestration → use `sessions_spawn(...)` to start delegated work; omit `context` for isolated children, set `context:"fork"` only when the child needs the current transcript.',
     "- Before spawning for multi-step recovery, split the work into small sequential slices and give a child only the current slice. Do not combine dirty-diff classification, implementation, unit coverage, focused E2E, and final gate in one child brief.",
     '- QA children are for manual/behavioral checks plus the smallest relevant smoke command. Do not assign a full E2E suite to QA, testing, or review children; only spawn full E2E as an explicit final-gate child with `sliceRole:"full_gate"` after implementation, focused tests, and review are complete.',
@@ -706,7 +706,7 @@ export function buildAgentSystemPrompt(params: {
           "- sessions_list: list sessions",
           "- sessions_history: fetch session history",
           "- sessions_send: send a plain message to another session; not the tracked child-orchestration path",
-          "- subagents: list/steer/kill tracked sub-agent runs (including restarting finished child sessions)",
+          "- subagents: list/steer/kill/compact tracked sub-agent runs (including restarting finished child sessions)",
           '- session_status: show usage/time/model state and answer "what model are we using?"',
         ].join("\n"),
     "TOOLS.md does not control tool availability; it is user guidance for how to use external tools.",

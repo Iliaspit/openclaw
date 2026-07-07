@@ -440,6 +440,7 @@ export async function compactEmbeddedPiSessionDirect(
   let compactionSessionManager: unknown = null;
   let checkpointSnapshot: CapturedCompactionCheckpointSnapshot | null = null;
   let checkpointSnapshotRetained = false;
+  let checkpointId: string | undefined;
   try {
     const { shouldLoadSkillEntries, skillEntries } = resolveEmbeddedRunSkillEntries({
       workspaceDir: effectiveWorkspace,
@@ -1098,6 +1099,7 @@ export async function compactEmbeddedPiSessionDirect(
                 createdAt: compactStartedAt,
               });
               checkpointSnapshotRetained = storedCheckpoint !== null;
+              checkpointId = storedCheckpoint?.checkpointId;
             } catch (err) {
               log.warn("failed to persist compaction checkpoint", {
                 errorMessage: formatErrorMessage(err),
@@ -1168,6 +1170,7 @@ export async function compactEmbeddedPiSessionDirect(
             result: {
               summary: result.summary,
               firstKeptEntryId: effectiveFirstKeptEntryId,
+              checkpointId,
               tokensBefore: observedTokenCount ?? result.tokensBefore,
               tokensAfter,
               details: result.details,

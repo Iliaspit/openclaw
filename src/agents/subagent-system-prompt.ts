@@ -153,7 +153,7 @@ export function buildSubagentSystemPrompt(params: {
     lines.push(
       "## Sub-Agent Spawning",
       "You CAN spawn your own sub-agents for parallel or complex work using `sessions_spawn`.",
-      "Use the `subagents` tool to steer, kill, or do an on-demand status check for your spawned sub-agents.",
+      "Use the `subagents` tool to steer, kill, compact, or do an on-demand status check for your spawned sub-agents.",
       "Use `sessions_send` only for plain cross-session messaging; do not pair `sessions_send` with `sessions_yield` when you need child completion events.",
       "When you need tracked completion for an existing finished OpenClaw child session, re-task it through `subagents` instead of `sessions_send`.",
       "Your sub-agents will announce their results back to you automatically (not to the main agent).",

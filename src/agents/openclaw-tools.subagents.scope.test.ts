@@ -223,4 +223,164 @@ describe("openclaw-tools: subagents scope isolation", () => {
       message: "continue",
     });
   });
+
+  it("top-level orchestrators can compact a controlled child through sessions.compact", async () => {
+    const childKey = "agent:main:subagent:worker";
+    writeStore(storePath, {
+      [childKey]: {
+        sessionId: "worker-session",
+        updatedAt: Date.now(),
+        spawnedBy: "agent:main:main",
+      },
+    });
+    addSubagentRunForTests({
+      runId: "run-worker",
+      childSessionKey: childKey,
+      controllerSessionKey: "agent:main:main",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "worker child",
+      cleanup: "keep",
+      createdAt: Date.now() - 30_000,
+      startedAt: Date.now() - 30_000,
+    });
+    callGatewayMock.mockResolvedValueOnce({
+      ok: true,
+      key: childKey,
+      compacted: true,
+      routeHealthRepairStatus: "cleared",
+      result: {
+        checkpointId: "checkpoint-child",
+        tokensBefore: 123,
+        tokensAfter: 45,
+      },
+    });
+
+    const tool = createSubagentsTool({ agentSessionKey: "agent:main:main" });
+    const result = await tool.execute("call-compact-child", {
+      action: "compact",
+      target: "1",
+    });
+
+    expect(callGatewayMock).toHaveBeenCalledTimes(1);
+    expect(callGatewayMock).toHaveBeenCalledWith({
+      method: "sessions.compact",
+      params: { key: childKey },
+    });
+    expect(result.details).toMatchObject({
+      status: "ok",
+      action: "compact",
+      target: "1",
+      sessionKey: childKey,
+      key: childKey,
+      compacted: true,
+      checkpointId: "checkpoint-child",
+      tokensBefore: 123,
+      tokensAfter: 45,
+      routeHealthRepairStatus: "cleared",
+    });
+  });
+
+  it("leaf subagents cannot compact even explicitly-owned child sessions", async () => {
+    const { childKey, tool } = seedLeafOwnedChildSession(storePath);
+    const result = await tool.execute("call-leaf-compact", {
+      action: "compact",
+      target: childKey,
+    });
+
+    expect(result.details).toMatchObject({
+      status: "forbidden",
+      action: "compact",
+      target: childKey,
+      sessionKey: childKey,
+      reason: "Leaf subagents cannot control other sessions.",
+    });
+    expect(callGatewayMock).not.toHaveBeenCalled();
+  });
+
+  it("self target compacts the caller session without child ownership", async () => {
+    const leafKey = "agent:main:subagent:leaf";
+    writeStore(storePath, {
+      [leafKey]: {
+        sessionId: "leaf-session",
+        updatedAt: Date.now(),
+        spawnedBy: "agent:main:main",
+        subagentRole: "leaf",
+        subagentControlScope: "none",
+      },
+    });
+    callGatewayMock.mockResolvedValueOnce({
+      ok: true,
+      key: leafKey,
+      compacted: true,
+      result: {
+        tokensBefore: 90,
+        tokensAfter: 30,
+      },
+    });
+
+    const tool = createSubagentsTool({ agentSessionKey: leafKey });
+    const result = await tool.execute("call-self-compact", {
+      action: "compact",
+      target: "self",
+    });
+
+    expect(callGatewayMock).toHaveBeenCalledTimes(1);
+    expect(callGatewayMock).toHaveBeenCalledWith({
+      method: "sessions.compact",
+      params: { key: leafKey },
+    });
+    expect(result.details).toMatchObject({
+      status: "ok",
+      action: "compact",
+      target: "self",
+      sessionKey: leafKey,
+      key: leafKey,
+      compacted: true,
+      tokensBefore: 90,
+      tokensAfter: 30,
+    });
+  });
+
+  it("compact response strips nested payloads while preserving scalar compaction evidence", async () => {
+    const hugeSummary = "large compaction summary ".repeat(500);
+    callGatewayMock.mockResolvedValueOnce({
+      ok: true,
+      key: "agent:main:main",
+      compacted: true,
+      result: {
+        checkpointId: "checkpoint-safe",
+        tokensBefore: 120,
+        tokensAfter: 80,
+        summary: hugeSummary,
+        details: {
+          nested: hugeSummary,
+        },
+      },
+    });
+
+    const tool = createSubagentsTool({ agentSessionKey: "agent:main:main" });
+    const result = await tool.execute("call-strip-compact", {
+      action: "compact",
+      target: "caller",
+    });
+    const details = result.details as Record<string, unknown>;
+
+    expect(details).toMatchObject({
+      status: "ok",
+      action: "compact",
+      target: "caller",
+      sessionKey: "agent:main:main",
+      key: "agent:main:main",
+      compacted: true,
+      checkpointId: "checkpoint-safe",
+      tokensBefore: 120,
+      tokensAfter: 80,
+    });
+    expect(details).not.toHaveProperty("result");
+    expect(details).not.toHaveProperty("summary");
+    expect(details).not.toHaveProperty("details");
+    expect(JSON.stringify(details)).not.toContain(hugeSummary.slice(0, 80));
+    expect(String(details.text)).not.toContain(hugeSummary.slice(0, 80));
+  });
 });

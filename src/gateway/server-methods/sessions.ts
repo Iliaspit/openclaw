@@ -1850,7 +1850,37 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       sessionKey: target.canonicalKey,
       entry,
     });
+    const recordActiveRouteHealth = async (reason: string) => {
+      if (!compactRoute || !entry) {
+        return "none" as const;
+      }
+      const blockerCodes = await childRouteRepairBlockerCodes({
+        route: compactRoute,
+        entry,
+        targetMethod: "sessions.compact",
+      });
+      if (!blockerCodes.ok) {
+        return blockerCodes.error;
+      }
+      if (!blockerCodes.codes.includes("context_overflow")) {
+        return "none" as const;
+      }
+      const recorded = await recordChildRouteContextOverflowRepair({
+        childSessionKey: compactRoute.routeTarget.healthSessionKey,
+        runId: compactRoute.registryRecord?.runId,
+        status: "active",
+        reason,
+      });
+      return recorded ?? ("active" as const);
+    };
     if (!sessionId) {
+      const routeHealthRepairStatus = await recordActiveRouteHealth(
+        "Manual session compaction skipped because the session has no session id; context-overflow risk remains active.",
+      );
+      if (routeHealthRepairStatus !== "active" && routeHealthRepairStatus !== "none") {
+        respond(false, undefined, routeHealthRepairStatus);
+        return;
+      }
       respond(
         true,
         {
@@ -1858,6 +1888,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
           key: target.canonicalKey,
           compacted: false,
           reason: "no sessionId",
+          ...(routeHealthRepairStatus === "active" ? { routeHealthRepairStatus } : {}),
         },
         undefined,
       );
@@ -1871,6 +1902,13 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       target.agentId,
     ).find((candidate) => fs.existsSync(candidate));
     if (!filePath) {
+      const routeHealthRepairStatus = await recordActiveRouteHealth(
+        "Manual session compaction skipped because the transcript was missing; context-overflow risk remains active.",
+      );
+      if (routeHealthRepairStatus !== "active" && routeHealthRepairStatus !== "none") {
+        respond(false, undefined, routeHealthRepairStatus);
+        return;
+      }
       respond(
         true,
         {
@@ -1878,6 +1916,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
           key: target.canonicalKey,
           compacted: false,
           reason: "no transcript",
+          ...(routeHealthRepairStatus === "active" ? { routeHealthRepairStatus } : {}),
         },
         undefined,
       );
@@ -1885,6 +1924,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     }
 
     if (maxLines === undefined) {
+      let routeHealthRepairStatus: "cleared" | "active" | undefined;
       const interruptResult = await interruptSessionRunIfActive({
         req,
         context,
@@ -1954,19 +1994,21 @@ export const sessionsHandlers: GatewayRequestHandlers = {
             respond(false, undefined, repairRecordError);
             return;
           }
+          routeHealthRepairStatus = "cleared";
         }
       }
-      if (!result.ok && compactRoute) {
-        const repairRecordError = await recordChildRouteContextOverflowRepair({
-          childSessionKey: compactRoute.routeTarget.healthSessionKey,
-          runId: compactRoute.registryRecord?.runId,
-          status: "active",
-          reason: "Manual session compaction failed; context-overflow risk remains active.",
-        });
-        if (repairRecordError) {
-          respond(false, undefined, repairRecordError);
+      if (!(result.ok && result.compacted) && compactRoute) {
+        const activeRepairResult = await recordActiveRouteHealth(
+          result.ok
+            ? "Manual session compaction skipped; context-overflow risk remains active."
+            : "Manual session compaction failed; context-overflow risk remains active.",
+        );
+        if (activeRepairResult !== "active" && activeRepairResult !== "none") {
+          respond(false, undefined, activeRepairResult);
           return;
         }
+        routeHealthRepairStatus =
+          activeRepairResult === "active" ? activeRepairResult : routeHealthRepairStatus;
       }
 
       respond(
@@ -1976,6 +2018,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
           key: target.canonicalKey,
           compacted: result.compacted,
           reason: result.reason,
+          routeHealthRepairStatus,
           result: result.result,
         },
         undefined,
@@ -1993,6 +2036,13 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     const raw = fs.readFileSync(filePath, "utf-8");
     const lines = raw.split(/\r?\n/).filter((l) => Boolean(normalizeOptionalString(l)));
     if (lines.length <= maxLines) {
+      const routeHealthRepairStatus = await recordActiveRouteHealth(
+        "Manual line-count session compaction skipped because the transcript is already within the requested line count; context-overflow risk remains active.",
+      );
+      if (routeHealthRepairStatus !== "active" && routeHealthRepairStatus !== "none") {
+        respond(false, undefined, routeHealthRepairStatus);
+        return;
+      }
       respond(
         true,
         {
@@ -2000,6 +2050,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
           key: target.canonicalKey,
           compacted: false,
           kept: lines.length,
+          ...(routeHealthRepairStatus === "active" ? { routeHealthRepairStatus } : {}),
         },
         undefined,
       );
@@ -2022,6 +2073,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       delete entryToUpdate.totalTokensFresh;
       entryToUpdate.updatedAt = Date.now();
     });
+    let routeHealthRepairStatus: "cleared" | undefined;
     if (compactRoute) {
       const repairRecordError = await recordChildRouteContextOverflowRepair({
         childSessionKey: compactRoute.routeTarget.healthSessionKey,
@@ -2032,6 +2084,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         respond(false, undefined, repairRecordError);
         return;
       }
+      routeHealthRepairStatus = "cleared";
     }
 
     respond(
@@ -2042,6 +2095,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         compacted: true,
         archived,
         kept: keptLines.length,
+        routeHealthRepairStatus,
       },
       undefined,
     );

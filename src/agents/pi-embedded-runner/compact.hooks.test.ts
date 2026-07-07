@@ -10,6 +10,7 @@ import {
   hookRunner,
   loadCompactHooksHarness,
   maybeCompactAgentHarnessSessionMock,
+  persistSessionCompactionCheckpointMock,
   registerProviderStreamForModelMock,
   resolveContextEngineMock,
   resolveEmbeddedAgentStreamFnMock,
@@ -746,6 +747,68 @@ describe("compactEmbeddedPiSession hooks (ownsCompaction engine)", () => {
       expect.objectContaining({
         sessionKey: TEST_SESSION_KEY,
         messageProvider: "telegram",
+      }),
+    );
+  });
+
+  it("returns the persisted checkpoint id on the engine-owned path", async () => {
+    contextEngineCompactMock.mockResolvedValueOnce({
+      ok: true,
+      compacted: true,
+      result: {
+        summary: "engine-summary",
+        firstKeptEntryId: "entry-engine",
+        checkpointId: "engine-checkpoint",
+        tokensBefore: 100,
+        tokensAfter: 50,
+      },
+    });
+    persistSessionCompactionCheckpointMock.mockResolvedValueOnce({
+      checkpointId: "checkpoint-engine-owned",
+    });
+
+    const result = await compactEmbeddedPiSession(
+      wrappedCompactionArgs({
+        config: compactionConfig("await"),
+      }),
+    );
+
+    expect(result.result?.checkpointId).toBe("checkpoint-engine-owned");
+    expect(persistSessionCompactionCheckpointMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        summary: "engine-summary",
+        firstKeptEntryId: "entry-engine",
+        tokensBefore: 100,
+        tokensAfter: 50,
+      }),
+    );
+  });
+
+  it("returns the persisted checkpoint id when the engine omits result details", async () => {
+    contextEngineCompactMock.mockResolvedValueOnce({
+      ok: true,
+      compacted: true,
+      reason: undefined,
+      result: undefined,
+    });
+    persistSessionCompactionCheckpointMock.mockResolvedValueOnce({
+      checkpointId: "checkpoint-without-result",
+    });
+
+    const result = await compactEmbeddedPiSession(
+      wrappedCompactionArgs({
+        config: compactionConfig("await"),
+      }),
+    );
+
+    expect(result.result?.checkpointId).toBe("checkpoint-without-result");
+    expect(result.result?.tokensBefore).toBeUndefined();
+    expect(persistSessionCompactionCheckpointMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        summary: undefined,
+        firstKeptEntryId: undefined,
+        tokensBefore: undefined,
+        tokensAfter: undefined,
       }),
     );
   });

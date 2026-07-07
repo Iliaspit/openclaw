@@ -64,6 +64,9 @@ describe("tool mutation helpers", () => {
     expect(
       buildToolMutationState("subagents", { action: "steer", target: "worker-1" }).mutatingAction,
     ).toBe(true);
+    expect(
+      buildToolMutationState("subagents", { action: "compact", target: "worker-1" }).mutatingAction,
+    ).toBe(true);
     expect(buildToolMutationState("subagents", { action: "list" }).mutatingAction).toBe(false);
   });
 

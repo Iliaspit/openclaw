@@ -54,10 +54,44 @@ export const MAX_STEER_MESSAGE_CHARS = 4_000;
 export const STEER_RATE_LIMIT_MS = 2_000;
 export const STEER_ABORT_SETTLE_TIMEOUT_MS = 5_000;
 const SUBAGENT_REPLY_HISTORY_LIMIT = 50;
+const COMPACT_REASON_MAX_CHARS = 240;
 
 const steerRateLimit = new Map<string, number>();
 
 type GatewayCaller = typeof callGateway;
+
+type CompactGatewayResponse = {
+  ok?: unknown;
+  key?: unknown;
+  compacted?: unknown;
+  reason?: unknown;
+  checkpointId?: unknown;
+  routeHealthRepairStatus?: unknown;
+  result?: unknown;
+};
+
+export type CompactSubagentTarget =
+  | {
+      kind: "self";
+      sessionKey: string;
+    }
+  | {
+      kind: "child";
+      entry: SubagentRunRecord;
+    };
+
+export type CompactControlledSubagentSessionResult = {
+  status: "ok" | "error" | "forbidden";
+  sessionKey: string;
+  key?: string;
+  compacted?: boolean;
+  reason?: string;
+  checkpointId?: string;
+  tokensBefore?: number;
+  tokensAfter?: number;
+  routeHealthRepairStatus?: string;
+  text: string;
+};
 
 const defaultSubagentControlDeps = {
   callGateway,
@@ -136,6 +170,67 @@ function ensureControllerOwnsRun(params: {
     return undefined;
   }
   return "Subagents can only control runs spawned from their own session.";
+}
+
+function normalizeCompactString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed.length > COMPACT_REASON_MAX_CHARS
+    ? `${trimmed.slice(0, COMPACT_REASON_MAX_CHARS - 3)}...`
+    : trimmed;
+}
+
+function normalizeCompactTokenCount(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  return Math.max(0, Math.floor(value));
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function summarizeCompactionGatewayResponse(params: {
+  response: CompactGatewayResponse | undefined;
+  fallbackKey: string;
+}) {
+  const response = params.response ?? {};
+  const result = asRecord(response.result);
+  const routeHealthRepairStatus =
+    normalizeCompactString(response.routeHealthRepairStatus) ??
+    normalizeCompactString(result?.routeHealthRepairStatus);
+  return {
+    status: response.ok === false ? ("error" as const) : ("ok" as const),
+    key: normalizeCompactString(response.key) ?? params.fallbackKey,
+    compacted: response.compacted === true,
+    reason: normalizeCompactString(response.reason),
+    checkpointId:
+      normalizeCompactString(response.checkpointId) ?? normalizeCompactString(result?.checkpointId),
+    tokensBefore: normalizeCompactTokenCount(result?.tokensBefore),
+    tokensAfter: normalizeCompactTokenCount(result?.tokensAfter),
+    ...(routeHealthRepairStatus ? { routeHealthRepairStatus } : {}),
+  };
+}
+
+function formatCompactResultText(params: {
+  sessionKey: string;
+  compacted: boolean;
+  reason?: string;
+}) {
+  if (params.compacted) {
+    return `compacted ${params.sessionKey}.`;
+  }
+  return params.reason
+    ? `did not compact ${params.sessionKey}: ${params.reason}.`
+    : `did not compact ${params.sessionKey}.`;
 }
 
 async function killSubagentRun(params: {
@@ -405,6 +500,92 @@ export async function killSubagentRunAdmin(params: { cfg: OpenClawConfig; sessio
     sessionKey: entry.childSessionKey,
     cascadeKilled: cascade.killed,
     cascadeLabels: cascade.killed > 0 ? cascade.labels : undefined,
+  };
+}
+
+export async function compactControlledSubagentSession(params: {
+  cfg: OpenClawConfig;
+  controller: ResolvedSubagentController;
+  target: CompactSubagentTarget;
+}): Promise<CompactControlledSubagentSessionResult> {
+  let targetSessionKey = "";
+  if (params.target.kind === "self") {
+    targetSessionKey = params.target.sessionKey.trim();
+  } else {
+    const ownershipError = ensureControllerOwnsRun({
+      controller: params.controller,
+      entry: params.target.entry,
+    });
+    if (ownershipError) {
+      return {
+        status: "forbidden" as const,
+        sessionKey: params.target.entry.childSessionKey,
+        reason: ownershipError,
+        text: ownershipError,
+      };
+    }
+    if (params.controller.controlScope !== "children") {
+      const reason = "Leaf subagents cannot control other sessions.";
+      return {
+        status: "forbidden" as const,
+        sessionKey: params.target.entry.childSessionKey,
+        reason,
+        text: reason,
+      };
+    }
+    const currentEntry = getLatestSubagentRunByChildSessionKey(params.target.entry.childSessionKey);
+    if (!currentEntry || currentEntry.runId !== params.target.entry.runId) {
+      const reason =
+        `${resolveSubagentLabel(params.target.entry)} was superseded by ` +
+        "a newer child generation.";
+      return {
+        status: "error" as const,
+        sessionKey: params.target.entry.childSessionKey,
+        reason,
+        text: reason,
+      };
+    }
+    targetSessionKey = params.target.entry.childSessionKey;
+  }
+
+  if (!targetSessionKey) {
+    const reason = "Missing compaction target session.";
+    return {
+      status: "error" as const,
+      sessionKey: targetSessionKey,
+      reason,
+      text: reason,
+    };
+  }
+
+  let response: CompactGatewayResponse | undefined;
+  try {
+    response = await subagentControlDeps.callGateway<CompactGatewayResponse>({
+      method: "sessions.compact",
+      params: { key: targetSessionKey },
+    });
+  } catch (err) {
+    const reason = normalizeCompactString(formatErrorMessage(err)) ?? "Compaction failed.";
+    return {
+      status: "error" as const,
+      sessionKey: targetSessionKey,
+      reason,
+      text: reason,
+    };
+  }
+
+  const summary = summarizeCompactionGatewayResponse({
+    response,
+    fallbackKey: targetSessionKey,
+  });
+  return {
+    ...summary,
+    sessionKey: targetSessionKey,
+    text: formatCompactResultText({
+      sessionKey: targetSessionKey,
+      compacted: summary.compacted,
+      reason: summary.reason,
+    }),
   };
 }
 
