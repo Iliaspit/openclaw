@@ -308,11 +308,18 @@ export function createSubagentRegistryLifecycleController(params: {
         ) {
           throw new Error("delegation assignment does not match the timed-out child run");
         }
+        const reportSubmitted = ledger.hasReceiptForAssignment(assignmentId);
         ledger.appendRouteEvent({
           assignmentId,
-          kind: "timeout",
+          kind: reportSubmitted ? "validation_rejected" : "timeout",
           createdAt: args.endedAt,
-          payload: { runId: args.entry.runId, deadlineKind: "run" },
+          payload: reportSubmitted
+            ? {
+                runId: args.entry.runId,
+                deadlineKind: "run",
+                code: "run-timeout-after-report",
+              }
+            : { runId: args.entry.runId, deadlineKind: "run" },
         });
       } catch (err) {
         params.warn("failed to persist guarded run deadline", {
@@ -477,8 +484,17 @@ export function createSubagentRegistryLifecycleController(params: {
     entry: SubagentRunRecord,
     rawCompletionStopReason?: string,
   ): boolean => {
-    const normalizedStopReason = rawCompletionStopReason?.trim() || undefined;
-    const nextStopReason = normalizedStopReason ?? entry.rawCompletionStopReason;
+    const incomingStopReason = rawCompletionStopReason?.trim() || undefined;
+    const currentStopReason = entry.rawCompletionStopReason?.trim() || undefined;
+    const completionRank = (completion: SubagentRunRecord["modelCompletion"]): number =>
+      completion === "truncated" ? 2 : completion === "complete" ? 1 : 0;
+    const incomingCompletion = classifySubagentModelCompletion(incomingStopReason);
+    const currentCompletion = classifySubagentModelCompletion(currentStopReason);
+    const nextStopReason =
+      incomingStopReason &&
+      (!currentStopReason || completionRank(incomingCompletion) > completionRank(currentCompletion))
+        ? incomingStopReason
+        : currentStopReason;
     const nextCompletion = classifySubagentModelCompletion(nextStopReason);
     let changed = false;
     if (entry.rawCompletionStopReason !== nextStopReason) {
@@ -643,7 +659,10 @@ export function createSubagentRegistryLifecycleController(params: {
     rawCompletionStopReason?: string,
   ): Promise<boolean> => {
     const candidates = listPendingCompletionRunsForSession(sessionKey);
-    if (candidates.length === 0) {
+    // A session can retain multiple ended generations. Without an exact run
+    // binding, applying one late reply/stop reason to more than one generation
+    // would fabricate evidence, so refresh only an unambiguous candidate.
+    if (candidates.length !== 1) {
       return false;
     }
 
@@ -659,30 +678,26 @@ export function createSubagentRegistryLifecycleController(params: {
     }
 
     const capturedAt = Date.now();
-    let changed = false;
-    for (const entry of candidates) {
-      if (updateModelCompletion(entry, rawCompletionStopReason)) {
+    const entry = candidates[0];
+    let changed = updateModelCompletion(entry, rawCompletionStopReason);
+    if (finalizeRunResult({ entry, resultText: trimmed })) {
+      entry.frozenResultCapturedAt = capturedAt;
+      changed = true;
+    }
+    const persisted = persistSubagentResultReceiptForRunSync(entry);
+    if (!persisted.ok) {
+      params.warn("failed to persist refreshed subagent result receipt", {
+        error: persisted.error,
+        runId: maskRunId(entry.runId),
+        childSessionKey: maskSessionKey(entry.childSessionKey),
+      });
+      if (entry.cleanup === "delete") {
+        entry.cleanup = "keep";
         changed = true;
       }
-      if (finalizeRunResult({ entry, resultText: trimmed })) {
-        entry.frozenResultCapturedAt = capturedAt;
-        changed = true;
-      }
-      const persisted = persistSubagentResultReceiptForRunSync(entry);
-      if (!persisted.ok) {
-        params.warn("failed to persist refreshed subagent result receipt", {
-          error: persisted.error,
-          runId: maskRunId(entry.runId),
-          childSessionKey: maskSessionKey(entry.childSessionKey),
-        });
-        if (entry.cleanup === "delete") {
-          entry.cleanup = "keep";
-          changed = true;
-        }
-      }
-      if (applySubagentResultReceiptToRun(entry)) {
-        changed = true;
-      }
+    }
+    if (applySubagentResultReceiptToRun(entry)) {
+      changed = true;
     }
     if (changed) {
       params.persist();

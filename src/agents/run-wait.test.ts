@@ -256,6 +256,39 @@ describe("waitForAgentRunAndReadUpdatedAssistantReply", () => {
       replyText: "fresh reply",
     });
   });
+
+  it("preserves terminal timing and raw stop reason beside the updated reply", async () => {
+    callGatewayMock
+      .mockResolvedValueOnce({
+        status: "ok",
+        startedAt: 100,
+        endedAt: 200,
+        rawCompletionStopReason: "max_tokens",
+      })
+      .mockResolvedValueOnce({
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "partial reply" }],
+            timestamp: 99,
+          },
+        ],
+      });
+
+    await expect(
+      waitForAgentRunAndReadUpdatedAssistantReply({
+        runId: "run-truncated",
+        sessionKey: "agent:main:child",
+        timeoutMs: 1_000,
+      }),
+    ).resolves.toMatchObject({
+      status: "ok",
+      startedAt: 100,
+      endedAt: 200,
+      rawCompletionStopReason: "max_tokens",
+      replyText: "partial reply",
+    });
+  });
 });
 
 describe("waitForAgentRunsToDrain", () => {

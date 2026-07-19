@@ -499,3 +499,30 @@ Consult this before investigating a new issue or making a related change.
    - **Issue:** `AGENTS.md` used the same content-unaware per-file head/tail truncation as ordinary bootstrap files. A policy file slightly above `bootstrapMaxChars` could therefore lose middle instructions while the agent continued running with partial workspace authority.
    - **Fix and why:** Exempted `AGENTS.md` from the ordinary per-file cap, reserved its complete contents within the total bootstrap budget regardless of hook ordering, and made policy overflow fail closed instead of injecting a partial file. Bootstrap budget analysis now treats `AGENTS.md` against `bootstrapTotalMaxChars` and emits a prompt/doctor warning at 80% usage.
    - **Result:** Regression coverage prevents default-limit drift or repository policy growth from silently truncating `AGENTS.md`; near-limit pressure is visible before failure, and an over-total policy stops the run with an actionable configuration error.
+
+## 2026-07-19
+
+1. **Guarded post-report failures could remain awaiting or lose terminal evidence**
+   - **Issue:** A timeout after report submission attempted the forbidden `timeout` transition, controller completion checks preferred an accepted report over later `validation_rejected` evidence, successful wait/read calls dropped stop-reason and timing metadata, late session refresh could fan one result across multiple generations and downgrade truncation, compatibility receipts overwrote prior result revisions, and restart validation missed receipt coexistence with rejected or timed-out routes.
+   - **Fix and why:** Post-report deadlines now settle as fail-closed `validation_rejected`; controller reads expose terminal completion rejection before awaiting; wait and `sessions_send` results preserve typed completion metadata; late refresh requires one unambiguous generation and keeps truncation monotonic; result receipt IDs are content-addressed so refreshed bytes append a new revision; and reopen rejects contradictory route/receipt history while allowing an exact receipt-backed validation rejection at the same timestamp.
+   - **Result:** Focused controller, lifecycle, wait, receipt, restart-integrity, and lifecycle E2E regressions pass without enabling automatic continuation or recovery from `validation_rejected`.
+
+2. **Accepted format correction masked later terminal rejection during completion promotion**
+   - **Issue:** Once a rejected report had an accepted format correction, completion promotion ignored every `validation_rejected` event for the assignment. A late worker result could therefore create a completed terminal receipt after a post-report timeout had already rejected the route.
+   - **Fix and why:** Completion promotion now exempts only rejection events explicitly bound to the superseded original receipt. Global rejection and rejection tied to the corrected receipt remain terminal before and after ledger reopen.
+   - **Result:** Late terminal result evidence remains recorded, but it cannot replace the authoritative rejection or promote the assignment to completed.
+
+3. **Equal-time validation rejection lookup used random IDs as precedence**
+   - **Issue:** When the superseded original-receipt rejection and an applicable terminal rejection shared one millisecond timestamp, lookup ordered them by randomly generated event ID. Controller completion could therefore alternate between terminal rejection and awaiting state across equivalent runs.
+   - **Fix and why:** Rejection lookup now receives the accepted receipt identity, filters only the rejection belonging to its superseded original receipt, and uses append order for equal-time events.
+   - **Result:** Equal-time replay deterministically returns the applicable terminal rejection and keeps controller completion fail-closed.
+
+4. **Legacy result receipt hydration could attach refreshed bytes to an old identity**
+   - **Issue:** Hydration searched mutable live runs before the exact persisted receipt. A refreshed run could therefore supply new result bytes while the parent event retained the legacy receipt ID and its original metadata.
+   - **Fix and why:** Hydration now resolves an exact persisted receipt first, falls back to the live run only when none exists, and derives byte length and digest from the selected result text.
+   - **Result:** Legacy receipt identity, hydrated result bytes, byte count, and digest remain consistent even after the live run refreshes.
+
+5. **Fresh-child receipt failure dropped terminal wait metadata**
+   - **Issue:** The fresh-child `sessions_send` path resolved timing and raw stop-reason metadata after waiting, but omitted it when post-wait result-receipt persistence failed.
+   - **Fix and why:** The receipt-failure response now spreads the same completion metadata as success, timeout, and agent-error responses.
+   - **Result:** Parents retain terminal timing and truncation classification across every waited fresh-child result shape.

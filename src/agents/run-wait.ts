@@ -49,9 +49,7 @@ function normalizeAgentWaitResult(
     startedAt: typeof wait?.startedAt === "number" ? wait.startedAt : undefined,
     endedAt: typeof wait?.endedAt === "number" ? wait.endedAt : undefined,
     rawCompletionStopReason:
-      typeof wait?.rawCompletionStopReason === "string"
-        ? wait.rawCompletionStopReason
-        : undefined,
+      typeof wait?.rawCompletionStopReason === "string" ? wait.rawCompletionStopReason : undefined,
   };
 }
 
@@ -183,7 +181,7 @@ export async function waitForAgentRunAndReadUpdatedAssistantReply(params: {
       ? latestReply.text
       : undefined;
   return {
-    status: "ok",
+    ...wait,
     replyText,
   };
 }

@@ -715,4 +715,66 @@ describe("subagent registry lifecycle hardening", () => {
     expect(entry.frozenResultText).toContain("late incomplete output");
     expect(entry.frozenResultText).toContain("[incomplete handoff:");
   });
+
+  it("does not downgrade known truncation when a later refresh reports stop", async () => {
+    const entry = createRunEntry({
+      runId: "run-truncation-first",
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      expectsCompletionMessage: true,
+      frozenResultText: "early incomplete output",
+      frozenResultCapturedAt: 3_000,
+      modelCompletion: "truncated",
+      rawCompletionStopReason: "max_tokens",
+    });
+    const controller = createLifecycleController({
+      entry,
+      captureSubagentCompletionReply: vi.fn(async () => "late incomplete output"),
+    });
+
+    await controller.refreshFrozenResultFromSession(entry.childSessionKey, "stop");
+
+    expect(entry.modelCompletion).toBe("truncated");
+    expect(entry.rawCompletionStopReason).toBe("max_tokens");
+    expect(entry.frozenResultText).toContain("stopReason=max_tokens");
+  });
+
+  it("refuses to fan one late session result across ambiguous ended generations", async () => {
+    const first = createRunEntry({
+      runId: "run-ambiguous-first",
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      expectsCompletionMessage: true,
+      frozenResultText: "first output",
+      frozenResultCapturedAt: 3_000,
+    });
+    const second = createRunEntry({
+      runId: "run-ambiguous-second",
+      childSessionKey: first.childSessionKey,
+      endedAt: 5_000,
+      outcome: { status: "ok" },
+      expectsCompletionMessage: true,
+      frozenResultText: "second output",
+      frozenResultCapturedAt: 4_500,
+    });
+    const captureSubagentCompletionReply = vi.fn(async () => "unbound late output");
+    const controller = createLifecycleController({
+      entry: first,
+      runs: new Map([
+        [first.runId, first],
+        [second.runId, second],
+      ]),
+      captureSubagentCompletionReply,
+    });
+
+    await expect(
+      controller.refreshFrozenResultFromSession(first.childSessionKey, "max_tokens"),
+    ).resolves.toBe(false);
+
+    expect(captureSubagentCompletionReply).not.toHaveBeenCalled();
+    expect(first).toMatchObject({ frozenResultText: "first output" });
+    expect(second).toMatchObject({ frozenResultText: "second output" });
+    expect(first.rawCompletionStopReason).toBeUndefined();
+    expect(second.rawCompletionStopReason).toBeUndefined();
+  });
 });

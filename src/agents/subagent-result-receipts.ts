@@ -313,8 +313,19 @@ function acquireReceiptStoreLockSync(pathname: string): { release: () => void } 
 export function buildSubagentResultReceiptId(params: {
   childSessionKey: string;
   childRunId: string;
+  resultText?: string | null;
 }): string {
-  const source = `${params.childSessionKey.trim()}:${params.childRunId.trim()}`;
+  const childSessionKey = params.childSessionKey.trim();
+  const childRunId = params.childRunId.trim();
+  const source =
+    params.resultText !== undefined
+      ? JSON.stringify({
+          version: 2,
+          childSessionKey,
+          childRunId,
+          resultText: params.resultText ?? "",
+        })
+      : `${childSessionKey}:${childRunId}`;
   const digest = sha256Hex(source).slice(0, 24);
   return `scr_${digest}`;
 }
@@ -327,7 +338,11 @@ export function buildSubagentResultReceipt(params: {
 }): SubagentResultReceipt {
   const resultText = params.resultText ?? "";
   return {
-    id: buildSubagentResultReceiptId(params),
+    id: buildSubagentResultReceiptId({
+      childSessionKey: params.childSessionKey,
+      childRunId: params.childRunId,
+      resultText,
+    }),
     kind: "subagent_result",
     childSessionKey: params.childSessionKey,
     childRunId: params.childRunId,
@@ -396,6 +411,10 @@ export function persistSubagentResultReceiptForRunSync(
     applySubagentResultReceiptToRun(entry);
     lock = acquireReceiptStoreLockSync(pathname);
     const state = applyReceiptRetention(readReceiptStateFromPathSync(pathname), Date.now());
+    const existing = state.receipts[receipt.id];
+    if (existing) {
+      return { ok: true, receipt: existing };
+    }
     state.receipts[receipt.id] = receipt;
     state.runIndex[`${receipt.childSessionKey}:${receipt.childRunId}`] = receipt.id;
     writeReceiptStateToPathSync(pathname, applyReceiptRetention(state, Date.now()));
@@ -455,23 +474,24 @@ export function hydrateAgentInternalEventResultReceiptsFromRuns(
     if (event.type !== "task_completion" || event.resultReceipt?.kind !== "subagent_result") {
       return event;
     }
-    const entry = findReceiptRun(event.resultReceipt.id, runs);
-    const persisted = entry ? undefined : findPersistedReceipt(event.resultReceipt.id);
+    const persisted = findPersistedReceipt(event.resultReceipt.id);
+    const entry = persisted ? undefined : findReceiptRun(event.resultReceipt.id, runs);
     const resultText =
-      typeof entry?.frozenResultText === "string"
-        ? entry.frozenResultText
-        : (persisted?.resultText ?? "");
+      persisted?.resultText ??
+      (typeof entry?.frozenResultText === "string" ? entry.frozenResultText : "");
     if (!resultText.trim()) {
       return event;
     }
+    const bytes = Buffer.byteLength(resultText, "utf8");
+    const sha256 = sha256Hex(resultText);
     changed = true;
     return {
       ...event,
       result: resultText,
       resultReceipt: {
         ...event.resultReceipt,
-        bytes: event.resultReceipt.bytes ?? Buffer.byteLength(resultText, "utf8"),
-        sha256: event.resultReceipt.sha256 ?? sha256Hex(resultText),
+        bytes,
+        sha256,
         hydrated: true,
       },
     };

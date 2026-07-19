@@ -10,6 +10,7 @@ const ledgerMocks = vi.hoisted(() => ({
   guardMode: "enforce" as "audit" | "enforce",
   guardResolutionFails: false,
   getAssignment: vi.fn(() => ({ assignmentId: "assignment-1", epoch: 4 })),
+  hasReceiptForAssignment: vi.fn(() => false),
   promoteRecordedTerminalCompletion: vi.fn(),
   recordTerminalResultReceipt: vi.fn(),
   resolveAssignmentForChildSession: vi.fn(() => ({ assignmentId: "assignment-1", epoch: 4 })),
@@ -79,6 +80,7 @@ describe("guarded subagent lifecycle timeout", () => {
     vi.clearAllMocks();
     ledgerMocks.guardMode = "enforce";
     ledgerMocks.guardResolutionFails = false;
+    ledgerMocks.hasReceiptForAssignment.mockReturnValue(false);
   });
 
   function createEntry(): SubagentRunRecord {
@@ -140,6 +142,33 @@ describe("guarded subagent lifecycle timeout", () => {
       createdAt: 4_000,
       payload: { runId: "run-1", deadlineKind: "run" },
     });
+  });
+
+  it("settles a run deadline after report submission as fail-closed validation rejection", async () => {
+    ledgerMocks.hasReceiptForAssignment.mockReturnValue(true);
+    const entry = createEntry();
+    const controller = createController(entry);
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "timeout" },
+      reason: SUBAGENT_ENDED_REASON_ERROR,
+      triggerCleanup: false,
+    });
+
+    expect(ledgerMocks.appendRouteEvent).toHaveBeenCalledOnce();
+    expect(ledgerMocks.appendRouteEvent).toHaveBeenCalledWith({
+      assignmentId: "assignment-1",
+      kind: "validation_rejected",
+      createdAt: 4_000,
+      payload: {
+        runId: "run-1",
+        deadlineKind: "run",
+        code: "run-timeout-after-report",
+      },
+    });
+    expect(entry.outcome?.status).toBe("timeout");
   });
 
   it.each(["enforce", "audit"] as const)(

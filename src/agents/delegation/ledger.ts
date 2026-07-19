@@ -3247,6 +3247,60 @@ export class DelegationLedger {
     );
   }
 
+  latestValidationRejectedRouteForAssignment(
+    assignmentId: string,
+    acceptedReceiptId?: string,
+  ):
+    | {
+        eventId: string;
+        payload: unknown;
+        createdAt: number;
+      }
+    | undefined {
+    const supersededOriginal = acceptedReceiptId
+      ? (this.db
+          .prepare(
+            `SELECT original_receipt_id AS originalReceiptId
+             FROM correction_uses
+             WHERE assignment_id = ? AND corrected_receipt_id = ?
+             LIMIT 1`,
+          )
+          .get(assignmentId, acceptedReceiptId) as { originalReceiptId: string } | undefined)
+      : undefined;
+    // route_events is append-only, so rowid is its insertion sequence and
+    // resolves same-millisecond events without UUID-dependent ordering.
+    const rows = this.db
+      .prepare(
+        `SELECT event_id AS eventId, payload_json AS payloadJson, created_at AS createdAt
+         FROM route_events
+         WHERE assignment_id = ? AND kind = 'validation_rejected'
+         ORDER BY created_at DESC, rowid DESC`,
+      )
+      .all(assignmentId) as Array<{
+      eventId: string;
+      payloadJson: string;
+      createdAt: number | bigint;
+    }>;
+    for (const row of rows) {
+      const payload = JSON.parse(row.payloadJson) as unknown;
+      if (
+        supersededOriginal &&
+        payload &&
+        typeof payload === "object" &&
+        !Array.isArray(payload) &&
+        (payload as { receiptId?: unknown }).receiptId === supersededOriginal.originalReceiptId
+      ) {
+        continue;
+      }
+      return {
+        eventId: row.eventId,
+        payload,
+        createdAt: toNumber(row.createdAt),
+      };
+    }
+    return undefined;
+  }
+
   acceptedReceiptForAssignment(
     assignmentId: string,
   ): { receiptId: string; semanticDigest: string; reportJson: string } | undefined {
@@ -3409,22 +3463,58 @@ export class DelegationLedger {
     };
   }
 
-  assertNoLateInitialReceiptsAfterValidationRejection(): void {
-    const contradiction = this.db
+  assertNoContradictoryInitialReceiptsAfterTerminalRoute(): void {
+    const candidates = this.db
       .prepare(
-        `SELECT r.assignment_id AS assignmentId
+        `SELECT r.assignment_id AS assignmentId, r.receipt_id AS receiptId,
+                e.kind, e.payload_json AS payloadJson,
+                r.created_at AS receiptCreatedAt, e.created_at AS routeCreatedAt,
+                v.validation_id AS validationId, v.outcome AS validationOutcome
          FROM receipts r
          JOIN route_events e ON e.assignment_id = r.assignment_id
+         LEFT JOIN validations v ON v.receipt_id = r.receipt_id
          WHERE r.correction_of IS NULL
-           AND e.kind = 'validation_rejected'
-           AND r.created_at > e.created_at
-         ORDER BY r.assignment_id
-         LIMIT 1`,
+           AND (
+             e.kind IN ('route_rejected', 'timeout')
+             OR (e.kind = 'validation_rejected' AND r.created_at >= e.created_at)
+           )
+         ORDER BY r.assignment_id, e.created_at, e.event_id`,
       )
-      .get() as { assignmentId: string } | undefined;
+      .all() as Array<{
+      assignmentId: string;
+      receiptId: string;
+      kind: "route_rejected" | "validation_rejected" | "timeout";
+      payloadJson: string;
+      receiptCreatedAt: number | bigint;
+      routeCreatedAt: number | bigint;
+      validationId: string | null;
+      validationOutcome: DelegationValidationOutcome | null;
+    }>;
+    const contradiction = candidates.find((candidate) => {
+      if (candidate.kind !== "validation_rejected") {
+        return true;
+      }
+      if (toNumber(candidate.receiptCreatedAt) > toNumber(candidate.routeCreatedAt)) {
+        return true;
+      }
+      const payload = JSON.parse(candidate.payloadJson) as {
+        receiptId?: unknown;
+        validationId?: unknown;
+      };
+      // Report validation rejection is allowed to reference the receipt it
+      // validated, including when both writes share one millisecond timestamp,
+      // but only when the matching rejected/blocked validation also exists.
+      return !(
+        payload.receiptId === candidate.receiptId &&
+        candidate.validationId &&
+        (candidate.validationOutcome === "rejected" || candidate.validationOutcome === "blocked") &&
+        (typeof payload.validationId !== "string" ||
+          payload.validationId === candidate.validationId)
+      );
+    });
     if (contradiction) {
       throw new Error(
-        `Delegation ledger corruption for assignment ${contradiction.assignmentId}: an initial receipt was created after terminal validation_rejected; operator action is required.`,
+        `Delegation ledger corruption for assignment ${contradiction.assignmentId}: an initial receipt contradicts terminal ${contradiction.kind}; operator action is required.`,
       );
     }
   }
@@ -3663,11 +3753,33 @@ export class DelegationLedger {
       };
       const acceptedCorrection = this.db
         .prepare(
-          `SELECT 1 FROM correction_uses c
+          `SELECT c.original_receipt_id AS originalReceiptId
+           FROM correction_uses c
            JOIN validations v ON v.receipt_id = c.corrected_receipt_id
            WHERE c.assignment_id = ? AND v.outcome = 'accepted' LIMIT 1`,
         )
-        .get(params.assignmentId);
+        .get(params.assignmentId) as { originalReceiptId: string } | undefined;
+      // A format correction supersedes only the rejection for its original
+      // receipt. Global or corrected-receipt rejection remains terminal.
+      const blockingValidationRejection = acceptedCorrection
+        ? (
+            this.db
+              .prepare(
+                `SELECT payload_json AS payloadJson FROM route_events
+                 WHERE assignment_id = ? AND kind = 'validation_rejected'`,
+              )
+              .all(params.assignmentId) as Array<{ payloadJson: string }>
+          ).some((row) => {
+            const payload = JSON.parse(row.payloadJson) as unknown;
+            return !(
+              payload &&
+              typeof payload === "object" &&
+              !Array.isArray(payload) &&
+              (payload as { receiptId?: unknown }).receiptId ===
+                acceptedCorrection.originalReceiptId
+            );
+          })
+        : false;
       if (
         toNumber(routeDecision.accepted) !== 1 ||
         toNumber(routeDecision.rejected) !== 0 ||
@@ -3677,6 +3789,9 @@ export class DelegationLedger {
         throw new Error(
           "Delegation completion requires one accepted route with no rejection or timeout.",
         );
+      }
+      if (blockingValidationRejection) {
+        return undefined;
       }
       if (assignment.purpose === "verification" && assignment.waveId) {
         for (const role of ["tester", "reviewer"] as const) {
@@ -4825,7 +4940,7 @@ export function openDelegationLedger(params: {
   try {
     ledger.assertActiveStack();
     if (existingEpoch) {
-      ledger.assertNoLateInitialReceiptsAfterValidationRejection();
+      ledger.assertNoContradictoryInitialReceiptsAfterTerminalRoute();
       ledger.reconcilePendingReceiptFinalizationAfterRestart();
       ledger.reconcileGatewayDispatchesAfterRestart();
       ledger.reconcileInterruptedInitialSpawnsAfterRestart();

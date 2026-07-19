@@ -49,6 +49,7 @@ import {
 } from "../subagent-control.js";
 import { markSubagentRunForFreshReroute } from "../subagent-registry-fresh-reroute.js";
 import { getLatestSubagentRunByChildSessionKey } from "../subagent-registry-read.js";
+  type AgentWaitResult,
 import type { SubagentRunRecord } from "../subagent-registry.types.js";
 import { persistSubagentResultReceiptForRunSync } from "../subagent-result-receipts.js";
 import { spawnSubagentDirect } from "../subagent-spawn.js";
@@ -56,6 +57,7 @@ import {
   describeSessionsSendTool,
   SESSIONS_SEND_TOOL_DISPLAY_SUMMARY,
 } from "../tool-description-presets.js";
+import { classifySubagentModelCompletion } from "../subagent-model-completion.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringParam } from "./common.js";
 import {
@@ -142,6 +144,25 @@ function readAssignmentKind(params: Record<string, unknown>): ChildRouteAssignme
   ) {
     return value;
   }
+
+export function resolveSessionsSendCompletionMetadata(result: AgentWaitResult): {
+  startedAt?: number;
+  endedAt?: number;
+  rawCompletionStopReason?: string;
+  modelCompletion?: "complete" | "truncated" | "unknown";
+} {
+  const rawCompletionStopReason = result.rawCompletionStopReason?.trim() || undefined;
+  return {
+    ...(typeof result.startedAt === "number" ? { startedAt: result.startedAt } : {}),
+    ...(typeof result.endedAt === "number" ? { endedAt: result.endedAt } : {}),
+    ...(rawCompletionStopReason
+      ? {
+          rawCompletionStopReason,
+          modelCompletion: classifySubagentModelCompletion(rawCompletionStopReason),
+        }
+      : {}),
+  };
+}
   return "implementation";
 }
 
@@ -528,7 +549,7 @@ function ensureFreshChildResultReceipt(params: {
   return { ok: true };
 }
 
-async function buildFreshChildRerouteResponse(params: {
+export async function buildFreshChildRerouteResponse(params: {
   marker: Extract<FreshChildRerouteMarker, { status: "accepted" }>;
   timeoutSeconds: number;
   timeoutMs: number;
@@ -545,7 +566,7 @@ async function buildFreshChildRerouteResponse(params: {
       reroute: params.marker.reroute,
     };
   }
-  const result = await waitForAgentRunAndReadUpdatedAssistantReply({
+  const result = await (params.waitForResult ?? waitForAgentRunAndReadUpdatedAssistantReply)({
     runId: params.marker.runId,
     sessionKey: params.marker.childSessionKey,
     timeoutMs: params.timeoutMs,
@@ -572,8 +593,10 @@ async function buildFreshChildRerouteResponse(params: {
       sessionKey: params.marker.childSessionKey,
       reroute: params.marker.reroute,
     };
+  waitForResult?: typeof waitForAgentRunAndReadUpdatedAssistantReply;
+  ensureResultReceipt?: typeof ensureFreshChildResultReceipt;
   }
-  const receipt = ensureFreshChildResultReceipt({
+  const receipt = (params.ensureResultReceipt ?? ensureFreshChildResultReceipt)({
     runId: params.marker.runId,
     childSessionKey: params.marker.childSessionKey,
     replyText: result.replyText,
@@ -591,11 +614,13 @@ async function buildFreshChildRerouteResponse(params: {
   return {
     runId: params.marker.runId,
     status: "ok",
+  const completionMetadata = resolveSessionsSendCompletionMetadata(result);
     reply: result.replyText,
     sessionKey: params.marker.childSessionKey,
     delivery: trackedDelivery,
     reroute: params.marker.reroute,
   };
+      ...completionMetadata,
 }
 
 function resolveTargetRouteSessionContext(params: {
@@ -608,6 +633,7 @@ function resolveTargetRouteSessionContext(params: {
 } {
   const agentId = resolveAgentIdFromSessionKey(params.sessionKey);
   const storePath = resolveStorePath(params.cfg.session?.store, { agentId });
+      ...completionMetadata,
   const entry = loadSessionStore(storePath, { skipCache: true })[params.sessionKey];
   return {
     provider: resolveChildRouteProviderContextFromSession({
@@ -623,6 +649,7 @@ function resolveTargetRouteSessionContext(params: {
 function buildSessionRuntimeReplay(entry: SessionEntry | undefined): {
   envelope: Pick<
     ChildHandoffRuntimeEnvelope,
+      ...completionMetadata,
     | "thinking"
     | "thinkingOverride"
     | "fastMode"
@@ -631,6 +658,7 @@ function buildSessionRuntimeReplay(entry: SessionEntry | undefined): {
     | "traceLevel"
     | "elevatedLevel"
     | "toolExecHost"
+    ...completionMetadata,
     | "execSecurity"
     | "execAskPolicy"
     | "execNode"
@@ -1643,3 +1671,11 @@ export const __testing = {
     freshChildReroutes.clear();
   },
 };
+        const completionMetadata = resolveSessionsSendCompletionMetadata(result);
+            ...completionMetadata,
+            ...completionMetadata,
+          ...completionMetadata,
+      const completionMetadata = resolveSessionsSendCompletionMetadata(result);
+          ...completionMetadata,
+          ...completionMetadata,
+        ...completionMetadata,

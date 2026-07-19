@@ -7,6 +7,7 @@ import type { SubagentRunRecord } from "./subagent-registry.types.js";
 import {
   applySubagentResultReceiptToRun,
   buildSubagentResultReceipt,
+  buildSubagentResultReceiptId,
   hydrateAgentInternalEventResultReceiptsFromRuns,
   persistSubagentResultReceiptForRun,
   resolveSubagentResultReceiptsPath,
@@ -172,6 +173,109 @@ describe("subagent result receipts", () => {
     }
   });
 
+  it("prefers exact persisted legacy bytes over a refreshed live run", async () => {
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    const tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-result-receipts-"));
+    process.env.OPENCLAW_STATE_DIR = tempStateDir;
+    try {
+      const childSessionKey = "agent:main:subagent:legacy-worker";
+      const childRunId = "run-legacy";
+      const originalText = "original persisted bytes";
+      const refreshedText = "refreshed live-run bytes";
+      const originalReceipt = buildSubagentResultReceipt({
+        childSessionKey,
+        childRunId,
+        resultText: originalText,
+        capturedAt: 250,
+      });
+      const legacyReceiptId = buildSubagentResultReceiptId({ childSessionKey, childRunId });
+      const receiptsPath = resolveSubagentResultReceiptsPath();
+      await fs.mkdir(path.dirname(receiptsPath), { recursive: true });
+      await fs.writeFile(
+        receiptsPath,
+        `${JSON.stringify(
+          {
+            version: 1,
+            receipts: {
+              [legacyReceiptId]: {
+                version: 1,
+                ...originalReceipt,
+                id: legacyReceiptId,
+                resultText: originalText,
+                observedAt: Date.now(),
+              },
+            },
+            runIndex: {
+              [`${childSessionKey}:${childRunId}`]: legacyReceiptId,
+            },
+          },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+      const refreshedReceipt = buildSubagentResultReceipt({
+        childSessionKey,
+        childRunId,
+        resultText: refreshedText,
+        capturedAt: 300,
+      });
+      const run: SubagentRunRecord = {
+        runId: childRunId,
+        childSessionKey,
+        requesterSessionKey: "agent:main:main",
+        requesterDisplayKey: "main",
+        task: "legacy worker task",
+        cleanup: "keep",
+        createdAt: 100,
+        endedAt: 200,
+        frozenResultText: refreshedText,
+        frozenResultCapturedAt: 300,
+        resultReceiptId: refreshedReceipt.id,
+        resultReceiptBytes: refreshedReceipt.bytes,
+        resultReceiptSha256: refreshedReceipt.sha256,
+      };
+      const events: AgentInternalEvent[] = [
+        {
+          type: "task_completion",
+          source: "subagent",
+          childSessionKey,
+          childSessionId: "session-legacy-worker",
+          announceType: "subagent task",
+          taskLabel: run.task,
+          status: "ok",
+          statusLabel: "completed successfully",
+          result: `Full child result is available in receipt ${legacyReceiptId}.`,
+          resultReceipt: { ...originalReceipt, id: legacyReceiptId },
+          replyInstruction: "Continue.",
+        },
+      ];
+
+      const hydrated = hydrateAgentInternalEventResultReceiptsFromRuns(
+        events,
+        new Map([[run.runId, run]]),
+      );
+
+      expect(hydrated?.[0]).toMatchObject({
+        result: originalText,
+        resultReceipt: {
+          id: legacyReceiptId,
+          bytes: Buffer.byteLength(originalText, "utf8"),
+          sha256: originalReceipt.sha256,
+          hydrated: true,
+        },
+      });
+      expect(hydrated?.[0]?.result).not.toBe(refreshedText);
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      await fs.rm(tempStateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
   it("keeps multiple durable receipts written through the shared locked path", async () => {
     const previousStateDir = process.env.OPENCLAW_STATE_DIR;
     const tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-result-receipts-"));
@@ -255,6 +359,54 @@ describe("subagent result receipts", () => {
         "durable child output a",
         "durable child output b",
       ]);
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      await fs.rm(tempStateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("keeps refreshed revisions append-only for the same child run", async () => {
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    const tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-result-receipts-"));
+    process.env.OPENCLAW_STATE_DIR = tempStateDir;
+    try {
+      const run: SubagentRunRecord = {
+        runId: "run-revisioned",
+        childSessionKey: "agent:main:subagent:worker",
+        requesterSessionKey: "agent:main:main",
+        requesterDisplayKey: "main",
+        task: "worker task",
+        cleanup: "keep",
+        createdAt: 100,
+        endedAt: 200,
+        outcome: { status: "ok" },
+        frozenResultText: "first frozen result",
+        frozenResultCapturedAt: 250,
+      };
+      const first = await persistSubagentResultReceiptForRun(run);
+      if (!first.ok) {
+        throw new Error(first.error);
+      }
+
+      run.frozenResultText = "refreshed frozen result";
+      run.frozenResultCapturedAt = 300;
+      const second = await persistSubagentResultReceiptForRun(run);
+      if (!second.ok) {
+        throw new Error(second.error);
+      }
+
+      expect(second.receipt.id).not.toBe(first.receipt.id);
+      const persistedStore = JSON.parse(
+        await fs.readFile(resolveSubagentResultReceiptsPath(), "utf8"),
+      ) as { receipts: Record<string, { resultText: string }> };
+      expect(persistedStore.receipts[first.receipt.id]?.resultText).toBe("first frozen result");
+      expect(persistedStore.receipts[second.receipt.id]?.resultText).toBe(
+        "refreshed frozen result",
+      );
     } finally {
       if (previousStateDir === undefined) {
         delete process.env.OPENCLAW_STATE_DIR;

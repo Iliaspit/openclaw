@@ -567,7 +567,34 @@ export function createDelegationGuardTool(opts: {
               semanticDigest: receipt.semanticDigest,
             });
           }
+          const terminalRejection = runtime.ledger.latestValidationRejectedRouteForAssignment(
+            assignmentId,
+            receipt?.receiptId,
+          );
           if (receipt) {
+            const payload =
+              terminalRejection?.payload && typeof terminalRejection.payload === "object"
+                ? (terminalRejection.payload as {
+                    code?: unknown;
+                    receiptId?: unknown;
+                    runId?: unknown;
+                  })
+                : undefined;
+            if (terminalRejection) {
+              return jsonResult({
+                status: "completion_rejected",
+                action,
+                assignmentId,
+                errorCode: "terminal_validation_rejected",
+                message: "The worker route ended without a valid protected terminal completion.",
+                eventId: terminalRejection.eventId,
+                receiptId: receipt.receiptId,
+                semanticDigest: receipt.semanticDigest,
+                ...(typeof payload?.code === "string" ? { code: payload.code } : {}),
+                ...(typeof payload?.runId === "string" ? { runId: payload.runId } : {}),
+                createdAt: terminalRejection.createdAt,
+              });
+            }
             return jsonResult({
               status: "awaiting_terminal_receipt",
               action,
@@ -589,6 +616,23 @@ export function createDelegationGuardTool(opts: {
               semanticDigest: rejectedReceipt.semanticDigest,
               outcome: rejectedReceipt.outcome,
               issueCodes: rejectedReceipt.issues.map((issue) => issue.code),
+            });
+          }
+          if (terminalRejection) {
+            const payload =
+              terminalRejection.payload && typeof terminalRejection.payload === "object"
+                ? (terminalRejection.payload as { code?: unknown; runId?: unknown })
+                : undefined;
+            return jsonResult({
+              status: "completion_rejected",
+              action,
+              assignmentId,
+              errorCode: "terminal_validation_rejected",
+              message: "The worker route ended without a valid protected terminal completion.",
+              eventId: terminalRejection.eventId,
+              ...(typeof payload?.code === "string" ? { code: payload.code } : {}),
+              ...(typeof payload?.runId === "string" ? { runId: payload.runId } : {}),
+              createdAt: terminalRejection.createdAt,
             });
           }
           const preReceipt = runtime.ledger.latestPreReceiptReportRejection(assignmentId);
