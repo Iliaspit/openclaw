@@ -526,3 +526,8 @@ Consult this before investigating a new issue or making a related change.
    - **Issue:** The fresh-child `sessions_send` path resolved timing and raw stop-reason metadata after waiting, but omitted it when post-wait result-receipt persistence failed.
    - **Fix and why:** The receipt-failure response now spreads the same completion metadata as success, timeout, and agent-error responses.
    - **Result:** Parents retain terminal timing and truncation classification across every waited fresh-child result shape.
+
+6. **Correction supersession and restart checks needed durable event identity and order**
+   - **Issue:** An accepted format correction still masked a later rejection that named the original receipt, and equal-millisecond receipt/rejection rows could make a valid post-report rejection look like historical corruption on reopen.
+   - **Fix and why:** Supersession now requires both the original receipt ID and its unique validation ID. SQLite triggers also record append-only receipt/route insertion order, with a one-time deterministic backfill for existing ledgers, so restart checks use causality instead of timestamps.
+   - **Result:** Later original-ID, global, and corrected-receipt rejections remain terminal, while valid equal-time post-report rejection evidence reopens deterministically and true route-before-receipt history stays fail-closed.

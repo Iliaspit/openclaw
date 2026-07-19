@@ -123,6 +123,25 @@ function toNumber(value: number | bigint | null | undefined): number {
   return typeof value === "bigint" ? Number(value) : value;
 }
 
+type SupersededRejectedValidation = {
+  originalReceiptId: string;
+  originalValidationId: string;
+};
+
+function isSupersededRejectedValidationRoute(
+  payload: unknown,
+  superseded: SupersededRejectedValidation | undefined,
+): boolean {
+  return Boolean(
+    superseded &&
+    payload &&
+    typeof payload === "object" &&
+    !Array.isArray(payload) &&
+    (payload as { receiptId?: unknown }).receiptId === superseded.originalReceiptId &&
+    (payload as { validationId?: unknown }).validationId === superseded.originalValidationId,
+  );
+}
+
 function assignmentFromRow(row: AssignmentRow): DelegationAssignmentRecord {
   return {
     assignmentId: row.assignment_id,
@@ -420,6 +439,17 @@ function ensureSchema(db: DatabaseSync) {
       semantic_digest TEXT NOT NULL,
       created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS ledger_schema_migrations (
+      migration_id TEXT PRIMARY KEY
+    );
+    CREATE TABLE IF NOT EXISTS ledger_record_appends (
+      append_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      assignment_id TEXT NOT NULL REFERENCES assignments(assignment_id),
+      record_kind TEXT NOT NULL CHECK(record_kind IN ('receipt', 'route_event')),
+      record_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(record_kind, record_id)
+    );
     CREATE INDEX IF NOT EXISTS idx_delegation_candidates_slice ON candidates(slice_id);
     CREATE INDEX IF NOT EXISTS idx_delegation_waves_candidate ON waves(candidate_id);
     CREATE INDEX IF NOT EXISTS idx_delegation_assignments_wave ON assignments(wave_id);
@@ -436,6 +466,68 @@ function ensureSchema(db: DatabaseSync) {
       ON validations(receipt_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_delegation_gateway_dispatch_route_token
       ON gateway_dispatch_capabilities(route_token_hash);
+    CREATE INDEX IF NOT EXISTS idx_delegation_record_appends_assignment
+      ON ledger_record_appends(assignment_id, append_sequence);
+  `);
+  const causalOrderMigrationId = "receipt-route-causal-order-v1";
+  const causalOrderMigrated = db
+    .prepare(`SELECT 1 FROM ledger_schema_migrations WHERE migration_id = ?`)
+    .get(causalOrderMigrationId);
+  if (!causalOrderMigrated) {
+    db.exec("BEGIN IMMEDIATE;");
+    try {
+      // Older ledgers lack cross-table insertion order. Preserve every
+      // unambiguous transition and place equal-time validation events after
+      // receipts, matching the only order accepted by the public append API.
+      db.exec(`
+        INSERT INTO ledger_record_appends
+          (assignment_id, record_kind, record_id, created_at)
+        SELECT assignment_id, record_kind, record_id, created_at
+        FROM (
+          SELECT r.assignment_id AS assignment_id,
+                 'receipt' AS record_kind,
+                 r.receipt_id AS record_id,
+                 r.created_at AS created_at,
+                 1 AS tie_rank
+          FROM receipts r
+          UNION ALL
+          SELECT e.assignment_id AS assignment_id,
+                 'route_event' AS record_kind,
+                 e.event_id AS record_id,
+                 e.created_at AS created_at,
+                 CASE e.kind
+                   WHEN 'validation_rejected' THEN 2
+                   WHEN 'completed' THEN 3
+                   ELSE 0
+                 END AS tie_rank
+          FROM route_events e
+        )
+        ORDER BY created_at, tie_rank, record_kind, record_id;
+      `);
+      db.prepare(`INSERT INTO ledger_schema_migrations (migration_id) VALUES (?)`).run(
+        causalOrderMigrationId,
+      );
+      db.exec("COMMIT;");
+    } catch (error) {
+      db.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS receipts_record_append_order
+    AFTER INSERT ON receipts
+    BEGIN
+      INSERT INTO ledger_record_appends
+        (assignment_id, record_kind, record_id, created_at)
+      VALUES (NEW.assignment_id, 'receipt', NEW.receipt_id, NEW.created_at);
+    END;
+    CREATE TRIGGER IF NOT EXISTS route_events_record_append_order
+    AFTER INSERT ON route_events
+    BEGIN
+      INSERT INTO ledger_record_appends
+        (assignment_id, record_kind, record_id, created_at)
+      VALUES (NEW.assignment_id, 'route_event', NEW.event_id, NEW.created_at);
+    END;
   `);
   installAppendOnlyTriggers(db, [
     "epoch_events",
@@ -462,6 +554,8 @@ function ensureSchema(db: DatabaseSync) {
     "terminal_receipts",
     "remediation_revisions",
     "correction_uses",
+    "ledger_schema_migrations",
+    "ledger_record_appends",
   ]);
 }
 
@@ -3260,12 +3354,19 @@ export class DelegationLedger {
     const supersededOriginal = acceptedReceiptId
       ? (this.db
           .prepare(
-            `SELECT original_receipt_id AS originalReceiptId
-             FROM correction_uses
-             WHERE assignment_id = ? AND corrected_receipt_id = ?
+            `SELECT c.original_receipt_id AS originalReceiptId,
+                    original_validation.validation_id AS originalValidationId
+             FROM correction_uses c
+             JOIN validations original_validation
+               ON original_validation.receipt_id = c.original_receipt_id
+             JOIN validations corrected_validation
+               ON corrected_validation.receipt_id = c.corrected_receipt_id
+             WHERE c.assignment_id = ? AND c.corrected_receipt_id = ?
+               AND original_validation.outcome IN ('rejected', 'blocked')
+               AND corrected_validation.outcome = 'accepted'
              LIMIT 1`,
           )
-          .get(assignmentId, acceptedReceiptId) as { originalReceiptId: string } | undefined)
+          .get(assignmentId, acceptedReceiptId) as SupersededRejectedValidation | undefined)
       : undefined;
     // route_events is append-only, so rowid is its insertion sequence and
     // resolves same-millisecond events without UUID-dependent ordering.
@@ -3283,13 +3384,7 @@ export class DelegationLedger {
     }>;
     for (const row of rows) {
       const payload = JSON.parse(row.payloadJson) as unknown;
-      if (
-        supersededOriginal &&
-        payload &&
-        typeof payload === "object" &&
-        !Array.isArray(payload) &&
-        (payload as { receiptId?: unknown }).receiptId === supersededOriginal.originalReceiptId
-      ) {
+      if (isSupersededRejectedValidationRoute(payload, supersededOriginal)) {
         continue;
       }
       return {
@@ -3464,54 +3559,61 @@ export class DelegationLedger {
   }
 
   assertNoContradictoryInitialReceiptsAfterTerminalRoute(): void {
+    const missingOrder = this.db
+      .prepare(
+        `SELECT r.assignment_id AS assignmentId, 'receipt' AS recordKind
+         FROM receipts r
+         LEFT JOIN ledger_record_appends o
+           ON o.assignment_id = r.assignment_id
+          AND o.record_kind = 'receipt'
+          AND o.record_id = r.receipt_id
+         WHERE o.record_id IS NULL
+         UNION ALL
+         SELECT e.assignment_id AS assignmentId, 'route_event' AS recordKind
+         FROM route_events e
+         LEFT JOIN ledger_record_appends o
+           ON o.assignment_id = e.assignment_id
+          AND o.record_kind = 'route_event'
+          AND o.record_id = e.event_id
+         WHERE o.record_id IS NULL
+         LIMIT 1`,
+      )
+      .get() as { assignmentId: string; recordKind: "receipt" | "route_event" } | undefined;
+    if (missingOrder) {
+      throw new Error(
+        `Delegation ledger corruption for assignment ${missingOrder.assignmentId}: an initial receipt or terminal route lacks append-order evidence; operator action is required.`,
+      );
+    }
     const candidates = this.db
       .prepare(
         `SELECT r.assignment_id AS assignmentId, r.receipt_id AS receiptId,
-                e.kind, e.payload_json AS payloadJson,
-                r.created_at AS receiptCreatedAt, e.created_at AS routeCreatedAt,
-                v.validation_id AS validationId, v.outcome AS validationOutcome
+                e.kind
          FROM receipts r
          JOIN route_events e ON e.assignment_id = r.assignment_id
-         LEFT JOIN validations v ON v.receipt_id = r.receipt_id
+         JOIN ledger_record_appends receipt_order
+           ON receipt_order.assignment_id = r.assignment_id
+          AND receipt_order.record_kind = 'receipt'
+          AND receipt_order.record_id = r.receipt_id
+         JOIN ledger_record_appends route_order
+           ON route_order.assignment_id = e.assignment_id
+          AND route_order.record_kind = 'route_event'
+          AND route_order.record_id = e.event_id
          WHERE r.correction_of IS NULL
            AND (
              e.kind IN ('route_rejected', 'timeout')
-             OR (e.kind = 'validation_rejected' AND r.created_at >= e.created_at)
+             OR (
+               e.kind = 'validation_rejected'
+               AND receipt_order.append_sequence > route_order.append_sequence
+             )
            )
-         ORDER BY r.assignment_id, e.created_at, e.event_id`,
+         ORDER BY r.assignment_id, route_order.append_sequence`,
       )
       .all() as Array<{
       assignmentId: string;
       receiptId: string;
       kind: "route_rejected" | "validation_rejected" | "timeout";
-      payloadJson: string;
-      receiptCreatedAt: number | bigint;
-      routeCreatedAt: number | bigint;
-      validationId: string | null;
-      validationOutcome: DelegationValidationOutcome | null;
     }>;
-    const contradiction = candidates.find((candidate) => {
-      if (candidate.kind !== "validation_rejected") {
-        return true;
-      }
-      if (toNumber(candidate.receiptCreatedAt) > toNumber(candidate.routeCreatedAt)) {
-        return true;
-      }
-      const payload = JSON.parse(candidate.payloadJson) as {
-        receiptId?: unknown;
-        validationId?: unknown;
-      };
-      // Report validation rejection is allowed to reference the receipt it
-      // validated, including when both writes share one millisecond timestamp,
-      // but only when the matching rejected/blocked validation also exists.
-      return !(
-        payload.receiptId === candidate.receiptId &&
-        candidate.validationId &&
-        (candidate.validationOutcome === "rejected" || candidate.validationOutcome === "blocked") &&
-        (typeof payload.validationId !== "string" ||
-          payload.validationId === candidate.validationId)
-      );
-    });
+    const contradiction = candidates[0];
     if (contradiction) {
       throw new Error(
         `Delegation ledger corruption for assignment ${contradiction.assignmentId}: an initial receipt contradicts terminal ${contradiction.kind}; operator action is required.`,
@@ -3753,12 +3855,19 @@ export class DelegationLedger {
       };
       const acceptedCorrection = this.db
         .prepare(
-          `SELECT c.original_receipt_id AS originalReceiptId
+          `SELECT c.original_receipt_id AS originalReceiptId,
+                  original_validation.validation_id AS originalValidationId
            FROM correction_uses c
-           JOIN validations v ON v.receipt_id = c.corrected_receipt_id
-           WHERE c.assignment_id = ? AND v.outcome = 'accepted' LIMIT 1`,
+           JOIN validations corrected_validation
+             ON corrected_validation.receipt_id = c.corrected_receipt_id
+           JOIN validations original_validation
+             ON original_validation.receipt_id = c.original_receipt_id
+           WHERE c.assignment_id = ?
+             AND corrected_validation.outcome = 'accepted'
+             AND original_validation.outcome IN ('rejected', 'blocked')
+           LIMIT 1`,
         )
-        .get(params.assignmentId) as { originalReceiptId: string } | undefined;
+        .get(params.assignmentId) as SupersededRejectedValidation | undefined;
       // A format correction supersedes only the rejection for its original
       // receipt. Global or corrected-receipt rejection remains terminal.
       const blockingValidationRejection = acceptedCorrection
@@ -3771,13 +3880,7 @@ export class DelegationLedger {
               .all(params.assignmentId) as Array<{ payloadJson: string }>
           ).some((row) => {
             const payload = JSON.parse(row.payloadJson) as unknown;
-            return !(
-              payload &&
-              typeof payload === "object" &&
-              !Array.isArray(payload) &&
-              (payload as { receiptId?: unknown }).receiptId ===
-                acceptedCorrection.originalReceiptId
-            );
+            return !isSupersededRejectedValidationRoute(payload, acceptedCorrection);
           })
         : false;
       if (

@@ -1756,6 +1756,102 @@ describe("protected delegation ledger integrity", () => {
     }
   });
 
+  it("allows an equal-time post-report terminal rejection to survive reopen", async () => {
+    const fixture = createLedgerFixture();
+    const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+    startAssignment({ fixture, ...issued });
+    const accepted = fixture.ledger.appendValidatedReceipt({
+      assignmentId: issued.assignment.assignmentId,
+      report: makeCompleteReport({ assigned: issued.assignment.scopeUnits }),
+      outcome: "accepted",
+      createdAt: 1_000,
+    });
+    fixture.ledger.appendRouteEvent({
+      assignmentId: issued.assignment.assignmentId,
+      kind: "validation_rejected",
+      payload: { code: "run-timeout-after-report", receiptId: accepted.receiptId },
+      createdAt: 1_000,
+    });
+    closeLedgerForTest(fixture.ledger);
+
+    vi.resetModules();
+    const restartedModule = await import("./ledger.js");
+    const restarted = restartedModule.openDelegationLedger({
+      guard: fixture.guard,
+      policyDigest: fixture.policyDigest,
+      stateDir: fixture.stateDir,
+      reconcileGatewayTask: reconcileNoTestGatewayTask,
+    });
+    try {
+      expect(
+        restarted.latestValidationRejectedRouteForAssignment(
+          issued.assignment.assignmentId,
+          accepted.receiptId,
+        ),
+      ).toMatchObject({
+        payload: { code: "run-timeout-after-report", receiptId: accepted.receiptId },
+        createdAt: 1_000,
+      });
+    } finally {
+      closeLedgerForTest(restarted);
+      fixture.close();
+    }
+  });
+
+  it("backfills append order for a legacy equal-time post-report rejection", async () => {
+    const fixture = createLedgerFixture();
+    const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+    startAssignment({ fixture, ...issued });
+    const accepted = fixture.ledger.appendValidatedReceipt({
+      assignmentId: issued.assignment.assignmentId,
+      report: makeCompleteReport({ assigned: issued.assignment.scopeUnits }),
+      outcome: "accepted",
+      createdAt: 1_000,
+    });
+    const terminalEventId = fixture.ledger.appendRouteEvent({
+      assignmentId: issued.assignment.assignmentId,
+      kind: "validation_rejected",
+      payload: { code: "run-timeout-after-report", receiptId: accepted.receiptId },
+      createdAt: 1_000,
+    });
+    unsafeDatabaseForTest(fixture.ledger).exec(`
+      DROP TRIGGER receipts_record_append_order;
+      DROP TRIGGER route_events_record_append_order;
+      DROP TABLE ledger_record_appends;
+      DROP TABLE ledger_schema_migrations;
+    `);
+    closeLedgerForTest(fixture.ledger);
+
+    vi.resetModules();
+    const restartedModule = await import("./ledger.js");
+    const restarted = restartedModule.openDelegationLedger({
+      guard: fixture.guard,
+      policyDigest: fixture.policyDigest,
+      stateDir: fixture.stateDir,
+      reconcileGatewayTask: reconcileNoTestGatewayTask,
+    });
+    try {
+      const ordered = unsafeDatabaseForTest(restarted)
+        .prepare(
+          `SELECT record_kind AS recordKind, record_id AS recordId
+           FROM ledger_record_appends
+           WHERE assignment_id = ? AND record_id IN (?, ?)
+           ORDER BY append_sequence`,
+        )
+        .all(issued.assignment.assignmentId, accepted.receiptId, terminalEventId) as Array<{
+        recordKind: string;
+        recordId: string;
+      }>;
+      expect(ordered).toEqual([
+        { recordKind: "receipt", recordId: accepted.receiptId },
+        { recordKind: "route_event", recordId: terminalEventId },
+      ]);
+    } finally {
+      closeLedgerForTest(restarted);
+      fixture.close();
+    }
+  });
+
   it("allows exactly one semantic-preserving format correction and resumes it", () => {
     const fixture = createLedgerFixture();
     try {
@@ -1832,7 +1928,11 @@ describe("protected delegation ledger integrity", () => {
       fixture.ledger.appendRouteEvent({
         assignmentId: issued.assignment.assignmentId,
         kind: "validation_rejected",
-        payload: { receiptId: rejected.receiptId, correction: false },
+        payload: {
+          receiptId: rejected.receiptId,
+          validationId: rejected.validationId,
+          correction: false,
+        },
       });
       expect(fixture.ledger.getValidationForReceipt(rejected.receiptId)).toMatchObject({
         validationId: rejected.validationId,
@@ -1918,7 +2018,11 @@ describe("protected delegation ledger integrity", () => {
       fixture.ledger.appendRouteEvent({
         assignmentId: issued.assignment.assignmentId,
         kind: "validation_rejected",
-        payload: { receiptId: rejected.receiptId, correction: false },
+        payload: {
+          receiptId: rejected.receiptId,
+          validationId: rejected.validationId,
+          correction: false,
+        },
       });
       fixture.ledger.recordGatewayDispatchExecutionCompleted({
         capability: dispatch.capability,
@@ -1965,15 +2069,22 @@ describe("protected delegation ledger integrity", () => {
   it.each([
     {
       name: "a global post-report rejection",
-      rejectionPayload: (_correctedReceiptId: string) => ({
+      rejectionPayload: (_correctedReceiptId: string, _originalReceiptId: string) => ({
         code: "run-timeout-after-report",
       }),
     },
     {
       name: "a rejection targeting the corrected receipt",
-      rejectionPayload: (correctedReceiptId: string) => ({
+      rejectionPayload: (correctedReceiptId: string, _originalReceiptId: string) => ({
         receiptId: correctedReceiptId,
         code: "corrected-receipt-terminal-rejection",
+      }),
+    },
+    {
+      name: "a later rejection naming the original receipt without its validation identity",
+      rejectionPayload: (_correctedReceiptId: string, originalReceiptId: string) => ({
+        receiptId: originalReceiptId,
+        code: "run-timeout-after-correction",
       }),
     },
   ])("keeps $name authoritative across a late result and reopen", async ({ rejectionPayload }) => {
@@ -2022,7 +2133,7 @@ describe("protected delegation ledger integrity", () => {
       outcome: "accepted",
       createdAt: 1_001,
     });
-    const terminalRejectionPayload = rejectionPayload(correctedReceiptId);
+    const terminalRejectionPayload = rejectionPayload(correctedReceiptId, rejected.receiptId);
     fixture.ledger.appendRouteEvent({
       assignmentId: issued.assignment.assignmentId,
       kind: "validation_rejected",
@@ -2137,7 +2248,11 @@ describe("protected delegation ledger integrity", () => {
       insertRouteEvent.run(
         "route-event_z-superseded",
         issued.assignment.assignmentId,
-        JSON.stringify({ code: "format", receiptId: rejected.receiptId }),
+        JSON.stringify({
+          code: "format",
+          receiptId: rejected.receiptId,
+          validationId: rejected.validationId,
+        }),
         2_000,
       );
 
