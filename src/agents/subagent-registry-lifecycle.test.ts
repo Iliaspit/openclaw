@@ -241,6 +241,130 @@ describe("subagent registry lifecycle hardening", () => {
     );
   });
 
+  it("downgrades successful completion-message children with no visible final reply", async () => {
+    const entry = createRunEntry({
+      expectsCompletionMessage: true,
+    });
+    const captureSubagentCompletionReply = vi.fn(async () => undefined);
+    const recordSubagentSliceTerminalOutcome = vi.fn(() => true);
+    const controller = createLifecycleController({
+      entry,
+      captureSubagentCompletionReply,
+      recordSubagentSliceTerminalOutcome,
+    });
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: false,
+    });
+
+    expect(captureSubagentCompletionReply).toHaveBeenCalledWith(entry.childSessionKey, {
+      waitForReply: true,
+      outcome: { status: "ok" },
+      requireAssistantReply: true,
+    });
+    expect(entry.frozenResultText).toBeNull();
+    expect(entry.outcome).toMatchObject({
+      status: "error",
+      error: expect.stringContaining("visible final assistant reply"),
+    });
+    expect(entry.endedReason).toBe(SUBAGENT_ENDED_REASON_ERROR);
+    expect(entry.resultReceiptId).toBeUndefined();
+    expect(recordSubagentSliceTerminalOutcome).toHaveBeenCalledWith({
+      entry,
+      endedAt: 4_000,
+      evidenceGapKind: "no_visible_final",
+    });
+    expect(taskExecutorMocks.failTaskRunByRunId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: entry.runId,
+        status: "failed",
+        endedAt: 4_000,
+      }),
+    );
+    expect(taskExecutorMocks.completeTaskRunByRunId).not.toHaveBeenCalled();
+    expect(routeHealthMocks.recordChildRouteHealthEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: "agent_lifecycle_error",
+        status: "active",
+        source: "subagent_terminal",
+        childSessionKey: entry.childSessionKey,
+        runId: entry.runId,
+        requesterSessionKey: entry.requesterSessionKey,
+        observedAt: 4_000,
+      }),
+    );
+  });
+
+  it("keeps successful completion-message children when a visible final reply exists", async () => {
+    const entry = createRunEntry({
+      expectsCompletionMessage: true,
+    });
+    const controller = createLifecycleController({
+      entry,
+      captureSubagentCompletionReply: vi.fn(async () => "final completion reply"),
+    });
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: false,
+    });
+
+    expect(entry.outcome).toEqual({ status: "ok" });
+    expect(entry.frozenResultText).toBe("final completion reply");
+    expect(entry.resultReceiptId).toMatch(/^scr_/);
+    expect(entry.resultReceiptBytes).toBe(Buffer.byteLength("final completion reply", "utf8"));
+    expect(taskExecutorMocks.completeTaskRunByRunId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: entry.runId,
+        endedAt: 4_000,
+      }),
+    );
+    expect(taskExecutorMocks.failTaskRunByRunId).not.toHaveBeenCalled();
+  });
+
+  it("persists terminal child timing when route-health recording throws", async () => {
+    const persist = vi.fn();
+    const warn = vi.fn();
+    const entry = createRunEntry();
+    routeHealthMocks.recordChildRouteHealthEvent.mockRejectedValueOnce(
+      new Error("route store boom"),
+    );
+    const controller = createLifecycleController({ entry, persist, warn });
+
+    await expect(
+      controller.completeSubagentRun({
+        runId: entry.runId,
+        endedAt: 4_000,
+        outcome: { status: "error", error: "gateway closed (1012): service restart" },
+        reason: SUBAGENT_ENDED_REASON_ERROR,
+        triggerCleanup: false,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(helperMocks.persistSubagentSessionTiming).toHaveBeenCalledTimes(1);
+    expect(taskExecutorMocks.failTaskRunByRunId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: entry.runId,
+        status: "failed",
+        endedAt: 4_000,
+      }),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      "failed to record subagent route-health terminal state",
+      expect.objectContaining({
+        error: { name: "Error", message: "route store boom" },
+        outcomeStatus: "error",
+      }),
+    );
+  });
+
   it("does not reject completion when task finalization throws", async () => {
     const persist = vi.fn();
     const warn = vi.fn();
@@ -376,6 +500,7 @@ describe("subagent registry lifecycle hardening", () => {
 
     expect(captureSubagentCompletionReply).toHaveBeenCalledWith(entry.childSessionKey, {
       waitForReply: false,
+      outcome: { status: "ok" },
     });
   });
 

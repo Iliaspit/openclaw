@@ -1,6 +1,6 @@
 import { updateSessionStoreEntry, type SessionEntry } from "../config/sessions.js";
 import type { AgentEventPayload } from "../infra/agent-events.js";
-import { loadSessionEntry } from "./session-utils.js";
+import { loadSessionEntry, sessionTranscriptHasAssistantMessage } from "./session-utils.js";
 import type { GatewaySessionRow, SessionRunStatus } from "./session-utils.types.js";
 
 type LifecyclePhase = "start" | "end" | "error";
@@ -22,7 +22,14 @@ type LifecycleSessionShape = Pick<
 
 type PersistedLifecycleSessionShape = Pick<
   SessionEntry,
-  "updatedAt" | "status" | "startedAt" | "endedAt" | "runtimeMs" | "abortedLastRun"
+  | "updatedAt"
+  | "status"
+  | "startedAt"
+  | "endedAt"
+  | "runtimeMs"
+  | "abortedLastRun"
+  | "systemSent"
+  | "systemPromptReport"
 >;
 
 export type GatewaySessionLifecycleSnapshot = Partial<LifecycleSessionShape>;
@@ -132,7 +139,33 @@ export function deriveGatewaySessionLifecycleSnapshot(params: {
 export function derivePersistedSessionLifecyclePatch(params: {
   entry?: Partial<PersistedLifecycleSessionShape> | null;
   event: LifecycleEventLike;
+  hasAssistantTranscript?: boolean;
 }): Partial<PersistedLifecycleSessionShape> {
+  const terminalStatus = resolveTerminalStatus(params.event);
+  if (
+    resolveLifecyclePhase(params.event) === "end" &&
+    terminalStatus === "done" &&
+    params.hasAssistantTranscript === false
+  ) {
+    const failedEvent: LifecycleEventLike = {
+      ...params.event,
+      data: {
+        ...params.event.data,
+        phase: "error",
+      },
+    };
+    const snapshot = deriveGatewaySessionLifecycleSnapshot({
+      session: params.entry ?? undefined,
+      event: failedEvent,
+    });
+    return {
+      ...snapshot,
+      updatedAt: typeof snapshot.updatedAt === "number" ? snapshot.updatedAt : undefined,
+      systemSent: false,
+      systemPromptReport: undefined,
+    };
+  }
+
   const snapshot = deriveGatewaySessionLifecycleSnapshot({
     session: params.entry ?? undefined,
     event: params.event,
@@ -164,6 +197,14 @@ export async function persistGatewaySessionLifecycleEvent(params: {
       derivePersistedSessionLifecyclePatch({
         entry,
         event: params.event,
+        hasAssistantTranscript:
+          phase === "end" && resolveTerminalStatus(params.event) === "done"
+            ? sessionTranscriptHasAssistantMessage(
+                entry.sessionId,
+                sessionEntry.storePath,
+                entry.sessionFile,
+              )
+            : undefined,
       }),
   });
 }

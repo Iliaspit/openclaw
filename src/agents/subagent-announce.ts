@@ -317,10 +317,7 @@ export async function runSubagentAnnounceFlow(params: {
       ) {
         return true;
       }
-      if (
-        subagentRegistryRuntime.shouldIgnorePostCompletionAnnounceForRun?.(params.childRunId) ===
-        true
-      ) {
+      if (subagentRegistryRuntime.shouldIgnorePostCompletionAnnounceForRun?.(params.childRunId)) {
         return true;
       }
       if (
@@ -488,7 +485,10 @@ export async function runSubagentAnnounceFlow(params: {
     const announceSessionId = childSessionId || "unknown";
     const findings = childCompletionFindings || reply || "(no output)";
     const resultReceipt =
-      announceType !== "cron job" && !childCompletionFindings && findings.trim() !== "(no output)"
+      outcome.status === "ok" &&
+      announceType !== "cron job" &&
+      !childCompletionFindings &&
+      findings.trim() !== "(no output)"
         ? buildSubagentResultReceipt({
             childSessionKey: params.childSessionKey,
             childRunId: params.childRunId,

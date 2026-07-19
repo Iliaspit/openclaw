@@ -141,6 +141,11 @@ export async function loadSubagentSpawnModuleForTest(params: {
   resolveParentForkMaxTokensMock?: MockFn;
   pruneLegacyStoreKeysMock?: MockFn;
   registerSubagentRunMock?: MockFn;
+  registerPendingSubagentTaskRunMock?: MockFn;
+  failPendingSubagentTaskRunMock?: MockFn;
+  findTaskRunByExactScopeMock?: MockFn;
+  assessSubagentSliceBudgetForSpawnMock?: MockFn;
+  recordSubagentSliceRouteHealthUnavailableForSpawnMock?: MockFn;
   emitSessionLifecycleEventMock?: MockFn;
   hookRunner?: HookRunner;
   resolveAgentConfig?: (cfg: Record<string, unknown>, agentId: string) => unknown;
@@ -257,11 +262,33 @@ export async function loadSubagentSpawnModuleForTest(params: {
   }));
 
   vi.doMock("./subagent-registry.js", () => ({
-    assessSubagentSliceBudgetForSpawn: () => ({ ok: true, sliceKey: "test-slice" }),
+    assessSubagentSliceBudgetForSpawn:
+      params.assessSubagentSliceBudgetForSpawnMock ??
+      vi.fn((_record: Record<string, unknown>) => ({ ok: true, sliceKey: "test-slice" })),
     countActiveRunsForSession: params.countActiveRunsForSession ?? (() => 0),
+    registerPendingSubagentTaskRun:
+      params.registerPendingSubagentTaskRunMock ??
+      vi.fn((_record: Record<string, unknown>) => undefined),
+    failPendingSubagentTaskRun:
+      params.failPendingSubagentTaskRunMock ??
+      vi.fn((_record: Record<string, unknown>) => undefined),
+    recordSubagentSliceRouteHealthUnavailableForSpawn:
+      params.recordSubagentSliceRouteHealthUnavailableForSpawnMock ??
+      vi.fn((_record: Record<string, unknown>) => ({ ok: true, sliceKey: "test-slice" })),
     registerSubagentRun:
       params.registerSubagentRunMock ?? vi.fn((_record: Record<string, unknown>) => undefined),
     resetSubagentRegistryForTests,
+  }));
+  vi.doMock("../tasks/task-executor.js", () => ({
+    findTaskRunByExactScope:
+      params.findTaskRunByExactScopeMock ??
+      vi.fn((record: { runId: string; childSessionKey: string }) => ({
+        taskId: `task-${record.runId}`,
+        runId: record.runId,
+        runtime: "subagent",
+        childSessionKey: record.childSessionKey,
+        status: "failed",
+      })),
   }));
 
   const subagentSpawnModule = await import("./subagent-spawn.js");

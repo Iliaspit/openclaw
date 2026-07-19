@@ -2,8 +2,24 @@ import fs from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   recordChildRouteHealthEvent,
+  registerChildRoutePendingSpawn,
   resetChildRouteHealthForTest,
 } from "../../agents/child-route-health.js";
+import {
+  createLedgerFixture,
+  issueAssignment,
+  makeCompleteReport,
+  TEST_CONTROLLER,
+  unsafeDatabaseForTest,
+} from "../../agents/delegation/ledger.test-helpers.js";
+import {
+  appendDelegationRouteEvent,
+  authorizeDelegationRoute,
+  bindDelegationRoute,
+  issueDelegationGatewayDispatch,
+  resolveDelegationRuntime,
+} from "../../agents/delegation/runtime.js";
+import { createDelegationGuardTestConfig } from "../../agents/delegation/test-helpers.js";
 import { BARE_SESSION_RESET_PROMPT } from "../../auto-reply/reply/session-reset-prompt.js";
 import { findTaskByRunId, resetTaskRegistryForTests } from "../../tasks/task-registry.js";
 import { withTempDir } from "../../test-helpers/temp-dir.js";
@@ -69,6 +85,9 @@ vi.mock("../../config/config.js", async () => {
 
 vi.mock("../../agents/agent-scope.js", () => ({
   listAgentIds: () => ["main"],
+  resolveAgentConfig: (cfg: { agents?: { list?: Array<{ id?: string }> } }, agentId: string) =>
+    cfg.agents?.list?.find((entry) => entry.id === agentId),
+  resolveDefaultAgentId: () => "planner",
   resolveAgentWorkspaceDir: (cfg: { agents?: { defaults?: { workspace?: string } } }) =>
     cfg?.agents?.defaults?.workspace ?? "/tmp/workspace",
 }));
@@ -1023,6 +1042,769 @@ describe("gateway agent handler", () => {
         }),
       }),
     );
+  });
+
+  it("revalidates a guarded follow-up through the Gateway after registry loss", async () => {
+    const fixture = createLedgerFixture(["src/one.ts"]);
+    try {
+      process.env.OPENCLAW_STATE_DIR = fixture.stateDir;
+      const config = createDelegationGuardTestConfig({
+        rootDir: fixture.rootDir,
+        validator: {
+          entrypoint: fixture.validatorPath,
+          sha256: fixture.guard.validator.sha256,
+        },
+      });
+      if (!config.agents) {
+        throw new Error("Missing agent configuration fixture");
+      }
+      config.agents.delegationGuard = fixture.guard;
+      mocks.loadConfigReturn = config as Record<string, unknown>;
+      const runtime = resolveDelegationRuntime(config);
+      if (!runtime) {
+        throw new Error("Missing delegation runtime fixture");
+      }
+
+      const childSessionKey = "agent:helper:subagent:restart-child";
+      const issued = issueAssignment({
+        fixture,
+        purpose: "discovery",
+        role: "helper",
+      });
+      const spawn = authorizeDelegationRoute({
+        config,
+        agentSessionKey: TEST_CONTROLLER.sessionKey,
+        effectiveThinking: "xhigh",
+        targetAgentId: "helper",
+        delegationToken: issued.delegationToken,
+        routeKind: "spawn",
+      });
+      bindDelegationRoute({ authorized: spawn, childSessionKey, runId: "spawn-run" });
+      appendDelegationRouteEvent({
+        authorized: spawn,
+        kind: "accepted",
+        childSessionKey,
+        runId: "spawn-run",
+      });
+      const sendToken = runtime.ledger.issueRouteToken({
+        assignmentId: issued.assignment.assignmentId,
+        controllerAgentId: TEST_CONTROLLER.agentId,
+        controllerSessionKey: TEST_CONTROLLER.sessionKey,
+        routeKind: "send",
+        targetSessionKey: childSessionKey,
+      });
+      const idempotencyKey = "gateway-restart-followup";
+      const send = authorizeDelegationRoute({
+        config,
+        agentSessionKey: TEST_CONTROLLER.sessionKey,
+        effectiveThinking: "xhigh",
+        targetAgentId: "helper",
+        targetThinking: "xhigh",
+        targetModel: "openai/gpt-5.4",
+        targetSessionKey: childSessionKey,
+        delegationToken: sendToken,
+        idempotencyKey,
+        routeKind: "send",
+      });
+      const capability = issueDelegationGatewayDispatch({
+        authorized: send,
+        targetSessionKey: childSessionKey,
+        idempotencyKey,
+      });
+      if (!capability) {
+        throw new Error("Missing Gateway dispatch capability");
+      }
+      let acceptedReport: ReturnType<typeof runtime.ledger.appendValidatedReceipt> | undefined;
+
+      mocks.loadSessionEntry.mockReturnValue({
+        cfg: config,
+        storePath: "/tmp/sessions.json",
+        entry: {
+          sessionId: "restart-child-session",
+          spawnedBy: TEST_CONTROLLER.sessionKey,
+          parentSessionKey: TEST_CONTROLLER.sessionKey,
+          updatedAt: Date.now(),
+        },
+        canonicalKey: childSessionKey,
+      });
+      mocks.getLatestSubagentRunByChildSessionKey.mockReturnValue(undefined);
+      mocks.updateSessionStore.mockResolvedValue(undefined);
+      mocks.agentCommand.mockClear();
+      mocks.agentCommand.mockImplementation(async () => {
+        acceptedReport = runtime.ledger.appendValidatedReceipt({
+          assignmentId: issued.assignment.assignmentId,
+          report: makeCompleteReport({ assigned: issued.assignment.scopeUnits }),
+          outcome: "accepted",
+        });
+        return {
+          payloads: [{ text: "ok" }],
+          meta: { durationMs: 100 },
+        };
+      });
+      const context = makeContext();
+
+      const respond = await invokeAgent(
+        {
+          message: "continue guarded work",
+          sessionKey: childSessionKey,
+          delegationGatewayDispatch: capability,
+          inputProvenance: {
+            kind: "inter_session",
+            sourceSessionKey: TEST_CONTROLLER.sessionKey,
+            sourceTool: "sessions_send",
+          },
+          idempotencyKey,
+        },
+        { reqId: idempotencyKey, context },
+      );
+
+      await waitForAssertion(() => expect(mocks.agentCommand).toHaveBeenCalledTimes(1));
+      await waitForAssertion(() =>
+        expect(findTaskByRunId(idempotencyKey)).toMatchObject({
+          runId: idempotencyKey,
+          status: "succeeded",
+        }),
+      );
+      expect(findTaskByRunId(idempotencyKey)?.cleanupAfter).toBeLessThan(Number.MAX_SAFE_INTEGER);
+      await waitForAssertion(() =>
+        expect(
+          unsafeDatabaseForTest(runtime.ledger)
+            .prepare(
+              `SELECT 1 FROM route_events
+               WHERE assignment_id = ? AND kind = 'completed'`,
+            )
+            .get(issued.assignment.assignmentId),
+        ).toBeDefined(),
+      );
+      expect(
+        unsafeDatabaseForTest(runtime.ledger)
+          .prepare(`SELECT accepted_receipt_id FROM terminal_receipts WHERE assignment_id = ?`)
+          .get(issued.assignment.assignmentId),
+      ).toEqual({ accepted_receipt_id: acceptedReport?.receiptId });
+      expect(respond.mock.calls.some((call: unknown[]) => call[0] === false)).toBe(false);
+
+      mocks.agentCommand.mockClear();
+      const unauthorizedReplay = await invokeAgent(
+        {
+          message: "replay without protected capability",
+          sessionKey: childSessionKey,
+          inputProvenance: {
+            kind: "inter_session",
+            sourceSessionKey: TEST_CONTROLLER.sessionKey,
+            sourceTool: "sessions_send",
+          },
+          idempotencyKey,
+        },
+        { reqId: `${idempotencyKey}-unauthorized`, context },
+      );
+      expect(unauthorizedReplay).toHaveBeenCalledWith(
+        false,
+        undefined,
+        expect.objectContaining({ code: "INVALID_REQUEST" }),
+      );
+      expect(mocks.agentCommand).not.toHaveBeenCalled();
+
+      const replay = await invokeAgent(
+        {
+          message: "replay guarded work",
+          sessionKey: childSessionKey,
+          delegationGatewayDispatch: capability,
+          inputProvenance: {
+            kind: "inter_session",
+            sourceSessionKey: TEST_CONTROLLER.sessionKey,
+            sourceTool: "sessions_send",
+          },
+          idempotencyKey,
+        },
+        { reqId: `${idempotencyKey}-replay`, context },
+      );
+      expect(mocks.agentCommand).not.toHaveBeenCalled();
+      expect(replay).toHaveBeenCalledWith(
+        true,
+        expect.objectContaining({ runId: idempotencyKey, status: "accepted" }),
+        undefined,
+        expect.objectContaining({ cached: true }),
+      );
+
+      expect(() =>
+        runtime.ledger.issueRouteToken({
+          assignmentId: issued.assignment.assignmentId,
+          controllerAgentId: TEST_CONTROLLER.agentId,
+          controllerSessionKey: TEST_CONTROLLER.sessionKey,
+          routeKind: "send",
+          targetSessionKey: childSessionKey,
+        }),
+      ).toThrow(/terminal|submitted its report|Gateway dispatch/i);
+    } finally {
+      mocks.loadConfigReturn = {};
+      fixture.close();
+    }
+  });
+
+  it("starts a guarded initial child exactly once through its protected Gateway capability", async () => {
+    const fixture = createLedgerFixture(["src/initial-spawn.ts"]);
+    try {
+      process.env.OPENCLAW_STATE_DIR = fixture.stateDir;
+      const config = createDelegationGuardTestConfig({
+        rootDir: fixture.rootDir,
+        validator: {
+          entrypoint: fixture.validatorPath,
+          sha256: fixture.guard.validator.sha256,
+        },
+      });
+      if (!config.agents) {
+        throw new Error("Missing agent configuration fixture");
+      }
+      config.agents.delegationGuard = fixture.guard;
+      mocks.loadConfigReturn = config as Record<string, unknown>;
+      const runtime = resolveDelegationRuntime(config);
+      if (!runtime) {
+        throw new Error("Missing delegation runtime fixture");
+      }
+
+      const childSessionKey = "agent:helper:subagent:initial-protected-child";
+      const idempotencyKey = "gateway-initial-protected-spawn";
+      const issued = issueAssignment({
+        fixture,
+        purpose: "discovery",
+        role: "helper",
+      });
+      const spawn = authorizeDelegationRoute({
+        config,
+        agentSessionKey: TEST_CONTROLLER.sessionKey,
+        effectiveThinking: "xhigh",
+        targetAgentId: "helper",
+        delegationToken: issued.delegationToken,
+        routeKind: "spawn",
+      });
+      if (!spawn) {
+        throw new Error("Missing guarded spawn authorization");
+      }
+      const { capability } = runtime.ledger.bindInitialSpawnWithGatewayDispatch({
+        assignmentId: issued.assignment.assignmentId,
+        controllerSessionKey: TEST_CONTROLLER.sessionKey,
+        childSessionKey,
+        idempotencyKey,
+      });
+      await registerChildRoutePendingSpawn({
+        childSessionKey,
+        requesterSessionKey: TEST_CONTROLLER.sessionKey,
+        childTargetKind: "subagent",
+        idempotencyKey,
+        runId: idempotencyKey,
+        targetAgentId: "helper",
+      });
+
+      mocks.loadSessionEntry.mockReturnValue({
+        cfg: config,
+        storePath: "/tmp/sessions.json",
+        entry: {
+          sessionId: "initial-protected-session",
+          spawnedBy: TEST_CONTROLLER.sessionKey,
+          parentSessionKey: TEST_CONTROLLER.sessionKey,
+          modelProvider: "openai",
+          model: "gpt-5.4",
+          thinkingLevel: "xhigh",
+          updatedAt: Date.now(),
+        },
+        canonicalKey: childSessionKey,
+      });
+      mocks.getLatestSubagentRunByChildSessionKey.mockReturnValue(undefined);
+      mocks.updateSessionStore.mockResolvedValue(undefined);
+      mocks.agentCommand.mockClear();
+      mocks.agentCommand.mockImplementation(async (params) => {
+        expect(params).toMatchObject({
+          sessionKey: childSessionKey,
+          thinking: "xhigh",
+        });
+        runtime.ledger.appendValidatedReceipt({
+          assignmentId: issued.assignment.assignmentId,
+          report: makeCompleteReport({ assigned: issued.assignment.scopeUnits }),
+          outcome: "accepted",
+        });
+        return {
+          payloads: [{ text: "protected helper completed" }],
+          meta: { durationMs: 100 },
+        };
+      });
+      const context = makeContext();
+
+      const first = await invokeAgent(
+        {
+          message: "start protected helper",
+          sessionKey: childSessionKey,
+          thinking: "xhigh",
+          delegationGatewayDispatch: capability,
+          idempotencyKey,
+        },
+        { reqId: idempotencyKey, context },
+      );
+
+      await waitForAssertion(() => expect(mocks.agentCommand).toHaveBeenCalledTimes(1));
+      await waitForAssertion(() =>
+        expect(
+          unsafeDatabaseForTest(runtime.ledger)
+            .prepare(
+              `SELECT 1 FROM route_events
+               WHERE assignment_id = ? AND kind = 'completed'`,
+            )
+            .get(issued.assignment.assignmentId),
+        ).toBeDefined(),
+      );
+      expect(first.mock.calls.some((call: unknown[]) => call[0] === false)).toBe(false);
+
+      mocks.agentCommand.mockClear();
+      const reused = await invokeAgent(
+        {
+          message: "must not start the protected helper twice",
+          sessionKey: childSessionKey,
+          thinking: "xhigh",
+          delegationGatewayDispatch: capability,
+          idempotencyKey,
+        },
+        { reqId: `${idempotencyKey}-reused`, context },
+      );
+      expect(mocks.agentCommand).not.toHaveBeenCalled();
+      expect(reused).toHaveBeenCalledWith(
+        true,
+        expect.objectContaining({ runId: idempotencyKey, status: "accepted" }),
+        undefined,
+        expect.objectContaining({ cached: true }),
+      );
+    } finally {
+      mocks.loadConfigReturn = {};
+      fixture.close();
+    }
+  });
+
+  it("closes failed guarded execution and never replays it as accepted", async () => {
+    const fixture = createLedgerFixture(["src/failure.ts"]);
+    try {
+      process.env.OPENCLAW_STATE_DIR = fixture.stateDir;
+      const config = createDelegationGuardTestConfig({
+        rootDir: fixture.rootDir,
+        validator: {
+          entrypoint: fixture.validatorPath,
+          sha256: fixture.guard.validator.sha256,
+        },
+      });
+      if (!config.agents) {
+        throw new Error("Missing agent configuration fixture");
+      }
+      config.agents.delegationGuard = fixture.guard;
+      mocks.loadConfigReturn = config as Record<string, unknown>;
+      const runtime = resolveDelegationRuntime(config);
+      if (!runtime) {
+        throw new Error("Missing delegation runtime fixture");
+      }
+
+      const childSessionKey = "agent:helper:subagent:failed-child";
+      const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+      const spawn = authorizeDelegationRoute({
+        config,
+        agentSessionKey: TEST_CONTROLLER.sessionKey,
+        effectiveThinking: "xhigh",
+        targetAgentId: "helper",
+        delegationToken: issued.delegationToken,
+        routeKind: "spawn",
+      });
+      bindDelegationRoute({ authorized: spawn, childSessionKey, runId: "failed-spawn-run" });
+      appendDelegationRouteEvent({
+        authorized: spawn,
+        kind: "accepted",
+        childSessionKey,
+        runId: "failed-spawn-run",
+      });
+      const sendToken = runtime.ledger.issueRouteToken({
+        assignmentId: issued.assignment.assignmentId,
+        controllerAgentId: TEST_CONTROLLER.agentId,
+        controllerSessionKey: TEST_CONTROLLER.sessionKey,
+        routeKind: "send",
+        targetSessionKey: childSessionKey,
+      });
+      const idempotencyKey = "gateway-guarded-execution-failure";
+      const send = authorizeDelegationRoute({
+        config,
+        agentSessionKey: TEST_CONTROLLER.sessionKey,
+        effectiveThinking: "xhigh",
+        targetAgentId: "helper",
+        targetThinking: "xhigh",
+        targetModel: "openai/gpt-5.4",
+        targetSessionKey: childSessionKey,
+        delegationToken: sendToken,
+        idempotencyKey,
+        routeKind: "send",
+      });
+      const capability = issueDelegationGatewayDispatch({
+        authorized: send,
+        targetSessionKey: childSessionKey,
+        idempotencyKey,
+      });
+      if (!capability) {
+        throw new Error("Missing Gateway dispatch capability");
+      }
+
+      mocks.loadSessionEntry.mockReturnValue({
+        cfg: config,
+        storePath: "/tmp/sessions.json",
+        entry: {
+          sessionId: "failed-child-session",
+          spawnedBy: TEST_CONTROLLER.sessionKey,
+          parentSessionKey: TEST_CONTROLLER.sessionKey,
+          updatedAt: Date.now(),
+        },
+        canonicalKey: childSessionKey,
+      });
+      mocks.getLatestSubagentRunByChildSessionKey.mockReturnValue(undefined);
+      mocks.updateSessionStore.mockResolvedValue(undefined);
+      mocks.agentCommand.mockClear();
+      mocks.agentCommand.mockRejectedValue(new Error("simulated guarded execution failure"));
+      const context = makeContext();
+
+      const respond = await invokeAgent(
+        {
+          message: "fail guarded work",
+          sessionKey: childSessionKey,
+          delegationGatewayDispatch: capability,
+          inputProvenance: {
+            kind: "inter_session",
+            sourceSessionKey: TEST_CONTROLLER.sessionKey,
+            sourceTool: "sessions_send",
+          },
+          idempotencyKey,
+        },
+        { reqId: idempotencyKey, context },
+      );
+      await waitForAssertion(() =>
+        expect(findTaskByRunId(idempotencyKey)).toMatchObject({ status: "failed" }),
+      );
+      await waitForAssertion(() =>
+        expect(
+          unsafeDatabaseForTest(runtime.ledger)
+            .prepare(
+              `SELECT 1 FROM route_events
+               WHERE assignment_id = ? AND kind = 'validation_rejected'`,
+            )
+            .get(issued.assignment.assignmentId),
+        ).toBeDefined(),
+      );
+      expect(respond).toHaveBeenCalledWith(
+        false,
+        expect.objectContaining({ status: "error" }),
+        expect.objectContaining({ code: "UNAVAILABLE" }),
+        expect.any(Object),
+      );
+
+      mocks.agentCommand.mockClear();
+      const replay = await invokeAgent(
+        {
+          message: "must not rerun failed guarded work",
+          sessionKey: childSessionKey,
+          delegationGatewayDispatch: capability,
+          inputProvenance: {
+            kind: "inter_session",
+            sourceSessionKey: TEST_CONTROLLER.sessionKey,
+            sourceTool: "sessions_send",
+          },
+          idempotencyKey,
+        },
+        { reqId: `${idempotencyKey}-replay`, context },
+      );
+      expect(mocks.agentCommand).not.toHaveBeenCalled();
+      expect(replay).toHaveBeenCalledWith(
+        false,
+        undefined,
+        expect.objectContaining({
+          code: "UNAVAILABLE",
+          details: expect.objectContaining({
+            code: "delegation_gateway_dispatch_execution_failed",
+          }),
+        }),
+      );
+    } finally {
+      mocks.loadConfigReturn = {};
+      fixture.close();
+    }
+  });
+
+  it("immediately settles a claimed guarded dispatch that fails before scheduling", async () => {
+    const fixture = createLedgerFixture(["src/crash.ts"]);
+    try {
+      process.env.OPENCLAW_STATE_DIR = fixture.stateDir;
+      const config = createDelegationGuardTestConfig({
+        rootDir: fixture.rootDir,
+        validator: {
+          entrypoint: fixture.validatorPath,
+          sha256: fixture.guard.validator.sha256,
+        },
+      });
+      if (!config.agents) {
+        throw new Error("Missing agent configuration fixture");
+      }
+      config.agents.delegationGuard = fixture.guard;
+      mocks.loadConfigReturn = config as Record<string, unknown>;
+      const runtime = resolveDelegationRuntime(config);
+      if (!runtime) {
+        throw new Error("Missing delegation runtime fixture");
+      }
+
+      const childSessionKey = "agent:helper:subagent:crash-child";
+      const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+      const spawn = authorizeDelegationRoute({
+        config,
+        agentSessionKey: TEST_CONTROLLER.sessionKey,
+        effectiveThinking: "xhigh",
+        targetAgentId: "helper",
+        delegationToken: issued.delegationToken,
+        routeKind: "spawn",
+      });
+      bindDelegationRoute({ authorized: spawn, childSessionKey, runId: "crash-spawn-run" });
+      appendDelegationRouteEvent({
+        authorized: spawn,
+        kind: "accepted",
+        childSessionKey,
+        runId: "crash-spawn-run",
+      });
+      const sendToken = runtime.ledger.issueRouteToken({
+        assignmentId: issued.assignment.assignmentId,
+        controllerAgentId: TEST_CONTROLLER.agentId,
+        controllerSessionKey: TEST_CONTROLLER.sessionKey,
+        routeKind: "send",
+        targetSessionKey: childSessionKey,
+      });
+      const idempotencyKey = "gateway-crash-before-scheduling";
+      const send = authorizeDelegationRoute({
+        config,
+        agentSessionKey: TEST_CONTROLLER.sessionKey,
+        effectiveThinking: "xhigh",
+        targetAgentId: "helper",
+        targetThinking: "xhigh",
+        targetModel: "openai/gpt-5.4",
+        targetSessionKey: childSessionKey,
+        delegationToken: sendToken,
+        idempotencyKey,
+        routeKind: "send",
+      });
+      const capability = issueDelegationGatewayDispatch({
+        authorized: send,
+        targetSessionKey: childSessionKey,
+        idempotencyKey,
+      });
+
+      mocks.loadSessionEntry.mockReturnValue({
+        cfg: config,
+        storePath: "/tmp/sessions.json",
+        entry: {
+          sessionId: "crash-child-session",
+          spawnedBy: TEST_CONTROLLER.sessionKey,
+          parentSessionKey: TEST_CONTROLLER.sessionKey,
+          updatedAt: Date.now(),
+        },
+        canonicalKey: childSessionKey,
+      });
+      mocks.getLatestSubagentRunByChildSessionKey.mockReturnValue(undefined);
+      mocks.agentCommand.mockClear();
+
+      // Route authorization and health have completed before this awaited store
+      // write. Rejecting it emulates process death in the final pre-dispatch
+      // window: the durable claim exists, but no run was scheduled or accepted.
+      mocks.updateSessionStore.mockRejectedValueOnce(new Error("simulated gateway crash"));
+      await expect(
+        invokeAgent(
+          {
+            message: "crash before guarded dispatch",
+            sessionKey: childSessionKey,
+            delegationGatewayDispatch: capability,
+            inputProvenance: {
+              kind: "inter_session",
+              sourceSessionKey: TEST_CONTROLLER.sessionKey,
+              sourceTool: "sessions_send",
+            },
+            idempotencyKey,
+          },
+          { reqId: idempotencyKey, context: makeContext() },
+        ),
+      ).rejects.toThrow("simulated gateway crash");
+      expect(mocks.agentCommand).not.toHaveBeenCalled();
+      expect(
+        unsafeDatabaseForTest(fixture.ledger)
+          .prepare(
+            `SELECT decision FROM gateway_dispatch_outcomes
+             WHERE assignment_id = ?`,
+          )
+          .get(issued.assignment.assignmentId),
+      ).toEqual({ decision: "rejected" });
+      expect(
+        unsafeDatabaseForTest(fixture.ledger)
+          .prepare(
+            `SELECT kind FROM route_events
+             WHERE assignment_id = ? AND kind = 'route_rejected'`,
+          )
+          .get(issued.assignment.assignmentId),
+      ).toEqual({ kind: "route_rejected" });
+      mocks.updateSessionStore.mockResolvedValue(undefined);
+
+      const respond = await invokeAgent(
+        {
+          message: "resume after crash",
+          sessionKey: childSessionKey,
+          delegationGatewayDispatch: capability,
+          inputProvenance: {
+            kind: "inter_session",
+            sourceSessionKey: TEST_CONTROLLER.sessionKey,
+            sourceTool: "sessions_send",
+          },
+          idempotencyKey,
+        },
+        { reqId: `${idempotencyKey}-replay`, context: makeContext() },
+      );
+
+      expect(mocks.agentCommand).not.toHaveBeenCalled();
+      expect(respond).toHaveBeenCalledWith(
+        false,
+        undefined,
+        expect.objectContaining({
+          code: "UNAVAILABLE",
+          details: expect.objectContaining({
+            code: "delegation_gateway_dispatch_execution_rejected",
+          }),
+        }),
+      );
+      expect(
+        issueAssignment({
+          fixture,
+          purpose: "discovery",
+          role: "helper",
+          recoveryOfAssignmentId: issued.assignment.assignmentId,
+        }).assignment.routeFamilyId,
+      ).toBe(issued.assignment.routeFamilyId);
+    } finally {
+      mocks.loadConfigReturn = {};
+      fixture.close();
+    }
+  });
+
+  it("does not execute guarded work when durable run-proof persistence fails", async () => {
+    const fixture = createLedgerFixture(["src/proof-failure.ts"]);
+    try {
+      process.env.OPENCLAW_STATE_DIR = fixture.stateDir;
+      const config = createDelegationGuardTestConfig({
+        rootDir: fixture.rootDir,
+        validator: {
+          entrypoint: fixture.validatorPath,
+          sha256: fixture.guard.validator.sha256,
+        },
+      });
+      if (!config.agents) {
+        throw new Error("Missing agent configuration fixture");
+      }
+      config.agents.delegationGuard = fixture.guard;
+      mocks.loadConfigReturn = config as Record<string, unknown>;
+      const runtime = resolveDelegationRuntime(config);
+      if (!runtime) {
+        throw new Error("Missing delegation runtime fixture");
+      }
+
+      const childSessionKey = "agent:helper:subagent:proof-failure-child";
+      const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+      const spawn = authorizeDelegationRoute({
+        config,
+        agentSessionKey: TEST_CONTROLLER.sessionKey,
+        effectiveThinking: "xhigh",
+        targetAgentId: "helper",
+        delegationToken: issued.delegationToken,
+        routeKind: "spawn",
+      });
+      bindDelegationRoute({ authorized: spawn, childSessionKey, runId: "proof-spawn-run" });
+      appendDelegationRouteEvent({
+        authorized: spawn,
+        kind: "accepted",
+        childSessionKey,
+        runId: "proof-spawn-run",
+      });
+      const sendToken = runtime.ledger.issueRouteToken({
+        assignmentId: issued.assignment.assignmentId,
+        controllerAgentId: TEST_CONTROLLER.agentId,
+        controllerSessionKey: TEST_CONTROLLER.sessionKey,
+        routeKind: "send",
+        targetSessionKey: childSessionKey,
+      });
+      const idempotencyKey = "gateway-run-proof-write-failure";
+      const send = authorizeDelegationRoute({
+        config,
+        agentSessionKey: TEST_CONTROLLER.sessionKey,
+        effectiveThinking: "xhigh",
+        targetAgentId: "helper",
+        targetThinking: "xhigh",
+        targetModel: "openai/gpt-5.4",
+        targetSessionKey: childSessionKey,
+        delegationToken: sendToken,
+        idempotencyKey,
+        routeKind: "send",
+      });
+      const capability = issueDelegationGatewayDispatch({
+        authorized: send,
+        targetSessionKey: childSessionKey,
+        idempotencyKey,
+      });
+
+      mocks.loadSessionEntry.mockReturnValue({
+        cfg: config,
+        storePath: "/tmp/sessions.json",
+        entry: {
+          sessionId: "proof-failure-session",
+          spawnedBy: TEST_CONTROLLER.sessionKey,
+          parentSessionKey: TEST_CONTROLLER.sessionKey,
+          updatedAt: Date.now(),
+        },
+        canonicalKey: childSessionKey,
+      });
+      mocks.getLatestSubagentRunByChildSessionKey.mockReturnValue(undefined);
+      mocks.updateSessionStore.mockResolvedValue(undefined);
+      mocks.agentCommand.mockClear();
+      unsafeDatabaseForTest(fixture.ledger).exec(`
+        CREATE TRIGGER fail_gateway_dispatch_run_proof
+        BEFORE INSERT ON gateway_dispatch_runs
+        BEGIN
+          SELECT RAISE(ABORT, 'simulated run proof failure');
+        END;
+      `);
+
+      const respond = await invokeAgent(
+        {
+          message: "must not execute without durable proof",
+          sessionKey: childSessionKey,
+          delegationGatewayDispatch: capability,
+          inputProvenance: {
+            kind: "inter_session",
+            sourceSessionKey: TEST_CONTROLLER.sessionKey,
+            sourceTool: "sessions_send",
+          },
+          idempotencyKey,
+        },
+        { reqId: idempotencyKey, context: makeContext() },
+      );
+
+      await Promise.resolve();
+      expect(mocks.agentCommand).not.toHaveBeenCalled();
+      expect(findTaskByRunId(idempotencyKey)).toMatchObject({ status: "failed" });
+      expect(respond).toHaveBeenCalledWith(
+        false,
+        undefined,
+        expect.objectContaining({ code: "INVALID_REQUEST" }),
+      );
+      expect(
+        unsafeDatabaseForTest(fixture.ledger)
+          .prepare(
+            `SELECT decision FROM gateway_dispatch_outcomes
+             WHERE assignment_id = ?`,
+          )
+          .get(issued.assignment.assignmentId),
+      ).toEqual({ decision: "rejected" });
+    } finally {
+      mocks.loadConfigReturn = {};
+      fixture.close();
+    }
   });
 
   it("does not create task rows for inter-session completion wakes", async () => {

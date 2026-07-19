@@ -246,7 +246,9 @@ describe("subagent registry seam flow", () => {
     });
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+    await waitForFast(() => {
+      expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+    });
     expect(
       mod
         .listSubagentRunsForRequester("agent:main:main")
@@ -254,10 +256,14 @@ describe("subagent registry seam flow", () => {
     ).toBeDefined();
 
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(2);
+    await waitForFast(() => {
+      expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(2);
+    });
 
     await vi.advanceTimersByTimeAsync(2_000);
-    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(3);
+    await waitForFast(() => {
+      expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(3);
+    });
 
     await vi.advanceTimersByTimeAsync(4_000);
     expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(3);

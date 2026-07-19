@@ -45,6 +45,7 @@ import { resolveAgentRunContext } from "./command/run-context.js";
 import { resolveSession } from "./command/session.js";
 import type { AgentCommandIngressOpts, AgentCommandOpts } from "./command/types.js";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "./defaults.js";
+import { resolveGuardedDelegationExecution } from "./delegation/execution.js";
 import { AGENT_LANE_SUBAGENT } from "./lanes.js";
 import { LiveSessionModelSwitchError } from "./live-model-switch.js";
 import { loadModelCatalog } from "./model-catalog.js";
@@ -74,6 +75,7 @@ type SessionStoreRuntime = typeof import("./command/session-store.runtime.js");
 type TranscriptResolveRuntime = typeof import("../config/sessions/transcript-resolve.runtime.js");
 type CliDepsRuntime = typeof import("../cli/deps.js");
 type ExecDefaultsRuntime = typeof import("./exec-defaults.js");
+type ProviderThinkingRuntime = typeof import("./provider-thinking.runtime.js");
 type SkillsRuntime = typeof import("./skills.js");
 type SkillsFilterRuntime = typeof import("./skills/filter.js");
 type SkillsRefreshStateRuntime = typeof import("./skills/refresh-state.js");
@@ -89,6 +91,7 @@ let sessionStoreRuntimePromise: Promise<SessionStoreRuntime> | undefined;
 let transcriptResolveRuntimePromise: Promise<TranscriptResolveRuntime> | undefined;
 let cliDepsRuntimePromise: Promise<CliDepsRuntime> | undefined;
 let execDefaultsRuntimePromise: Promise<ExecDefaultsRuntime> | undefined;
+let providerThinkingRuntimePromise: Promise<ProviderThinkingRuntime> | undefined;
 let skillsRuntimePromise: Promise<SkillsRuntime> | undefined;
 let skillsFilterRuntimePromise: Promise<SkillsFilterRuntime> | undefined;
 let skillsRefreshStateRuntimePromise: Promise<SkillsRefreshStateRuntime> | undefined;
@@ -142,6 +145,11 @@ function loadCliDepsRuntime(): Promise<CliDepsRuntime> {
 function loadExecDefaultsRuntime(): Promise<ExecDefaultsRuntime> {
   execDefaultsRuntimePromise ??= import("./exec-defaults.js");
   return execDefaultsRuntimePromise;
+}
+
+function loadProviderThinkingRuntime(): Promise<ProviderThinkingRuntime> {
+  providerThinkingRuntimePromise ??= import("./provider-thinking.runtime.js");
+  return providerThinkingRuntimePromise;
 }
 
 function loadSkillsRuntime(): Promise<SkillsRuntime> {
@@ -454,6 +462,21 @@ async function agentCommandInternal(
 
       const visibleTextAccumulator = attemptExecutionRuntime.createAcpVisibleTextAccumulator();
       let stopReason: string | undefined;
+      const persistAcpTranscript = async (finalText: string) => {
+        const { resolveAcpSessionCwd } = await loadAcpSessionIdentifiersRuntime();
+        sessionEntry = await attemptExecutionRuntime.persistAcpTurnTranscript({
+          body,
+          finalText,
+          sessionId,
+          sessionKey,
+          sessionEntry,
+          sessionStore,
+          storePath,
+          sessionAgentId,
+          threadId: opts.threadId,
+          sessionCwd: resolveAcpSessionCwd(acpResolution.meta) ?? workspaceDir,
+        });
+      };
       try {
         const { resolveAcpAgentPolicyError, resolveAcpDispatchPolicyError } =
           await loadAcpPolicyRuntime();
@@ -508,6 +531,13 @@ async function agentCommandInternal(
           fallbackCode: "ACP_TURN_FAILED",
           fallbackMessage: "ACP turn failed before completion.",
         });
+        try {
+          await persistAcpTranscript(`Agent run failed before completion: ${acpError.message}`);
+        } catch (persistError) {
+          log.warn(
+            `ACP failure transcript persistence failed for ${sessionKey}: ${formatErrorMessage(persistError)}`,
+          );
+        }
         attemptExecutionRuntime.emitAcpLifecycleError({
           runId,
           message: acpError.message,
@@ -515,29 +545,24 @@ async function agentCommandInternal(
         throw acpError;
       }
 
-      attemptExecutionRuntime.emitAcpLifecycleEnd({ runId });
-
       const finalTextRaw = visibleTextAccumulator.finalizeRaw();
       const finalText = visibleTextAccumulator.finalize();
       try {
-        const { resolveAcpSessionCwd } = await loadAcpSessionIdentifiersRuntime();
-        sessionEntry = await attemptExecutionRuntime.persistAcpTurnTranscript({
-          body,
-          finalText: finalTextRaw,
-          sessionId,
-          sessionKey,
-          sessionEntry,
-          sessionStore,
-          storePath,
-          sessionAgentId,
-          threadId: opts.threadId,
-          sessionCwd: resolveAcpSessionCwd(acpResolution.meta) ?? workspaceDir,
-        });
+        await persistAcpTranscript(finalTextRaw);
       } catch (error) {
-        log.warn(
-          `ACP transcript persistence failed for ${sessionKey}: ${formatErrorMessage(error)}`,
-        );
+        const message = `ACP transcript persistence failed for ${sessionKey}: ${formatErrorMessage(error)}`;
+        log.warn(message);
+        attemptExecutionRuntime.emitAcpLifecycleError({ runId, message });
+        throw new Error(message, { cause: error });
       }
+
+      if (!finalText.trim() && opts.abortSignal?.aborted !== true) {
+        const message = "Agent run completed without a visible assistant reply.";
+        attemptExecutionRuntime.emitAcpLifecycleError({ runId, message });
+        throw new Error(message);
+      }
+
+      attemptExecutionRuntime.emitAcpLifecycleEnd({ runId });
 
       const result = attemptExecutionRuntime.buildAcpResult({
         payloadText: finalText,
@@ -788,9 +813,31 @@ async function agentCommandInternal(
         provider,
         model,
         catalog: catalogForThinking,
+        agentId: sessionAgentId,
       });
     }
-    if (!isThinkingLevelSupported({ provider, model, level: resolvedThinkLevel })) {
+    const guardedDelegationAssignment = resolveGuardedDelegationExecution({
+      config: cfg,
+      sessionKey,
+      agentId: sessionAgentId,
+      provider,
+      model,
+      thinking: resolvedThinkLevel,
+      workspaceDir,
+    });
+    const runtimeThinkingSupport = (
+      await loadProviderThinkingRuntime()
+    ).resolveRuntimeProviderThinkingLevelSupport({
+      provider,
+      model,
+      level: resolvedThinkLevel,
+      config: cfg,
+      workspaceDir,
+    });
+    const thinkingLevelSupported =
+      runtimeThinkingSupport ??
+      isThinkingLevelSupported({ provider, model, level: resolvedThinkLevel });
+    if (!thinkingLevelSupported) {
       const explicitThink = Boolean(thinkOnce || thinkOverride);
       if (explicitThink) {
         throw new Error(
@@ -868,11 +915,13 @@ async function agentCommandInternal(
           opts.replyChannel ?? opts.channel,
         );
         const spawnedBy = normalizedSpawned.spawnedBy ?? sessionEntry?.spawnedBy;
-        const effectiveFallbacksOverride = resolveEffectiveModelFallbacks({
-          cfg,
-          agentId: sessionAgentId,
-          hasSessionModelOverride: Boolean(storedModelOverride),
-        });
+        const effectiveFallbacksOverride = guardedDelegationAssignment
+          ? []
+          : resolveEffectiveModelFallbacks({
+              cfg,
+              agentId: sessionAgentId,
+              hasSessionModelOverride: Boolean(storedModelOverride),
+            });
 
         let fallbackAttemptIndex = 0;
         const fallbackResult = await runWithModelFallback({
@@ -979,6 +1028,12 @@ async function agentCommandInternal(
             );
           }
           const switchRef = normalizeModelRef(err.provider, err.model);
+          if (guardedDelegationAssignment) {
+            throw new Error(
+              `Live model switch rejected for guarded delegation assignment: ${sanitizeForLog(switchRef.provider)}/${sanitizeForLog(switchRef.model)}.`,
+              { cause: err },
+            );
+          }
           const switchKey = modelKey(switchRef.provider, switchRef.model);
           if (!allowAnyModel && !allowedModelKeys.has(switchKey)) {
             log.info(
@@ -1052,6 +1107,7 @@ async function agentCommandInternal(
       await updateSessionStoreAfterAgentRun({
         cfg,
         contextTokensOverride: agentCfg?.contextTokens,
+        runId,
         sessionId,
         sessionKey,
         storePath,

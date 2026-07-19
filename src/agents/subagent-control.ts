@@ -12,10 +12,20 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { callGateway } from "../gateway/call.js";
 import { logVerbose } from "../globals.js";
 import { formatErrorMessage } from "../infra/errors.js";
-import { isSubagentSessionKey } from "../routing/session-key.js";
+import {
+  isSubagentSessionKey,
+  normalizeAgentId,
+  resolveAgentIdFromSessionKey,
+} from "../routing/session-key.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../utils/message-channel.js";
 import { guardChildRouteForDelivery } from "./child-route-guard.js";
 import { resolveChildRouteProviderContextFromSession } from "./child-route-provider-context.js";
+import { openConfiguredDelegationLedger } from "./delegation/gateway-task-reconciliation.js";
+import {
+  resolveDelegationGuardConfig,
+  resolveDelegationGuardPrincipal,
+  resolveDelegationPolicyDigest,
+} from "./delegation/policy.js";
 import { AGENT_LANE_SUBAGENT } from "./lanes.js";
 import { abortEmbeddedPiRun } from "./pi-embedded-runner/runs.js";
 import {
@@ -560,7 +570,7 @@ export async function compactControlledSubagentSession(params: {
 
   let response: CompactGatewayResponse | undefined;
   try {
-    response = await subagentControlDeps.callGateway<CompactGatewayResponse>({
+    response = await subagentControlDeps.callGateway({
       method: "sessions.compact",
       params: { key: targetSessionKey },
     });
@@ -594,6 +604,11 @@ export async function steerControlledSubagentRun(params: {
   controller: ResolvedSubagentController;
   entry: SubagentRunRecord;
   message: string;
+  /** Runtime-owned guarded assignment consumed before this steer. */
+  delegationAssignmentId?: string;
+  /** Runtime-owned exact Gateway capability for guarded follow-up execution. */
+  delegationGatewayDispatch?: string;
+  idempotencyKey?: string;
 }): Promise<
   | {
       status: "forbidden" | "done" | "rate_limited" | "error";
@@ -613,6 +628,59 @@ export async function steerControlledSubagentRun(params: {
       text: string;
     }
 > {
+  let replacementProtectedScope:
+    | {
+        delegationAssignmentId: string;
+        delegationSliceId: string;
+        delegationEpoch: number;
+      }
+    | undefined;
+  const delegationGuard = resolveDelegationGuardConfig(params.cfg);
+  const targetAgentId = normalizeAgentId(
+    resolveAgentIdFromSessionKey(params.entry.childSessionKey),
+  );
+  const guardedTarget = delegationGuard
+    ? resolveDelegationGuardPrincipal(delegationGuard, targetAgentId)
+    : undefined;
+  if (delegationGuard?.mode === "enforce" && guardedTarget?.kind === "worker") {
+    const assignmentId = params.delegationAssignmentId?.trim();
+    if (!assignmentId) {
+      return {
+        status: "forbidden",
+        runId: params.entry.runId,
+        sessionKey: params.entry.childSessionKey,
+        error: "Guarded worker steering requires a consumed delegation assignment token.",
+      };
+    }
+    const ledger = openConfiguredDelegationLedger({
+      guard: delegationGuard,
+      policyDigest: resolveDelegationPolicyDigest(delegationGuard),
+    });
+    const assignment = ledger.getAssignment(assignmentId);
+    const bound = ledger.resolveAssignmentForChildSession(params.entry.childSessionKey);
+    if (
+      !assignment ||
+      assignment.epoch !== ledger.currentEpoch() ||
+      assignment.assignmentId !== bound?.assignmentId ||
+      assignment.assignmentId !== params.entry.delegationAssignmentId ||
+      assignment.controllerSessionKey !== params.controller.controllerSessionKey ||
+      normalizeAgentId(assignment.controllerAgentId) !==
+        normalizeAgentId(resolveAgentIdFromSessionKey(params.controller.controllerSessionKey)) ||
+      normalizeAgentId(assignment.workerAgentId) !== targetAgentId
+    ) {
+      return {
+        status: "forbidden",
+        runId: params.entry.runId,
+        sessionKey: params.entry.childSessionKey,
+        error: "Guarded worker steering does not match the current protected assignment.",
+      };
+    }
+    replacementProtectedScope = {
+      delegationAssignmentId: assignment.assignmentId,
+      delegationSliceId: assignment.sliceId,
+      delegationEpoch: assignment.epoch,
+    };
+  }
   const ownershipError = ensureControllerOwnsRun({
     controller: params.controller,
     entry: params.entry,
@@ -745,7 +813,17 @@ export async function steerControlledSubagentRun(params: {
     // Continue even if wait fails; steer should still be attempted.
   }
 
-  const idempotencyKey = crypto.randomUUID();
+  const idempotencyKey = params.idempotencyKey ?? crypto.randomUUID();
+  if (params.delegationAssignmentId && !params.delegationGatewayDispatch) {
+    clearSubagentRunSteerRestart(params.entry.runId);
+    return {
+      status: "error",
+      runId: idempotencyKey,
+      sessionKey: params.entry.childSessionKey,
+      sessionId,
+      error: "Guarded worker steering requires its exact Gateway dispatch capability.",
+    };
+  }
   const runTimeoutSeconds = params.entry.runTimeoutSeconds ?? 0;
   let runId: string = idempotencyKey;
   try {
@@ -760,6 +838,9 @@ export async function steerControlledSubagentRun(params: {
         channel: INTERNAL_MESSAGE_CHANNEL,
         lane: AGENT_LANE_SUBAGENT,
         timeout: runTimeoutSeconds,
+        ...(params.delegationGatewayDispatch
+          ? { delegationGatewayDispatch: params.delegationGatewayDispatch }
+          : {}),
       },
       timeoutMs: 10_000,
     });
@@ -781,6 +862,7 @@ export async function steerControlledSubagentRun(params: {
   const replaced = replaceSubagentRunAfterSteer({
     previousRunId: params.entry.runId,
     nextRunId: runId,
+    ...replacementProtectedScope,
     fallback: params.entry,
     task: params.message,
     runTimeoutSeconds,

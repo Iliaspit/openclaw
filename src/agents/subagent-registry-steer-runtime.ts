@@ -3,6 +3,12 @@ import type { SubagentRunRecord } from "./subagent-registry.types.js";
 export type ReplaceSubagentRunAfterSteerParams = {
   previousRunId: string;
   nextRunId: string;
+  /** Runtime-owned guarded assignment for the replacement run. */
+  delegationAssignmentId?: string;
+  /** Runtime-owned guarded slice for the replacement run. */
+  delegationSliceId?: string;
+  /** Runtime-owned guarded epoch for the replacement run. */
+  delegationEpoch?: number;
   fallback?: SubagentRunRecord;
   task?: string;
   runTimeoutSeconds?: number;

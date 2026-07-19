@@ -125,6 +125,77 @@ delivery.
 
 For ACP-specific behavior, see [ACP Agents](/tools/acp-agents).
 
+## Protected delegation workflows
+
+Operators can enable `agents.delegationGuard` when session tools must enforce a
+planner-owned evidence workflow instead of relying on prompt instructions. The
+guard is optional; installations that do not enable it keep the session-tool
+behavior described above.
+
+When enabled, the Gateway becomes the authority for slice scope, assignments,
+candidate and wave identity, exact model and thinking policy, route ownership,
+receipts, correction budgets, remediation revisions, and rollback epochs. A
+guarded controller receives `delegation_guard`, while a guarded worker receives
+`delegation_report`. Workers cannot create authority records or approve their
+own report.
+
+Guarded `sessions_spawn`, `sessions_send`, and `subagents` steer operations need
+an opaque, one-use delegation token. The Gateway binds each token to the exact
+controller session, worker, assignment, route kind, target session when
+applicable, candidate, wave, route family, and epoch. Worker-to-worker routes,
+cross-controller routes, stale assignments, model or thinking changes, and
+generic session-tool bypasses fail closed in enforcement mode. Audit mode
+records protected route decisions while preserving legacy delivery.
+
+The Gateway authorizes guarded child requests before consulting its generic
+idempotency cache and permits only one non-overlapping dispatch per assignment.
+Terminal routes, submitted reports, and prior dispatches invalidate every
+unused token or capability for that assignment. Durable task evidence remains
+held past normal retention until the protected ledger closes successful work;
+execution failures create immutable route-rejection evidence, while uncertain
+post-crash execution blocks recovery instead of risking duplicate side effects.
+New reports persist their receipt and validator result atomically, and restart
+reconciliation closes any older incomplete validation/finalization record.
+Rollback or validator-stack installation cannot advance the epoch while an
+assignment in the current epoch remains active.
+
+The protected workflow is ordered:
+
+1. Create a finite file scope and record its baseline.
+2. Complete one helper discovery assignment and one implementation assignment.
+3. Freeze the stopped implementation as a candidate.
+4. Start tester and reviewer on the same candidate before either can complete.
+5. Run conditional QA only after both reports are accepted and the candidate is
+   unchanged.
+   Tester, reviewer, and conditional QA must each finish their finite scope,
+   continue after every finding, perform a second distinct-failure sweep, and
+   return one consolidated report before remediation begins.
+6. Aggregate all validated findings into one immutable remediation revision.
+7. Run one consolidated remediation assignment, then freeze a new candidate for
+   targeted confirmation.
+
+The Gateway binds every guarded child to the slice's canonical worktree even
+when the worker's configured default workspace points elsewhere. It stores a
+protected dirty-path inventory with each candidate and rejects writable reports
+or wave freezes that changed paths outside the finite slice. A controller's
+bounded wait expiring is audit evidence only and leaves the worker pending; only
+the worker run's actual deadline creates a terminal timeout, and a timeout never
+counts as review or QA approval.
+
+Repository-wide scope cannot be represented by `.`, an empty path, a directory,
+or a glob. It uses an explicit operator-authorized repository scope. Slice scope
+uses canonical `openclaw-scope-v1` file entries with `existing` or `may-create`
+expectations. The Gateway stores the append-only ledger separately from agent
+workspaces and executes a digest-pinned, read-only validator bundle from
+protected state.
+
+Every guarded controller and worker must use a per-session Docker sandbox.
+Controller and verification workspaces are read-only; only the implementer is
+read-write. Guarded sandboxes reject inherited extra bind mounts, injected
+Docker environment values, browser binds, and dangerous bind or namespace
+overrides. Do not expose Gateway state, credentials, validator internals,
+receipt storage, lane tokens, or the Docker socket to child sandboxes.
+
 ## Visibility
 
 Session tools are scoped to limit what the agent can see:

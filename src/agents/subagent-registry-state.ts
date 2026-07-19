@@ -2,11 +2,17 @@ import {
   loadSubagentRegistryFromDisk,
   saveSubagentRegistryToDisk,
 } from "./subagent-registry.store.js";
-import type { SubagentRunRecord } from "./subagent-registry.types.js";
+import type {
+  SubagentRunRecord,
+  SubagentSliceBudgetRecord,
+} from "./subagent-registry.types.js";
 
-export function persistSubagentRunsToDisk(runs: Map<string, SubagentRunRecord>) {
+export function persistSubagentRunsToDisk(
+  runs: Map<string, SubagentRunRecord>,
+  sliceBudgets?: Map<string, SubagentSliceBudgetRecord>,
+) {
   try {
-    saveSubagentRegistryToDisk(runs);
+    saveSubagentRegistryToDisk(runs, sliceBudgets);
   } catch {
     // ignore persistence failures
   }
@@ -14,9 +20,18 @@ export function persistSubagentRunsToDisk(runs: Map<string, SubagentRunRecord>) 
 
 export function restoreSubagentRunsFromDisk(params: {
   runs: Map<string, SubagentRunRecord>;
+  sliceBudgets?: Map<string, SubagentSliceBudgetRecord>;
   mergeOnly?: boolean;
 }) {
   const restored = loadSubagentRegistryFromDisk();
+  if (params.sliceBudgets && restored.sliceBudgets) {
+    for (const [sliceKey, budget] of restored.sliceBudgets.entries()) {
+      if (params.mergeOnly && params.sliceBudgets.has(sliceKey)) {
+        continue;
+      }
+      params.sliceBudgets.set(sliceKey, budget);
+    }
+  }
   if (restored.size === 0) {
     return 0;
   }

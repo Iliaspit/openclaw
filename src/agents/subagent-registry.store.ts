@@ -4,7 +4,11 @@ import { resolveStateDir } from "../config/paths.js";
 import { loadJsonFile, saveJsonFile } from "../infra/json-file.js";
 import { readStringValue } from "../shared/string-coerce.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
-import type { SubagentRunRecord } from "./subagent-registry.types.js";
+import { normalizeSubagentSliceBudgetRecord } from "./subagent-registry-budget.js";
+import type {
+  SubagentRunRecord,
+  SubagentSliceBudgetRecord,
+} from "./subagent-registry.types.js";
 
 export type PersistedSubagentRegistryVersion = 1 | 2;
 
@@ -16,6 +20,7 @@ type PersistedSubagentRegistryV1 = {
 type PersistedSubagentRegistryV2 = {
   version: 2;
   runs: Record<string, PersistedSubagentRunRecord>;
+  sliceBudgets?: Record<string, PersistedSubagentSliceBudgetRecord>;
 };
 
 type PersistedSubagentRegistry = PersistedSubagentRegistryV1 | PersistedSubagentRegistryV2;
@@ -23,6 +28,10 @@ type PersistedSubagentRegistry = PersistedSubagentRegistryV1 | PersistedSubagent
 const REGISTRY_VERSION = 2 as const;
 
 type PersistedSubagentRunRecord = SubagentRunRecord;
+type PersistedSubagentSliceBudgetRecord = SubagentSliceBudgetRecord;
+export type LoadedSubagentRegistry = Map<string, SubagentRunRecord> & {
+  sliceBudgets?: Map<string, SubagentSliceBudgetRecord>;
+};
 
 type LegacySubagentRunRecord = PersistedSubagentRunRecord & {
   announceCompletedAt?: unknown;
@@ -46,7 +55,22 @@ export function resolveSubagentRegistryPath(): string {
   return path.join(resolveSubagentStateDir(process.env), "subagents", "runs.json");
 }
 
-export function loadSubagentRegistryFromDisk(): Map<string, SubagentRunRecord> {
+function attachSliceBudgets(
+  runs: Map<string, SubagentRunRecord>,
+  sliceBudgets: Map<string, SubagentSliceBudgetRecord>,
+): LoadedSubagentRegistry {
+  const loaded = runs as LoadedSubagentRegistry;
+  if (sliceBudgets.size > 0) {
+    Object.defineProperty(loaded, "sliceBudgets", {
+      configurable: true,
+      enumerable: false,
+      value: sliceBudgets,
+    });
+  }
+  return loaded;
+}
+
+export function loadSubagentRegistryFromDisk(): LoadedSubagentRegistry {
   const pathname = resolveSubagentRegistryPath();
   const raw = loadJsonFile(pathname);
   if (!raw || typeof raw !== "object") {
@@ -61,6 +85,15 @@ export function loadSubagentRegistryFromDisk(): Map<string, SubagentRunRecord> {
     return new Map();
   }
   const out = new Map<string, SubagentRunRecord>();
+  const sliceBudgets = new Map<string, SubagentSliceBudgetRecord>();
+  if (record.version === 2 && record.sliceBudgets && typeof record.sliceBudgets === "object") {
+    for (const [sliceKey, entry] of Object.entries(record.sliceBudgets)) {
+      const normalized = normalizeSubagentSliceBudgetRecord(entry, sliceKey);
+      if (normalized) {
+        sliceBudgets.set(normalized.sliceKey, normalized);
+      }
+    }
+  }
   const isLegacy = record.version === 1;
   let migrated = false;
   for (const [runId, entry] of Object.entries(runsRaw)) {
@@ -119,23 +152,33 @@ export function loadSubagentRegistryFromDisk(): Map<string, SubagentRunRecord> {
   }
   if (migrated) {
     try {
-      saveSubagentRegistryToDisk(out);
+      saveSubagentRegistryToDisk(out, sliceBudgets);
     } catch {
       // ignore migration write failures
     }
   }
-  return out;
+  return attachSliceBudgets(out, sliceBudgets);
 }
 
-export function saveSubagentRegistryToDisk(runs: Map<string, SubagentRunRecord>) {
+export function saveSubagentRegistryToDisk(
+  runs: Map<string, SubagentRunRecord>,
+  sliceBudgets?: Map<string, SubagentSliceBudgetRecord>,
+) {
   const pathname = resolveSubagentRegistryPath();
   const serialized: Record<string, PersistedSubagentRunRecord> = {};
   for (const [runId, entry] of runs.entries()) {
     serialized[runId] = entry;
   }
+  const serializedSliceBudgets: Record<string, PersistedSubagentSliceBudgetRecord> = {};
+  for (const [sliceKey, entry] of sliceBudgets?.entries() ?? []) {
+    serializedSliceBudgets[sliceKey] = entry;
+  }
   const out: PersistedSubagentRegistry = {
     version: REGISTRY_VERSION,
     runs: serialized,
+    ...(Object.keys(serializedSliceBudgets).length > 0
+      ? { sliceBudgets: serializedSliceBudgets }
+      : {}),
   };
   saveJsonFile(pathname, out);
 }

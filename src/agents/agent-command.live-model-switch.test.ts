@@ -11,6 +11,17 @@ const state = vi.hoisted(() => ({
   updateSessionStoreAfterAgentRunMock: vi.fn(),
   deliverAgentCommandResultMock: vi.fn(),
   clearSessionAuthProfileOverrideMock: vi.fn(),
+  acpManagerMock: {
+    resolveSession: vi.fn<() => unknown>(() => null),
+    runTurn: vi.fn<() => Promise<unknown>>(),
+  },
+  buildAcpResultMock: vi.fn(),
+  createAcpVisibleTextAccumulatorMock: vi.fn(),
+  emitAcpAssistantDeltaMock: vi.fn(),
+  emitAcpLifecycleEndMock: vi.fn(),
+  emitAcpLifecycleErrorMock: vi.fn(),
+  emitAcpLifecycleStartMock: vi.fn(),
+  persistAcpTurnTranscriptMock: vi.fn(),
   authProfileStoreMock: { profiles: {} } as { profiles: Record<string, unknown> },
   sessionEntryMock: undefined as unknown,
   sessionStoreMock: undefined as unknown,
@@ -21,13 +32,14 @@ vi.mock("./model-fallback.js", () => ({
 }));
 
 vi.mock("./command/attempt-execution.runtime.js", () => ({
-  buildAcpResult: vi.fn(),
-  createAcpVisibleTextAccumulator: vi.fn(),
-  emitAcpAssistantDelta: vi.fn(),
-  emitAcpLifecycleEnd: vi.fn(),
-  emitAcpLifecycleError: vi.fn(),
-  emitAcpLifecycleStart: vi.fn(),
-  persistAcpTurnTranscript: vi.fn(),
+  buildAcpResult: (...args: unknown[]) => state.buildAcpResultMock(...args),
+  createAcpVisibleTextAccumulator: (...args: unknown[]) =>
+    state.createAcpVisibleTextAccumulatorMock(...args),
+  emitAcpAssistantDelta: (...args: unknown[]) => state.emitAcpAssistantDeltaMock(...args),
+  emitAcpLifecycleEnd: (...args: unknown[]) => state.emitAcpLifecycleEndMock(...args),
+  emitAcpLifecycleError: (...args: unknown[]) => state.emitAcpLifecycleErrorMock(...args),
+  emitAcpLifecycleStart: (...args: unknown[]) => state.emitAcpLifecycleStartMock(...args),
+  persistAcpTurnTranscript: (...args: unknown[]) => state.persistAcpTurnTranscriptMock(...args),
   persistSessionEntry: vi.fn(),
   prependInternalEventContext: (_body: string) => _body,
   runAgentAttempt: (...args: unknown[]) => state.runAgentAttemptMock(...args),
@@ -82,7 +94,8 @@ vi.mock("../acp/policy.js", () => ({
 }));
 
 vi.mock("../acp/runtime/errors.js", () => ({
-  toAcpRuntimeError: vi.fn(),
+  toAcpRuntimeError: ({ error, fallbackMessage }: { error: unknown; fallbackMessage: string }) =>
+    error instanceof Error ? error : new Error(fallbackMessage),
 }));
 
 vi.mock("../acp/runtime/session-identifiers.js", () => ({
@@ -327,9 +340,7 @@ vi.mock("./workspace.js", () => ({
 }));
 
 vi.mock("../acp/control-plane/manager.js", () => ({
-  getAcpSessionManager: () => ({
-    resolveSession: () => null,
-  }),
+  getAcpSessionManager: () => state.acpManagerMock,
 }));
 
 let agentCommand: typeof import("./agent-command.js").agentCommand;
@@ -401,6 +412,25 @@ describe("agentCommand – LiveSessionModelSwitchError retry", () => {
     state.sessionStoreMock = undefined;
     state.deliverAgentCommandResultMock.mockResolvedValue(undefined);
     state.updateSessionStoreAfterAgentRunMock.mockResolvedValue(undefined);
+    state.acpManagerMock.resolveSession.mockReset();
+    state.acpManagerMock.resolveSession.mockReturnValue(null);
+    state.acpManagerMock.runTurn.mockReset();
+    state.buildAcpResultMock.mockReset();
+    state.createAcpVisibleTextAccumulatorMock.mockReset();
+    state.createAcpVisibleTextAccumulatorMock.mockReturnValue({
+      consume: vi.fn(),
+      finalize: vi.fn(() => ""),
+      finalizeRaw: vi.fn(() => ""),
+    });
+    state.emitAcpAssistantDeltaMock.mockReset();
+    state.emitAcpLifecycleEndMock.mockReset();
+    state.emitAcpLifecycleErrorMock.mockReset();
+    state.emitAcpLifecycleStartMock.mockReset();
+    state.persistAcpTurnTranscriptMock.mockReset();
+    state.persistAcpTurnTranscriptMock.mockResolvedValue({
+      sessionId: "session-1",
+      updatedAt: Date.now(),
+    });
   });
 
   afterEach(() => {
@@ -513,6 +543,37 @@ describe("agentCommand – LiveSessionModelSwitchError retry", () => {
 
     expect(capturedAuthProfileProvider).toBe("codex-cli");
     expect(state.clearSessionAuthProfileOverrideMock).not.toHaveBeenCalled();
+  });
+
+  it("persists an ACP failure transcript when the turn fails before completion", async () => {
+    state.acpManagerMock.resolveSession.mockReturnValue({
+      kind: "ready",
+      meta: { agent: "main" },
+    });
+    state.acpManagerMock.runTurn.mockRejectedValueOnce(new Error("backend died"));
+
+    await expect(
+      agentCommand({
+        message: "hi",
+        sessionKey: "agent:main",
+        senderIsOwner: true,
+      }),
+    ).rejects.toThrow("backend died");
+
+    expect(state.persistAcpTurnTranscriptMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: "hi",
+        finalText: "Agent run failed before completion: backend died",
+        sessionId: "session-1",
+        sessionKey: "agent:main",
+        sessionAgentId: "default",
+        sessionCwd: "/tmp",
+      }),
+    );
+    expect(state.emitAcpLifecycleErrorMock).toHaveBeenCalledWith({
+      runId: "session-1",
+      message: "backend died",
+    });
   });
 
   it("updates hasSessionModelOverride for fallback resolution after switch", async () => {

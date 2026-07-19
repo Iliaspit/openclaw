@@ -22,6 +22,7 @@ import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "../shared/string-coerce.js";
+import { findTaskRunByExactScope } from "../tasks/task-executor.js";
 import type { BootstrapContextMode } from "./bootstrap-files.js";
 import {
   markChildRoutePendingSpawnFailed,
@@ -29,6 +30,13 @@ import {
 } from "./child-route-health.js";
 import { resolveChildRouteProviderContextForSpawn } from "./child-route-provider-context.js";
 import { guardFreshChildSpawnAuth } from "./child-route-spawn-preflight.js";
+import type { DelegationAssignmentRecord } from "./delegation/contracts.js";
+import { openConfiguredDelegationLedger } from "./delegation/gateway-task-reconciliation.js";
+import {
+  resolveDelegationGuardConfig,
+  resolveDelegationGuardPrincipal,
+  resolveDelegationPolicyDigest,
+} from "./delegation/policy.js";
 import {
   mapToolContextToSpawnedRunMetadata,
   normalizeSpawnedRunMetadata,
@@ -44,7 +52,9 @@ import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import {
   assessSubagentSliceBudgetForSpawn,
   countActiveRunsForSession,
+  failPendingSubagentTaskRun,
   recordSubagentSliceRouteHealthUnavailableForSpawn,
+  registerPendingSubagentTaskRun,
   registerSubagentRun,
 } from "./subagent-registry.js";
 import { resolveSubagentSpawnAcceptedNote } from "./subagent-spawn-accepted-note.js";
@@ -52,6 +62,7 @@ export {
   SUBAGENT_SPAWN_ACCEPTED_NOTE,
   SUBAGENT_SPAWN_SESSION_ACCEPTED_NOTE,
 } from "./subagent-spawn-accepted-note.js";
+import type { SubagentSliceContinuation, SubagentSliceRole } from "./subagent-registry.types.js";
 import {
   resolveConfiguredSubagentRunTimeoutSeconds,
   resolveSubagentModelAndThinkingPlan,
@@ -89,10 +100,6 @@ import {
   type SpawnSubagentMode,
   type SpawnSubagentSandboxMode,
 } from "./subagent-spawn.types.js";
-import type {
-  SubagentSliceContinuation,
-  SubagentSliceRole,
-} from "./subagent-registry.types.js";
 
 export {
   SUBAGENT_SPAWN_CONTEXT_MODES,
@@ -167,6 +174,38 @@ function buildPatchableSessionRuntime(
   };
 }
 
+function buildInitialChildSessionPatch(params: {
+  spawnDepth: number;
+  subagentRole: "main" | "orchestrator" | "leaf";
+  subagentControlScope: "children" | "none";
+  initialSessionPatch: Record<string, unknown>;
+  guarded: boolean;
+}): Record<string, unknown> {
+  return {
+    spawnDepth: params.spawnDepth,
+    subagentRole: params.subagentRole === "main" ? null : params.subagentRole,
+    subagentControlScope: params.subagentControlScope,
+    // For guarded routes, model and thinking come from protected assignment
+    // authority and are persisted internally below. They must not re-enter the
+    // public sessions.patch path as if they were caller-supplied overrides.
+    ...(params.guarded ? {} : params.initialSessionPatch),
+  };
+}
+
+function buildProtectedDelegationAssignmentPrompt(
+  assignment: Pick<DelegationAssignmentRecord, "assignmentId" | "purpose" | "role" | "scopeUnits">,
+): string {
+  const assignedScopeJson = JSON.stringify(assignment.scopeUnits);
+  return [
+    "[Protected Delegation Assignment]",
+    `Runtime authority binds this session to assignment ${assignment.assignmentId} as ${assignment.role} for ${assignment.purpose}.`,
+    "When calling delegation_report, report.scope.assigned MUST exactly equal the following JSON array:",
+    assignedScopeJson,
+    "Copy those scope IDs byte-for-byte into inspected, omitted, failed, newlyDiscovered, command scopeIds, and finding scopeIds where applicable.",
+    "Do not add labels, aliases, descriptions, expectation annotations, or Markdown to a scope ID.",
+  ].join("\n");
+}
+
 const defaultSubagentSpawnDeps: SubagentSpawnDeps = {
   callGateway,
   forkSessionFromParent,
@@ -183,6 +222,8 @@ let subagentSpawnDeps: SubagentSpawnDeps = defaultSubagentSpawnDeps;
 
 export type SpawnSubagentParams = {
   task: string;
+  /** Runtime-owned guarded assignment consumed by the caller's routing gate. */
+  delegationAssignmentId?: string;
   label?: string;
   agentId?: string;
   model?: string;
@@ -283,12 +324,14 @@ async function persistInitialChildSessionRuntimeModel(params: {
   cfg: OpenClawConfig;
   childSessionKey: string;
   resolvedModel?: string;
+  thinkingLevel?: string;
   sessionRuntime?: SubagentSessionRuntimeReplay;
 }): Promise<string | undefined> {
   const { provider, model } = splitModelRef(params.resolvedModel);
+  const thinkingLevel = normalizeThinkLevel(params.thinkingLevel);
   const authProfileOverride = normalizeOptionalString(params.sessionRuntime?.authProfileOverride);
   const authProfileOverrideSource = params.sessionRuntime?.authProfileOverrideSource;
-  if (!model && !authProfileOverride) {
+  if (!model && !thinkingLevel && !authProfileOverride) {
     return undefined;
   }
   try {
@@ -305,6 +348,7 @@ async function persistInitialChildSessionRuntimeModel(params: {
       store[target.canonicalKey] = subagentSpawnDeps.mergeSessionEntry(store[target.canonicalKey], {
         ...(model ? { model } : {}),
         ...(provider ? { modelProvider: provider } : {}),
+        ...(thinkingLevel ? { thinkingLevel } : {}),
         ...(authProfileOverride ? { authProfileOverride } : {}),
         ...(authProfileOverride && authProfileOverrideSource ? { authProfileOverrideSource } : {}),
       });
@@ -337,7 +381,7 @@ async function cleanupProvisionalSession(
     emitLifecycleHooks?: boolean;
     deleteTranscript?: boolean;
   },
-): Promise<void> {
+): Promise<string | undefined> {
   try {
     await callSubagentGateway({
       method: "sessions.delete",
@@ -348,8 +392,9 @@ async function cleanupProvisionalSession(
       },
       timeoutMs: 10_000,
     });
-  } catch {
-    // Best-effort cleanup only.
+    return undefined;
+  } catch (error) {
+    return summarizeError(error);
   }
 }
 
@@ -358,18 +403,82 @@ async function cleanupFailedSpawnBeforeAgentStart(params: {
   attachmentAbsDir?: string;
   emitLifecycleHooks?: boolean;
   deleteTranscript?: boolean;
-}): Promise<void> {
+}): Promise<string | undefined> {
+  let attachmentCleanupError: string | undefined;
   if (params.attachmentAbsDir) {
     try {
       await fs.rm(params.attachmentAbsDir, { recursive: true, force: true });
-    } catch {
-      // Best-effort cleanup only.
+    } catch (error) {
+      attachmentCleanupError = `failed to remove provisional attachments: ${summarizeError(error)}`;
     }
   }
-  await cleanupProvisionalSession(params.childSessionKey, {
+  const sessionCleanupError = await cleanupProvisionalSession(params.childSessionKey, {
     emitLifecycleHooks: params.emitLifecycleHooks,
     deleteTranscript: params.deleteTranscript,
   });
+  return (
+    [attachmentCleanupError, sessionCleanupError]
+      .filter((value): value is string => Boolean(value))
+      .join("; ") || undefined
+  );
+}
+
+function failPendingSubagentTaskRunVerified(params: {
+  pendingRunId: string;
+  childSessionKey: string;
+  error: string;
+}): string | undefined {
+  try {
+    failPendingSubagentTaskRun({
+      pendingRunId: params.pendingRunId,
+      error: params.error,
+    });
+    const task = findTaskRunByExactScope({
+      runId: params.pendingRunId,
+      runtime: "subagent",
+      childSessionKey: params.childSessionKey,
+    });
+    if (!task) {
+      return "durable pending subagent task disappeared during terminalization";
+    }
+    if (task.status === "queued" || task.status === "running") {
+      return `durable pending subagent task remained ${task.status}`;
+    }
+    return undefined;
+  } catch (error) {
+    return summarizeError(error);
+  }
+}
+
+async function cleanupRejectedProtectedInitialSpawns(
+  ledger: ReturnType<typeof openConfiguredDelegationLedger>,
+): Promise<void> {
+  for (const target of ledger.listRejectedInitialSpawnCleanupTargets()) {
+    const pending = await markChildRoutePendingSpawnFailed({
+      childSessionKey: target.childSessionKey,
+      requesterSessionKey: target.controllerSessionKey,
+      idempotencyKey: target.runId,
+    });
+    if (!pending.ok) {
+      throw new Error(
+        `failed to terminalize rejected protected pending-spawn state: ${pending.error}`,
+      );
+    }
+    await callSubagentGateway({
+      method: "sessions.delete",
+      params: {
+        key: target.childSessionKey,
+        deleteTranscript: true,
+        emitLifecycleHooks: false,
+      },
+      timeoutMs: 10_000,
+    });
+    ledger.recordRejectedInitialSpawnCleanup({
+      assignmentId: target.assignmentId,
+      childSessionKey: target.childSessionKey,
+      runId: target.runId,
+    });
+  }
 }
 
 type PreparedSubagentSpawnContext =
@@ -501,6 +610,16 @@ function summarizeError(err: unknown): string {
     return err;
   }
   return "error";
+}
+
+function summarizeDelegationGatewayResponse(response: unknown, fallback: string): string {
+  if (response && typeof response === "object") {
+    const message = normalizeOptionalString((response as { message?: unknown }).message);
+    if (message) {
+      return message;
+    }
+  }
+  return fallback;
 }
 
 async function ensureThreadBindingForSubagentSpawn(params: {
@@ -692,8 +811,101 @@ export async function spawnSubagentDirect(
       };
     }
   }
+  const delegationAssignmentId = normalizeOptionalString(params.delegationAssignmentId);
+  const delegationGuard = resolveDelegationGuardConfig(cfg);
+  const delegationTarget = delegationGuard
+    ? resolveDelegationGuardPrincipal(delegationGuard, targetAgentId)
+    : undefined;
+  if (
+    delegationGuard?.mode === "enforce" &&
+    delegationTarget?.kind === "worker" &&
+    !delegationAssignmentId
+  ) {
+    return {
+      status: "forbidden",
+      error:
+        "Guarded workers can only be spawned through a controller-issued delegation assignment.",
+    };
+  }
+  let delegationAssignment: DelegationAssignmentRecord | undefined;
+  let delegationLedger: ReturnType<typeof openConfiguredDelegationLedger> | undefined;
+  let delegationRepositoryRoot: string | undefined;
+  if (delegationAssignmentId) {
+    if (!delegationGuard) {
+      return {
+        status: "error",
+        error: "A guarded delegation assignment cannot run while the delegation guard is disabled.",
+      };
+    }
+    if (delegationTarget?.kind !== "worker") {
+      return {
+        status: "error",
+        error: "A guarded delegation assignment can only target a configured worker.",
+      };
+    }
+    try {
+      delegationLedger = openConfiguredDelegationLedger({
+        guard: delegationGuard,
+        policyDigest: resolveDelegationPolicyDigest(delegationGuard),
+      });
+      await cleanupRejectedProtectedInitialSpawns(delegationLedger);
+      delegationAssignment = delegationLedger.getAssignment(delegationAssignmentId);
+    } catch (err) {
+      return {
+        status: "error",
+        error: `Unable to resolve the protected delegation assignment: ${summarizeError(err)}`,
+      };
+    }
+    if (
+      !delegationAssignment ||
+      delegationAssignment.epoch !== delegationLedger.currentEpoch() ||
+      normalizeAgentId(delegationAssignment.controllerAgentId) !== requesterAgentId ||
+      delegationAssignment.controllerSessionKey !== requesterInternalKey ||
+      normalizeAgentId(delegationAssignment.workerAgentId) !== targetAgentId
+    ) {
+      return {
+        status: "error",
+        error:
+          "The guarded delegation assignment is stale or does not match this controller/worker route.",
+      };
+    }
+    const slice = delegationLedger.getSliceScope(delegationAssignment.sliceId);
+    if (!slice || slice.epoch !== delegationLedger.currentEpoch()) {
+      return {
+        status: "error",
+        error: "The guarded delegation slice workspace is missing or stale.",
+      };
+    }
+    try {
+      delegationRepositoryRoot = await fs.realpath(slice.repositoryRoot);
+    } catch (err) {
+      return {
+        status: "error",
+        error: `Unable to resolve the protected delegation workspace: ${summarizeError(err)}`,
+      };
+    }
+    if (delegationRepositoryRoot !== slice.repositoryRoot) {
+      return {
+        status: "error",
+        error: "The protected delegation workspace changed canonical identity.",
+      };
+    }
+    const replayThinking = params.sessionRuntime?.thinkingLevel;
+    if (
+      replayThinking &&
+      normalizeThinkLevel(replayThinking) !== delegationAssignment.requiredThinking
+    ) {
+      return {
+        status: "error",
+        error: `Guarded delegation requires exact ${delegationAssignment.requiredThinking} thinking; conflicting session runtime patches are not allowed.`,
+      };
+    }
+  }
   const sliceBudget = assessSubagentSliceBudgetForSpawn({
     requesterSessionKey: requesterInternalKey,
+    delegationAssignmentId: delegationAssignment?.assignmentId,
+    delegationSliceId: delegationAssignment?.sliceId,
+    delegationEpoch: delegationAssignment?.epoch,
     targetAgentId,
     label: label || undefined,
     sliceRole,
@@ -742,6 +954,7 @@ export async function spawnSubagentDirect(
     targetAgentConfig,
     modelOverride,
     thinkingOverrideRaw,
+    requiredThinking: delegationAssignment?.requiredThinking,
   });
   if (plan.status === "error") {
     return {
@@ -750,6 +963,12 @@ export async function spawnSubagentDirect(
     };
   }
   const { resolvedModel, thinkingOverride } = plan;
+  if (delegationAssignment && resolvedModel !== delegationAssignment.requiredModel) {
+    return {
+      status: "error",
+      error: `Guarded delegation requires exact model ${delegationAssignment.requiredModel}; model switches and fallbacks are not allowed.`,
+    };
+  }
   const spawnProviderContext = resolveChildRouteProviderContextForSpawn({
     cfg,
     sessionKey: childSessionKey,
@@ -760,28 +979,35 @@ export async function spawnSubagentDirect(
   if (authProfileOverride) {
     spawnProviderContext.authProfileKey = authProfileOverride;
   }
+  // Shared with every registration-failure path below: repeated failures for
+  // the same requester+task slice trip the route-health-unavailable budget,
+  // so a persistently broken route (e.g. a task-store write failure) surfaces
+  // as an explicit blocker instead of silently retrying forever.
+  const recordRegistrationRouteHealthUnavailable = (fallbackError: string): string => {
+    const routeHealthBudget = recordSubagentSliceRouteHealthUnavailableForSpawn({
+      requesterSessionKey: requesterInternalKey,
+      delegationAssignmentId: delegationAssignment?.assignmentId,
+      delegationSliceId: delegationAssignment?.sliceId,
+      delegationEpoch: delegationAssignment?.epoch,
+      targetAgentId,
+      label: label || undefined,
+      sliceRole,
+      sliceContinuation,
+      task,
+      childSessionKey,
+    });
+    return !routeHealthBudget.ok ? routeHealthBudget.error : fallbackError;
+  };
   const spawnAuthPreflight = await guardFreshChildSpawnAuth(spawnProviderContext, {
     childSessionKey,
     includeProviderDefaultCredentialBlockers: true,
   });
   if (!spawnAuthPreflight.ok) {
-    const routeHealthBudget =
-      spawnAuthPreflight.code === "child_route_health_unavailable"
-        ? recordSubagentSliceRouteHealthUnavailableForSpawn({
-            requesterSessionKey: requesterInternalKey,
-            targetAgentId,
-            label: label || undefined,
-            sliceRole,
-            sliceContinuation,
-            task,
-            childSessionKey,
-          })
-        : undefined;
     return {
       status: "error",
       error:
-        routeHealthBudget && !routeHealthBudget.ok
-          ? routeHealthBudget.error
+        spawnAuthPreflight.code === "child_route_health_unavailable"
+          ? recordRegistrationRouteHealthUnavailable(spawnAuthPreflight.error)
           : spawnAuthPreflight.error,
       childSessionKey,
     };
@@ -815,93 +1041,128 @@ export async function spawnSubagentDirect(
       childSessionKey,
     };
   }
-  const markPendingSpawnFailed = async () => {
-    await markChildRoutePendingSpawnFailed({
+  const markPendingSpawnFailed = async (): Promise<string | undefined> => {
+    const result = await markChildRoutePendingSpawnFailed({
       childSessionKey,
       requesterSessionKey: requesterInternalKey,
       idempotencyKey: childIdem,
       pendingSpawnId: pendingSpawn.pendingSpawnId,
     });
+    return result.ok ? undefined : result.error;
+  };
+  const failPreparedInitialSpawn = async (failure: {
+    error: string;
+    status?: "error" | "forbidden";
+    attachmentAbsDir?: string;
+    rollback?: () => void | Promise<void>;
+    taskMayExist?: boolean;
+  }) => {
+    const cleanupErrors: string[] = [];
+    if (failure.rollback) {
+      try {
+        await failure.rollback();
+      } catch (error) {
+        cleanupErrors.push(`context rollback failed: ${summarizeError(error)}`);
+      }
+    }
+    const pendingCleanupError = await markPendingSpawnFailed();
+    if (pendingCleanupError) {
+      cleanupErrors.push(`pending-spawn cleanup failed: ${pendingCleanupError}`);
+    }
+    if (failure.taskMayExist) {
+      const taskCleanupError = failPendingSubagentTaskRunVerified({
+        pendingRunId: childIdem,
+        childSessionKey,
+        error: failure.error,
+      });
+      if (taskCleanupError) {
+        cleanupErrors.push(`task cleanup failed: ${taskCleanupError}`);
+      }
+    }
+    const sessionCleanupError = await cleanupFailedSpawnBeforeAgentStart({
+      childSessionKey,
+      attachmentAbsDir: failure.attachmentAbsDir,
+      emitLifecycleHooks: threadBindingReady,
+      deleteTranscript: true,
+    });
+    if (sessionCleanupError) {
+      cleanupErrors.push(`session cleanup failed: ${sessionCleanupError}`);
+    }
+    if (delegationAssignment && delegationLedger) {
+      try {
+        delegationLedger.rejectRouteIfOpen({
+          assignmentId: delegationAssignment.assignmentId,
+          targetSessionKey: childSessionKey,
+          runId: childIdem,
+          reason: failure.error,
+        });
+      } catch (error) {
+        cleanupErrors.push(`assignment settlement failed: ${summarizeError(error)}`);
+      }
+    }
+    return {
+      status: failure.status ?? ("error" as const),
+      error:
+        cleanupErrors.length > 0 ? `${failure.error}; ${cleanupErrors.join("; ")}` : failure.error,
+      childSessionKey,
+    };
   };
 
-  const initialChildSessionPatch: Record<string, unknown> = {
+  const initialChildSessionPatch = buildInitialChildSessionPatch({
     spawnDepth: childDepth,
-    subagentRole: childCapabilities.role === "main" ? null : childCapabilities.role,
+    subagentRole: childCapabilities.role,
     subagentControlScope: childCapabilities.controlScope,
-    ...plan.initialSessionPatch,
-  };
+    initialSessionPatch: plan.initialSessionPatch,
+    guarded: Boolean(delegationAssignment),
+  });
 
   const initialPatchError = await patchChildSession(initialChildSessionPatch);
   if (initialPatchError) {
-    await markPendingSpawnFailed();
-    await cleanupFailedSpawnBeforeAgentStart({
-      childSessionKey,
-      emitLifecycleHooks: false,
-      deleteTranscript: true,
-    });
-    return {
-      status: "error",
+    return failPreparedInitialSpawn({
       error: initialPatchError,
-      childSessionKey,
-    };
+    });
   }
-  if (resolvedModel || authProfileOverride) {
+  if (resolvedModel || delegationAssignment || authProfileOverride) {
     const runtimeModelPersistError = await persistInitialChildSessionRuntimeModel({
       cfg,
       childSessionKey,
       resolvedModel,
+      thinkingLevel: delegationAssignment?.requiredThinking,
       sessionRuntime: params.sessionRuntime,
     });
     if (runtimeModelPersistError) {
-      await markPendingSpawnFailed();
-      try {
-        await callSubagentGateway({
-          method: "sessions.delete",
-          params: { key: childSessionKey, emitLifecycleHooks: false },
-          timeoutMs: 10_000,
-        });
-      } catch {
-        // Best-effort cleanup only.
-      }
-      return {
-        status: "error",
+      return failPreparedInitialSpawn({
         error: runtimeModelPersistError,
-        childSessionKey,
-      };
+      });
     }
     modelApplied = true;
   }
   if (requestThreadBinding) {
-    const bindResult = await ensureThreadBindingForSubagentSpawn({
-      hookRunner,
-      childSessionKey,
-      agentId: targetAgentId,
-      label: label || undefined,
-      mode: spawnMode,
-      requesterSessionKey: requesterInternalKey,
-      requester: {
-        channel: requesterOrigin?.channel,
-        accountId: requesterOrigin?.accountId,
-        to: requesterOrigin?.to,
-        threadId: requesterOrigin?.threadId,
-      },
-    });
-    if (bindResult.status === "error") {
-      await markPendingSpawnFailed();
-      try {
-        await callSubagentGateway({
-          method: "sessions.delete",
-          params: { key: childSessionKey, emitLifecycleHooks: false },
-          timeoutMs: 10_000,
-        });
-      } catch {
-        // Best-effort cleanup only.
-      }
-      return {
-        status: "error",
-        error: bindResult.error,
+    let bindResult: Awaited<ReturnType<typeof ensureThreadBindingForSubagentSpawn>>;
+    try {
+      bindResult = await ensureThreadBindingForSubagentSpawn({
+        hookRunner,
         childSessionKey,
-      };
+        agentId: targetAgentId,
+        label: label || undefined,
+        mode: spawnMode,
+        requesterSessionKey: requesterInternalKey,
+        requester: {
+          channel: requesterOrigin?.channel,
+          accountId: requesterOrigin?.accountId,
+          to: requesterOrigin?.to,
+          threadId: requesterOrigin?.threadId,
+        },
+      });
+    } catch (error) {
+      return failPreparedInitialSpawn({
+        error: `Failed to bind protected child thread: ${summarizeError(error)}`,
+      });
+    }
+    if (bindResult.status === "error") {
+      return failPreparedInitialSpawn({
+        error: bindResult.error,
+      });
     }
     threadBindingReady = true;
   }
@@ -918,6 +1179,9 @@ export async function spawnSubagentDirect(
     childDepth,
     maxSpawnDepth,
   });
+  if (delegationAssignment) {
+    childSystemPrompt = `${childSystemPrompt}\n\n${buildProtectedDelegationAssignmentPrompt(delegationAssignment)}`;
+  }
 
   let retainOnSessionKeep = false;
   let attachmentsReceipt:
@@ -930,22 +1194,24 @@ export async function spawnSubagentDirect(
     | undefined;
   let attachmentAbsDir: string | undefined;
   let attachmentRootDir: string | undefined;
-  const materializedAttachments = await materializeSubagentAttachments({
-    config: cfg,
-    targetAgentId,
-    attachments: params.attachments,
-    mountPathHint,
-  });
-  if (materializedAttachments && materializedAttachments.status !== "ok") {
-    await markPendingSpawnFailed();
-    await cleanupProvisionalSession(childSessionKey, {
-      emitLifecycleHooks: threadBindingReady,
-      deleteTranscript: true,
+  let materializedAttachments: Awaited<ReturnType<typeof materializeSubagentAttachments>>;
+  try {
+    materializedAttachments = await materializeSubagentAttachments({
+      config: cfg,
+      targetAgentId,
+      attachments: params.attachments,
+      mountPathHint,
     });
-    return {
+  } catch (error) {
+    return failPreparedInitialSpawn({
+      error: `Failed to materialize subagent attachments: ${summarizeError(error)}`,
+    });
+  }
+  if (materializedAttachments && materializedAttachments.status !== "ok") {
+    return failPreparedInitialSpawn({
       status: materializedAttachments.status,
       error: materializedAttachments.error,
-    };
+    });
   }
   if (materializedAttachments?.status === "ok") {
     retainOnSessionKeep = materializedAttachments.retainOnSessionKeep;
@@ -957,26 +1223,26 @@ export async function spawnSubagentDirect(
 
   const spawnContextMode: SpawnSubagentContextMode =
     params.context === "fork" ? "fork" : "isolated";
-  const preparedContext = await prepareSubagentSpawnContext({
-    cfg,
-    contextMode: spawnContextMode,
-    parentSessionKey: requesterInternalKey,
-    childSessionKey,
-    targetAgentId,
-  });
-  if (preparedContext.status === "error") {
-    await markPendingSpawnFailed();
-    await cleanupFailedSpawnBeforeAgentStart({
+  let preparedContext: Awaited<ReturnType<typeof prepareSubagentSpawnContext>>;
+  try {
+    preparedContext = await prepareSubagentSpawnContext({
+      cfg,
+      contextMode: spawnContextMode,
+      parentSessionKey: requesterInternalKey,
       childSessionKey,
-      attachmentAbsDir,
-      emitLifecycleHooks: threadBindingReady,
-      deleteTranscript: true,
+      targetAgentId,
     });
-    return {
-      status: "error",
+  } catch (error) {
+    return failPreparedInitialSpawn({
+      error: `Failed to prepare subagent context: ${summarizeError(error)}`,
+      attachmentAbsDir,
+    });
+  }
+  if (preparedContext.status === "error") {
+    return failPreparedInitialSpawn({
       error: preparedContext.error,
-      childSessionKey,
-    };
+      attachmentAbsDir,
+    });
   }
 
   const bootstrapContextMode: BootstrapContextMode | undefined = params.lightContext
@@ -1000,6 +1266,19 @@ export async function spawnSubagentDirect(
     agentGroupSpace: ctx.agentGroupSpace,
     workspaceDir: ctx.workspaceDir,
   });
+  if (delegationRepositoryRoot) {
+    try {
+      if ((await fs.realpath(delegationRepositoryRoot)) !== delegationRepositoryRoot) {
+        throw new Error("canonical workspace identity changed");
+      }
+    } catch (err) {
+      return failPreparedInitialSpawn({
+        error: `Protected delegation workspace is no longer available: ${summarizeError(err)}`,
+        attachmentAbsDir,
+        rollback: preparedContext.rollback,
+      });
+    }
+  }
   const spawnedMetadata = normalizeSpawnedRunMetadata({
     spawnedBy: spawnedByKey,
     ...toolSpawnMetadata,
@@ -1008,7 +1287,8 @@ export async function spawnSubagentDirect(
       targetAgentId,
       requesterSessionKey: requesterInternalKey,
       explicitWorkspaceDir:
-        targetAgentId === requesterAgentId ? toolSpawnMetadata.workspaceDir : undefined,
+        delegationRepositoryRoot ??
+        (targetAgentId === requesterAgentId ? toolSpawnMetadata.workspaceDir : undefined),
     }),
   });
   const patchableSessionRuntime = buildPatchableSessionRuntime(params.sessionRuntime);
@@ -1018,18 +1298,83 @@ export async function spawnSubagentDirect(
     ...(spawnedMetadata.workspaceDir ? { spawnedWorkspaceDir: spawnedMetadata.workspaceDir } : {}),
   });
   if (spawnLineagePatchError) {
-    await markPendingSpawnFailed();
-    await cleanupFailedSpawnBeforeAgentStart({
-      childSessionKey,
-      attachmentAbsDir,
-      emitLifecycleHooks: threadBindingReady,
-      deleteTranscript: true,
-    });
-    return {
-      status: "error",
+    return failPreparedInitialSpawn({
       error: spawnLineagePatchError,
+      attachmentAbsDir,
+      rollback: preparedContext.rollback,
+    });
+  }
+
+  try {
+    registerPendingSubagentTaskRun({
+      pendingRunId: childIdem,
+      requesterSessionKey: requesterInternalKey,
+      requesterOrigin,
       childSessionKey,
-    };
+      task,
+      label: label || undefined,
+      expectsCompletionMessage,
+    });
+  } catch (err) {
+    const registrationError = `Failed to register subagent task: ${summarizeError(err)}`;
+    return failPreparedInitialSpawn({
+      error: delegationAssignment
+        ? registrationError
+        : recordRegistrationRouteHealthUnavailable(registrationError),
+      attachmentAbsDir,
+      rollback: preparedContext.rollback,
+      taskMayExist: true,
+    });
+  }
+
+  let delegationGatewayDispatch: string | undefined;
+  if (delegationAssignmentId && delegationLedger) {
+    try {
+      const guardedDispatch = delegationLedger.bindInitialSpawnWithGatewayDispatch({
+        assignmentId: delegationAssignmentId,
+        controllerSessionKey: requesterInternalKey,
+        childSessionKey,
+        idempotencyKey: childIdem,
+      });
+      delegationGatewayDispatch = guardedDispatch.capability;
+    } catch (err) {
+      await rollbackPreparedSubagentContext(preparedContext.rollback);
+      const pendingCleanupError = await markPendingSpawnFailed();
+      const taskCleanupError = failPendingSubagentTaskRunVerified({
+        pendingRunId: childIdem,
+        childSessionKey,
+        error: "Failed to bind the protected delegation assignment.",
+      });
+      const sessionCleanupError = await cleanupFailedSpawnBeforeAgentStart({
+        childSessionKey,
+        attachmentAbsDir,
+        emitLifecycleHooks: threadBindingReady,
+        deleteTranscript: true,
+      });
+      const cleanupErrors = [
+        pendingCleanupError ? `pending-spawn cleanup failed: ${pendingCleanupError}` : undefined,
+        taskCleanupError ? `task cleanup failed: ${taskCleanupError}` : undefined,
+        sessionCleanupError ? `session cleanup failed: ${sessionCleanupError}` : undefined,
+      ].filter((value): value is string => Boolean(value));
+      try {
+        delegationLedger.rejectRouteIfOpen({
+          assignmentId: delegationAssignmentId,
+          targetSessionKey: childSessionKey,
+          runId: childIdem,
+          reason: `Failed to bind the protected delegation assignment: ${summarizeError(err)}`,
+        });
+      } catch (settlementError) {
+        cleanupErrors.push(`assignment settlement failed: ${summarizeError(settlementError)}`);
+      }
+      return {
+        status: "error",
+        error: [
+          `Failed to bind the protected delegation assignment: ${summarizeError(err)}`,
+          ...cleanupErrors,
+        ].join("; "),
+        childSessionKey,
+      };
+    }
   }
 
   let childRunId: string = childIdem;
@@ -1055,6 +1400,7 @@ export async function spawnSubagentDirect(
         thinking: thinkingOverride,
         timeout: runTimeoutSeconds,
         label: label || undefined,
+        ...(delegationGatewayDispatch ? { delegationGatewayDispatch } : {}),
         ...(bootstrapContextMode
           ? {
               bootstrapContextMode,
@@ -1070,72 +1416,152 @@ export async function spawnSubagentDirect(
       childRunId = runId;
     }
   } catch (err) {
-    await rollbackPreparedSubagentContext(preparedContext.rollback);
-    await markPendingSpawnFailed();
-    if (attachmentAbsDir) {
+    let guardedFailureText = summarizeError(err);
+    let guardedDispatchAccepted = false;
+    if (
+      delegationAssignmentId &&
+      delegationLedger &&
+      delegationGatewayDispatch &&
+      delegationAssignment
+    ) {
       try {
-        await fs.rm(attachmentAbsDir, { recursive: true, force: true });
-      } catch {
-        // Best-effort cleanup only.
-      }
-    }
-    let emitLifecycleHooks = false;
-    if (threadBindingReady) {
-      const hasEndedHook = hookRunner?.hasHooks("subagent_ended") === true;
-      let endedHookEmitted = false;
-      if (hasEndedHook) {
-        try {
-          await hookRunner?.runSubagentEnded(
-            {
+        const claim = delegationLedger.consumeGatewayDispatchCapability({
+          capability: delegationGatewayDispatch,
+          controllerSessionKey: requesterInternalKey,
+          targetSessionKey: childSessionKey,
+          idempotencyKey: childIdem,
+        });
+        if (
+          claim.outcome?.decision === "accepted" &&
+          claim.dispatchRun?.runId === childIdem &&
+          !claim.interruption
+        ) {
+          // The protected ledger is authoritative when the transport loses the
+          // accepted response after durable enqueue. Continue registration
+          // instead of deleting a child whose guarded execution already began.
+          childRunId = claim.dispatchRun.runId;
+          guardedDispatchAccepted = true;
+        } else {
+          guardedFailureText =
+            claim.outcome?.decision === "rejected"
+              ? summarizeDelegationGatewayResponse(claim.outcome.response, guardedFailureText)
+              : claim.interruption === "accepted_by_prior_gateway_writer"
+                ? "Guarded initial spawn belonged to a prior Gateway process."
+                : claim.interruption === "accepted_without_run_proof"
+                  ? "Guarded initial spawn acceptance has no durable run proof."
+                  : guardedFailureText;
+          if (!claim.outcome && !claim.interruption) {
+            const response = {
+              message: guardedFailureText,
+              retryable: false,
+              details: { code: "delegation_initial_spawn_dispatch_failed" },
+            };
+            delegationLedger.recordGatewayDispatchOutcome({
+              capability: delegationGatewayDispatch,
+              controllerSessionKey: requesterInternalKey,
               targetSessionKey: childSessionKey,
-              targetKind: "subagent",
-              reason: "spawn-failed",
-              sendFarewell: true,
-              accountId: requesterOrigin?.accountId,
-              runId: childRunId,
-              outcome: "error",
-              error: "Session failed to start",
-            },
-            {
-              runId: childRunId,
-              childSessionKey,
-              requesterSessionKey: requesterInternalKey,
-            },
-          );
-          endedHookEmitted = true;
+              idempotencyKey: childIdem,
+              decision: "rejected",
+              response,
+              rejectRoute: true,
+            });
+          }
+        }
+      } catch (dispatchError) {
+        guardedFailureText = `${guardedFailureText}; protected dispatch reconciliation failed: ${summarizeError(dispatchError)}`;
+        try {
+          delegationLedger.rejectRouteIfOpen({
+            assignmentId: delegationAssignmentId,
+            targetSessionKey: childSessionKey,
+            runId: childIdem,
+            reason: guardedFailureText,
+          });
         } catch {
-          // Spawn should still return an actionable error even if cleanup hooks fail.
+          // Preserve the original spawn failure; the outer guarded route owner
+          // will make one final idempotent settlement attempt.
         }
       }
-      emitLifecycleHooks = !endedHookEmitted;
     }
-    // Always delete the provisional child session after a failed spawn attempt.
-    // If we already emitted subagent_ended above, suppress a duplicate lifecycle hook.
-    try {
-      await callSubagentGateway({
-        method: "sessions.delete",
-        params: {
-          key: childSessionKey,
-          deleteTranscript: true,
-          emitLifecycleHooks,
-        },
-        timeoutMs: 10_000,
+    if (guardedDispatchAccepted) {
+      // Resume the ordinary accepted path below.
+    } else {
+      await rollbackPreparedSubagentContext(preparedContext.rollback);
+      const pendingCleanupError = await markPendingSpawnFailed();
+      if (attachmentAbsDir) {
+        try {
+          await fs.rm(attachmentAbsDir, { recursive: true, force: true });
+        } catch {
+          // Best-effort cleanup only.
+        }
+      }
+      let emitLifecycleHooks = false;
+      if (threadBindingReady) {
+        const hasEndedHook = hookRunner?.hasHooks("subagent_ended") === true;
+        let endedHookEmitted = false;
+        if (hasEndedHook) {
+          try {
+            await hookRunner?.runSubagentEnded(
+              {
+                targetSessionKey: childSessionKey,
+                targetKind: "subagent",
+                reason: "spawn-failed",
+                sendFarewell: true,
+                accountId: requesterOrigin?.accountId,
+                runId: childRunId,
+                outcome: "error",
+                error: "Session failed to start",
+              },
+              {
+                runId: childRunId,
+                childSessionKey,
+                requesterSessionKey: requesterInternalKey,
+              },
+            );
+            endedHookEmitted = true;
+          } catch {
+            // Spawn should still return an actionable error even if cleanup hooks fail.
+          }
+        }
+        emitLifecycleHooks = !endedHookEmitted;
+      }
+      // Always delete the provisional child session after a failed spawn attempt.
+      // If we already emitted subagent_ended above, suppress a duplicate lifecycle hook.
+      const sessionCleanupError = await cleanupProvisionalSession(childSessionKey, {
+        deleteTranscript: true,
+        emitLifecycleHooks,
       });
-    } catch {
-      // Best-effort only.
+      let messageText = delegationAssignment ? guardedFailureText : summarizeError(err);
+      const taskCleanupError = failPendingSubagentTaskRunVerified({
+        pendingRunId: childIdem,
+        childSessionKey,
+        error: messageText,
+      });
+      const cleanupErrors = [
+        pendingCleanupError ? `pending-spawn cleanup failed: ${pendingCleanupError}` : undefined,
+        taskCleanupError ? `task cleanup failed: ${taskCleanupError}` : undefined,
+        sessionCleanupError ? `session cleanup failed: ${sessionCleanupError}` : undefined,
+      ].filter((value): value is string => Boolean(value));
+      if (cleanupErrors.length > 0) {
+        messageText = `${messageText}; ${cleanupErrors.join("; ")}`;
+      }
+      return {
+        status: "error",
+        error: delegationAssignment
+          ? messageText
+          : recordRegistrationRouteHealthUnavailable(messageText),
+        childSessionKey,
+        runId: childRunId,
+      };
     }
-    const messageText = summarizeError(err);
-    return {
-      status: "error",
-      error: messageText,
-      childSessionKey,
-      runId: childRunId,
-    };
   }
 
   try {
     registerSubagentRun({
+      pendingTaskRunId: childIdem,
       runId: childRunId,
+      delegationAssignmentId,
+      delegationSliceId: delegationAssignment?.sliceId,
+      delegationEpoch: delegationAssignment?.epoch,
       childSessionKey,
       controllerSessionKey: requesterInternalKey,
       requesterSessionKey: requesterInternalKey,
@@ -1157,7 +1583,7 @@ export async function spawnSubagentDirect(
     });
   } catch (err) {
     await rollbackPreparedSubagentContext(preparedContext.rollback);
-    await markPendingSpawnFailed();
+    const pendingCleanupError = await markPendingSpawnFailed();
     if (attachmentAbsDir) {
       try {
         await fs.rm(attachmentAbsDir, { recursive: true, force: true });
@@ -1165,22 +1591,29 @@ export async function spawnSubagentDirect(
         // Best-effort cleanup only.
       }
     }
-    try {
-      await callSubagentGateway({
-        method: "sessions.delete",
-        params: {
-          key: childSessionKey,
-          deleteTranscript: true,
-          emitLifecycleHooks: threadBindingReady,
-        },
-        timeoutMs: 10_000,
-      });
-    } catch {
-      // Best-effort cleanup only.
-    }
+    const sessionCleanupError = await cleanupProvisionalSession(childSessionKey, {
+      deleteTranscript: true,
+      emitLifecycleHooks: threadBindingReady,
+    });
+    const taskCleanupError = failPendingSubagentTaskRunVerified({
+      pendingRunId: childIdem,
+      childSessionKey,
+      error: `Failed to register subagent run: ${summarizeError(err)}`,
+    });
+    const cleanupErrors = [
+      pendingCleanupError ? `pending-spawn cleanup failed: ${pendingCleanupError}` : undefined,
+      taskCleanupError ? `task cleanup failed: ${taskCleanupError}` : undefined,
+      sessionCleanupError ? `session cleanup failed: ${sessionCleanupError}` : undefined,
+    ].filter((value): value is string => Boolean(value));
+    const registrationError = [
+      `Failed to register subagent run: ${summarizeError(err)}`,
+      ...cleanupErrors,
+    ].join("; ");
     return {
       status: "error",
-      error: `Failed to register subagent run: ${summarizeError(err)}`,
+      error: delegationAssignment
+        ? registrationError
+        : recordRegistrationRouteHealthUnavailable(registrationError),
       childSessionKey,
       runId: childRunId,
     };
@@ -1237,6 +1670,8 @@ export async function spawnSubagentDirect(
 }
 
 export const __testing = {
+  buildInitialChildSessionPatch,
+  buildProtectedDelegationAssignmentPrompt,
   setDepsForTest(overrides?: Partial<SubagentSpawnDeps>) {
     subagentSpawnDeps = overrides
       ? {

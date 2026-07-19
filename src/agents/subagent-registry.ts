@@ -18,6 +18,13 @@ import {
   type SubagentLifecycleEndedReason,
 } from "./subagent-lifecycle-events.js";
 import {
+  assessSubagentSliceBudget,
+  recordSubagentSliceFullE2EGateGreen,
+  recordSubagentSliceRouteHealthUnavailable,
+  recordSubagentSliceSpawn,
+  recordSubagentSliceTerminalOutcome,
+} from "./subagent-registry-budget.js";
+import {
   emitSubagentEndedHookOnce,
   resolveLifecycleOutcomeFromRunOutcome,
 } from "./subagent-registry-completion.js";
@@ -32,7 +39,7 @@ import {
   safeRemoveAttachmentsDir,
 } from "./subagent-registry-helpers.js";
 import { createSubagentRegistryLifecycleController } from "./subagent-registry-lifecycle.js";
-import { subagentRuns } from "./subagent-registry-memory.js";
+import { subagentRuns, subagentSliceBudgets } from "./subagent-registry-memory.js";
 import { isSubagentRunNewer } from "./subagent-registry-ordering.js";
 import {
   countActiveDescendantRunsFromRuns,
@@ -54,7 +61,13 @@ import {
   restoreSubagentRunsFromDisk,
 } from "./subagent-registry-state.js";
 import { configureSubagentRegistrySteerRuntime } from "./subagent-registry-steer-runtime.js";
-import type { SubagentRunRecord } from "./subagent-registry.types.js";
+import type {
+  SubagentRunRecord,
+  SubagentSliceBudgetRecord,
+  SubagentSliceContinuation,
+  SubagentSliceBudgetTerminalEvidenceGapKind,
+  SubagentSliceRole,
+} from "./subagent-registry.types.js";
 import { resolveAgentTimeoutMs } from "./timeout.js";
 
 export type { SubagentRunRecord } from "./subagent-registry.types.js";
@@ -126,8 +139,8 @@ const resumeRetryTimers = new Set<ReturnType<typeof setTimeout>>();
 let sweepInProgress = false;
 let listenerStarted = false;
 let listenerStop: (() => void) | null = null;
-// Use var to avoid TDZ when init runs across circular imports during bootstrap.
-var restoreAttempted = false;
+let restoreAttempted = false;
+let sliceBudgetRestoreAttempted = false;
 const ORPHAN_RECOVERY_DEBOUNCE_MS = 1_000;
 let lastOrphanRecoveryScheduleAt = 0;
 const SUBAGENT_ANNOUNCE_TIMEOUT_MS = 120_000;
@@ -192,7 +205,23 @@ async function resolveSubagentRegistryContextEngine(cfg: OpenClawConfig) {
 }
 
 function persistSubagentRuns() {
-  subagentRegistryDeps.persistSubagentRunsToDisk(subagentRuns);
+  subagentRegistryDeps.persistSubagentRunsToDisk(subagentRuns, subagentSliceBudgets);
+}
+
+function restoreSubagentSliceBudgetsForReadOnce() {
+  if (sliceBudgetRestoreAttempted || restoreAttempted) {
+    return;
+  }
+  sliceBudgetRestoreAttempted = true;
+  try {
+    subagentRegistryDeps.restoreSubagentRunsFromDisk({
+      runs: subagentRuns,
+      sliceBudgets: subagentSliceBudgets,
+      mergeOnly: true,
+    });
+  } catch {
+    // Ignore restore failures; budget checks fall back to in-memory state.
+  }
 }
 
 export function scheduleSubagentOrphanRecovery(params?: { delayMs?: number; maxRetries?: number }) {
@@ -354,6 +383,65 @@ async function emitSubagentEndedHookForRun(params: {
   });
 }
 
+function resolveRequesterGenerationForSliceBudget(requesterSessionKey: string): string | undefined {
+  return getLatestSubagentRunByChildSessionKey(requesterSessionKey)?.runId ?? undefined;
+}
+
+function buildSliceBudgetIdentityInput(params: {
+  requesterSessionKey: string;
+  delegationAssignmentId?: string;
+  delegationSliceId?: string;
+  delegationEpoch?: number;
+  targetAgentId?: string;
+  label?: string;
+  sliceRole?: SubagentSliceRole;
+  sliceContinuation?: SubagentSliceContinuation;
+  task: string;
+}) {
+  restoreSubagentSliceBudgetsForReadOnce();
+  return {
+    requesterSessionKey: params.requesterSessionKey,
+    requesterGeneration: resolveRequesterGenerationForSliceBudget(params.requesterSessionKey),
+    delegationAssignmentId: params.delegationAssignmentId,
+    delegationSliceId: params.delegationSliceId,
+    delegationEpoch: params.delegationEpoch,
+    targetAgentId: params.targetAgentId,
+    label: params.label,
+    sliceRole: params.sliceRole,
+    sliceContinuation: params.sliceContinuation,
+    task: params.task,
+  };
+}
+
+function recordSliceSpawnForRun(entry: SubagentRunRecord) {
+  recordSubagentSliceSpawn({
+    budgets: subagentSliceBudgets,
+    entry,
+  });
+}
+
+function recordSliceTerminalOutcomeForRun(params: {
+  entry: SubagentRunRecord;
+  endedAt: number;
+  evidenceGapKind?: SubagentSliceBudgetTerminalEvidenceGapKind;
+}): boolean {
+  let changed = recordSubagentSliceTerminalOutcome({
+    budgets: subagentSliceBudgets,
+    entry: params.entry,
+    observedAt: params.endedAt,
+    evidenceGapKind: params.evidenceGapKind,
+  });
+  if (params.entry.sliceRole === "full_gate" && params.entry.outcome?.status === "ok") {
+    changed =
+      recordSubagentSliceFullE2EGateGreen({
+        budgets: subagentSliceBudgets,
+        entry: params.entry,
+        observedAt: params.endedAt,
+      }) || changed;
+  }
+  return changed;
+}
+
 const subagentLifecycleController = createSubagentRegistryLifecycleController({
   runs: subagentRuns,
   resumedRuns,
@@ -371,6 +459,7 @@ const subagentLifecycleController = createSubagentRegistryLifecycleController({
   cleanupBrowserSessionsForLifecycleEnd: (args) =>
     subagentRegistryDeps.cleanupBrowserSessionsForLifecycleEnd(args),
   runSubagentAnnounceFlow: (params) => subagentRegistryDeps.runSubagentAnnounceFlow(params),
+  recordSubagentSliceTerminalOutcome: recordSliceTerminalOutcomeForRun,
   warn: (message, meta) => log.warn(message, meta),
 });
 
@@ -494,9 +583,11 @@ function restoreSubagentRunsOnce() {
     return;
   }
   restoreAttempted = true;
+  sliceBudgetRestoreAttempted = true;
   try {
     const restoredCount = subagentRegistryDeps.restoreSubagentRunsFromDisk({
       runs: subagentRuns,
+      sliceBudgets: subagentSliceBudgets,
       mergeOnly: true,
     });
     if (restoredCount === 0) {
@@ -717,6 +808,8 @@ const subagentRunManager = createSubagentRunManager({
   notifyContextEngineSubagentEnded,
   completeCleanupBookkeeping,
   completeSubagentRun,
+  recordSubagentSliceSpawn: recordSliceSpawnForRun,
+  recordSubagentSliceTerminalOutcome: recordSliceTerminalOutcomeForRun,
 });
 
 configureSubagentRegistrySteerRuntime({
@@ -734,6 +827,9 @@ export function clearSubagentRunSteerRestart(runId: string) {
 export function replaceSubagentRunAfterSteer(params: {
   previousRunId: string;
   nextRunId: string;
+  delegationAssignmentId?: string;
+  delegationSliceId?: string;
+  delegationEpoch?: number;
   fallback?: SubagentRunRecord;
   task?: string;
   runTimeoutSeconds?: number;
@@ -744,6 +840,9 @@ export function replaceSubagentRunAfterSteer(params: {
 
 export function registerSubagentRun(params: {
   runId: string;
+  delegationAssignmentId?: string;
+  delegationSliceId?: string;
+  delegationEpoch?: number;
   childSessionKey: string;
   controllerSessionKey?: string;
   requesterSessionKey: string;
@@ -752,6 +851,8 @@ export function registerSubagentRun(params: {
   task: string;
   cleanup: "delete" | "keep";
   label?: string;
+  sliceRole?: SubagentSliceRole;
+  sliceContinuation?: SubagentSliceContinuation;
   model?: string;
   workspaceDir?: string;
   runTimeoutSeconds?: number;
@@ -760,8 +861,76 @@ export function registerSubagentRun(params: {
   attachmentsDir?: string;
   attachmentsRootDir?: string;
   retainAttachmentsOnKeep?: boolean;
+  pendingTaskRunId?: string;
 }) {
   subagentRunManager.registerSubagentRun(params);
+}
+
+/**
+ * Creates a durable (queued) task-store row for a subagent run before the
+ * child gateway run is started. Pair with `registerSubagentRun({ ...,
+ * pendingTaskRunId })` on success, or `failPendingSubagentTaskRun` if the
+ * child never starts or in-process registration fails, so the task store
+ * never has a spawn attempt with no record at all.
+ */
+export function registerPendingSubagentTaskRun(params: {
+  pendingRunId: string;
+  requesterSessionKey: string;
+  requesterOrigin?: DeliveryContext;
+  childSessionKey: string;
+  task: string;
+  label?: string;
+  expectsCompletionMessage?: boolean;
+}) {
+  subagentRunManager.registerPendingSubagentTaskRun(params);
+}
+
+export function failPendingSubagentTaskRun(params: { pendingRunId: string; error?: string }) {
+  return subagentRunManager.failPendingSubagentTaskRun(params);
+}
+
+export function assessSubagentSliceBudgetForSpawn(params: {
+  requesterSessionKey: string;
+  delegationAssignmentId?: string;
+  delegationSliceId?: string;
+  delegationEpoch?: number;
+  targetAgentId?: string;
+  label?: string;
+  sliceRole?: SubagentSliceRole;
+  sliceContinuation?: SubagentSliceContinuation;
+  task: string;
+}) {
+  return assessSubagentSliceBudget({
+    budgets: subagentSliceBudgets,
+    identityInput: buildSliceBudgetIdentityInput(params),
+  });
+}
+
+export function recordSubagentSliceRouteHealthUnavailableForSpawn(params: {
+  requesterSessionKey: string;
+  delegationAssignmentId?: string;
+  delegationSliceId?: string;
+  delegationEpoch?: number;
+  targetAgentId?: string;
+  label?: string;
+  sliceRole?: SubagentSliceRole;
+  sliceContinuation?: SubagentSliceContinuation;
+  task: string;
+  childSessionKey?: string;
+}) {
+  const assessment = recordSubagentSliceRouteHealthUnavailable({
+    budgets: subagentSliceBudgets,
+    identityInput: buildSliceBudgetIdentityInput(params),
+    childSessionKey: params.childSessionKey,
+  });
+  persistSubagentRuns();
+  return assessment;
+}
+
+export function getSubagentSliceBudgetForTests(
+  sliceKey: string,
+): SubagentSliceBudgetRecord | undefined {
+  return subagentSliceBudgets.get(sliceKey);
 }
 
 export function resetSubagentRegistryForTests(opts?: { persist?: boolean }) {
@@ -771,6 +940,7 @@ export function resetSubagentRegistryForTests(opts?: { persist?: boolean }) {
   }
   resumeRetryTimers.clear();
   subagentRuns.clear();
+  subagentSliceBudgets.clear();
   resumedRuns.clear();
   endedHookInFlightRunIds.clear();
   clearAllPendingLifecycleErrors();
@@ -781,6 +951,7 @@ export function resetSubagentRegistryForTests(opts?: { persist?: boolean }) {
   stopSweeper();
   sweepInProgress = false;
   restoreAttempted = false;
+  sliceBudgetRestoreAttempted = false;
   if (listenerStop) {
     listenerStop();
     listenerStop = null;

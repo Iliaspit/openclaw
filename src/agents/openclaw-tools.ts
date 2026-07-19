@@ -15,11 +15,14 @@ import {
 import type { SandboxFsBridge } from "./sandbox/fs-bridge.js";
 import type { SpawnedToolContext } from "./spawned-context.js";
 import type { ToolFsPolicy } from "./tool-fs-policy.js";
+import { resolveDelegationGuardConfig, resolveDelegationGuardPrincipal } from "./delegation/policy.js";
 import { createAgentsListTool } from "./tools/agents-list-tool.js";
 import { createCatalogTool } from "./tools/catalog-tool.js";
 import { createCanvasTool } from "./tools/canvas-tool.js";
 import type { AnyAgentTool } from "./tools/common.js";
 import { createCronTool } from "./tools/cron-tool.js";
+import { createDelegationGuardTool } from "./tools/delegation-guard-tool.js";
+import { createDelegationReportTool } from "./tools/delegation-report-tool.js";
 import { createEmbeddedCallGateway } from "./tools/embedded-gateway-stub.js";
 import { createGatewayTool } from "./tools/gateway-tool.js";
 import { createImageGenerateTool } from "./tools/image-generate-tool.js";
@@ -87,6 +90,8 @@ export function createOpenClawTools(
     modelProvider?: string;
     /** Active model id for provider/model-specific tool gating. */
     modelId?: string;
+    /** Effective runtime thinking level after defaults and per-turn directives are resolved. */
+    effectiveThinking?: string;
     /** If true, nodes action="invoke" can call media-returning commands directly. */
     allowMediaInvokeCommands?: boolean;
     /** Explicit agent ID override for cron/hook sessions. */
@@ -139,6 +144,10 @@ export function createOpenClawTools(
     threadId: options?.agentThreadId,
   });
   const runtimeWebTools = getActiveRuntimeWebToolsMetadata();
+  const delegationGuard = resolvedConfig ? resolveDelegationGuardConfig(resolvedConfig) : undefined;
+  const delegationPrincipal = delegationGuard
+    ? resolveDelegationGuardPrincipal(delegationGuard, sessionAgentId)
+    : undefined;
   const sandbox =
     options?.sandboxRoot && options?.sandboxFsBridge
       ? { root: options.sandboxRoot, bridge: options.sandboxFsBridge }
@@ -266,6 +275,28 @@ export function createOpenClawTools(
       agentSessionKey: options?.agentSessionKey,
       requesterAgentIdOverride: options?.requesterAgentIdOverride,
     }),
+    ...(resolvedConfig && delegationPrincipal?.kind === "controller"
+      ? [
+          createDelegationGuardTool({
+            config: resolvedConfig,
+            agentSessionKey: options?.agentSessionKey,
+            requesterAgentIdOverride: options?.requesterAgentIdOverride,
+            effectiveThinking: options?.effectiveThinking,
+            senderIsOwner: options?.senderIsOwner,
+            authorityWorkspaceDir: spawnWorkspaceDir ?? workspaceDir,
+          }),
+        ]
+      : []),
+    ...(resolvedConfig && delegationPrincipal?.kind === "worker"
+      ? [
+          createDelegationReportTool({
+            config: resolvedConfig,
+            agentSessionKey: options?.agentSessionKey,
+            requesterAgentIdOverride: options?.requesterAgentIdOverride,
+            effectiveThinking: options?.effectiveThinking,
+          }),
+        ]
+      : []),
     ...(isUpdatePlanToolEnabledForOpenClawTools({
       config: resolvedConfig,
       agentSessionKey: options?.agentSessionKey,
@@ -296,6 +327,8 @@ export function createOpenClawTools(
             sandboxed: options?.sandboxed,
             config: resolvedConfig,
             callGateway: openClawToolsDeps.callGateway,
+            effectiveThinking: options?.effectiveThinking,
+            requesterAgentIdOverride: options?.requesterAgentIdOverride,
           }),
           createSessionsSpawnTool({
             agentSessionKey: options?.agentSessionKey,
@@ -310,6 +343,8 @@ export function createOpenClawTools(
             sandboxed: options?.sandboxed,
             requesterAgentIdOverride: options?.requesterAgentIdOverride,
             workspaceDir: spawnWorkspaceDir,
+            config: resolvedConfig,
+            effectiveThinking: options?.effectiveThinking,
           }),
         ]),
     createSessionsYieldTool({
@@ -318,6 +353,9 @@ export function createOpenClawTools(
     }),
     createSubagentsTool({
       agentSessionKey: options?.agentSessionKey,
+      config: resolvedConfig,
+      effectiveThinking: options?.effectiveThinking,
+      requesterAgentIdOverride: options?.requesterAgentIdOverride,
     }),
     createSessionStatusTool({
       agentSessionKey: options?.agentSessionKey,

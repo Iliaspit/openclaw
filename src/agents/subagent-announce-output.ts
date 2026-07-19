@@ -357,18 +357,34 @@ export function applySubagentWaitOutcome(params: {
 
 export async function captureSubagentCompletionReply(
   sessionKey: string,
-  options?: { waitForReply?: boolean; outcome?: SubagentRunOutcome },
+  options?: {
+    waitForReply?: boolean;
+    outcome?: SubagentRunOutcome;
+    requireAssistantReply?: boolean;
+  },
 ): Promise<string | undefined> {
   if (isFailedOutcome(options?.outcome)) {
     return undefined;
   }
+  const readCompletionOutput = options?.requireAssistantReply
+    ? async (nextSessionKey: string) => {
+        const latestAssistant = await subagentAnnounceOutputDeps.readLatestAssistantReply({
+          sessionKey: nextSessionKey,
+          limit: 100,
+        });
+        const trimmed = latestAssistant?.trim();
+        if (!trimmed || isAnnounceSkip(trimmed) || isSilentReplyText(trimmed, SILENT_REPLY_TOKEN)) {
+          return undefined;
+        }
+        return trimmed;
+      }
+    : async (nextSessionKey: string) => await readSubagentOutput(nextSessionKey, options?.outcome);
   return await captureSubagentCompletionReplyUsing({
     sessionKey,
     waitForReply: options?.waitForReply,
     maxWaitMs: isFastTestMode() ? 50 : 1_500,
     retryIntervalMs: isFastTestMode() ? FAST_TEST_RETRY_INTERVAL_MS : 100,
-    readSubagentOutput: async (nextSessionKey) =>
-      await readSubagentOutput(nextSessionKey, options?.outcome),
+    readSubagentOutput: readCompletionOutput,
   });
 }
 

@@ -1,5 +1,6 @@
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import { cleanupBrowserSessionsForLifecycleEnd } from "../browser-lifecycle-cleanup.js";
+import { loadConfig } from "../config/config.js";
 import { formatErrorMessage, readErrorName } from "../infra/errors.js";
 import { defaultRuntime } from "../runtime.js";
 import { emitSessionLifecycleEvent } from "../sessions/session-lifecycle-events.js";
@@ -14,12 +15,19 @@ import {
   recordChildRouteHealthEvent,
   type ChildRouteHealthEventStatus,
 } from "./child-route-health.js";
+import { openConfiguredDelegationLedger } from "./delegation/gateway-task-reconciliation.js";
+import {
+  resolveDelegationGuardConfig,
+  resolveDelegationPolicyDigest,
+} from "./delegation/policy.js";
+import { withSubagentOutcomeTiming } from "./subagent-announce-output.js";
 import {
   captureSubagentCompletionReply,
   runSubagentAnnounceFlow,
   type SubagentRunOutcome,
 } from "./subagent-announce.js";
 import {
+  SUBAGENT_ENDED_REASON_ERROR,
   SUBAGENT_ENDED_REASON_KILLED,
   type SubagentLifecycleEndedReason,
 } from "./subagent-lifecycle-events.js";
@@ -44,6 +52,11 @@ import {
   applySubagentResultReceiptToRun,
   persistSubagentResultReceiptForRunSync,
 } from "./subagent-result-receipts.js";
+
+const NO_VISIBLE_CHILD_COMPLETION_ERROR =
+  "child run completed without a visible final assistant reply";
+const GUARDED_COMPLETION_EVIDENCE_ERROR =
+  "guarded child run completed without an accepted protected report and terminal receipt";
 
 export function createSubagentRegistryLifecycleController(params: {
   runs: Map<string, SubagentRunRecord>;
@@ -72,6 +85,11 @@ export function createSubagentRegistryLifecycleController(params: {
   captureSubagentCompletionReply: typeof captureSubagentCompletionReply;
   cleanupBrowserSessionsForLifecycleEnd?: typeof cleanupBrowserSessionsForLifecycleEnd;
   runSubagentAnnounceFlow: typeof runSubagentAnnounceFlow;
+  recordSubagentSliceTerminalOutcome?(args: {
+    entry: SubagentRunRecord;
+    endedAt: number;
+    evidenceGapKind?: "timeout" | "no_visible_final" | "error" | "killed";
+  }): boolean;
   warn(message: string, meta?: Record<string, unknown>): void;
 }) {
   const scheduledResumeTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -159,16 +177,27 @@ export function createSubagentRegistryLifecycleController(params: {
       outcome: args.outcome,
       reason: args.reason,
     });
-    const recorded = await recordChildRouteHealthEvent({
-      code: event.code,
-      status: event.status,
-      source: "subagent_terminal",
-      childSessionKey: args.entry.childSessionKey,
-      runId: args.entry.runId,
-      requesterSessionKey: args.entry.requesterSessionKey,
-      observedAt: args.endedAt,
-      reason: event.reason,
-    });
+    let recorded: Awaited<ReturnType<typeof recordChildRouteHealthEvent>>;
+    try {
+      recorded = await recordChildRouteHealthEvent({
+        code: event.code,
+        status: event.status,
+        source: "subagent_terminal",
+        childSessionKey: args.entry.childSessionKey,
+        runId: args.entry.runId,
+        requesterSessionKey: args.entry.requesterSessionKey,
+        observedAt: args.endedAt,
+        reason: event.reason,
+      });
+    } catch (err) {
+      params.warn("failed to record subagent route-health terminal state", {
+        error: buildSafeLifecycleErrorMeta(err),
+        runId: maskRunId(args.entry.runId),
+        childSessionKey: maskSessionKey(args.entry.childSessionKey),
+        outcomeStatus: args.outcome.status,
+      });
+      return;
+    }
     if (!recorded.ok) {
       params.warn("failed to record subagent route-health terminal state", {
         error: recorded.error,
@@ -241,8 +270,214 @@ export function createSubagentRegistryLifecycleController(params: {
     }
   };
 
-  const freezeRunResultAtCompletion = async (entry: SubagentRunRecord): Promise<boolean> => {
+  const validateGuardedCompletion = (args: {
+    entry: SubagentRunRecord;
+    outcome: SubagentRunOutcome;
+    reason: SubagentLifecycleEndedReason;
+    endedAt: number;
+  }): {
+    outcome: SubagentRunOutcome;
+    reason: SubagentLifecycleEndedReason;
+    mutated: boolean;
+    evidenceGap: boolean;
+  } => {
+    const assignmentId = args.entry.delegationAssignmentId?.trim();
+    if (!assignmentId) {
+      return { outcome: args.outcome, reason: args.reason, mutated: false, evidenceGap: false };
+    }
+
+    if (args.outcome.status === "timeout") {
+      try {
+        const guard = resolveDelegationGuardConfig(loadConfig());
+        if (!guard) {
+          throw new Error("delegation guard is unavailable");
+        }
+        const ledger = openConfiguredDelegationLedger({
+          guard,
+          policyDigest: resolveDelegationPolicyDigest(guard),
+        });
+        const assignment = ledger.getAssignment(assignmentId);
+        const boundAssignment = ledger.resolveAssignmentForChildSession(args.entry.childSessionKey);
+        if (
+          !assignment ||
+          assignment.epoch !== ledger.currentEpoch() ||
+          boundAssignment?.assignmentId !== assignmentId
+        ) {
+          throw new Error("delegation assignment does not match the timed-out child run");
+        }
+        ledger.appendRouteEvent({
+          assignmentId,
+          kind: "timeout",
+          createdAt: args.endedAt,
+          payload: { runId: args.entry.runId, deadlineKind: "run" },
+        });
+      } catch (err) {
+        params.warn("failed to persist guarded run deadline", {
+          error: buildSafeLifecycleErrorMeta(err),
+          runId: maskRunId(args.entry.runId),
+          childSessionKey: maskSessionKey(args.entry.childSessionKey),
+        });
+      }
+      return { outcome: args.outcome, reason: args.reason, mutated: false, evidenceGap: false };
+    }
+    if (args.outcome.status !== "ok") {
+      return { outcome: args.outcome, reason: args.reason, mutated: false, evidenceGap: false };
+    }
+
+    let auditOnly = false;
+    let auditRecorded = false;
+    let protectedLedger: ReturnType<typeof openConfiguredDelegationLedger> | undefined;
+    let violationCode:
+      | "guard-unavailable"
+      | "assignment-mismatch"
+      | "missing-accepted-report"
+      | "missing-terminal-receipt"
+      | "protected-ledger-error" = "protected-ledger-error";
+    try {
+      const guard = resolveDelegationGuardConfig(loadConfig());
+      if (!guard) {
+        violationCode = "guard-unavailable";
+        throw new Error("delegation guard is unavailable");
+      }
+      auditOnly = guard.mode === "audit";
+      const ledger = openConfiguredDelegationLedger({
+        guard,
+        policyDigest: resolveDelegationPolicyDigest(guard),
+      });
+      protectedLedger = ledger;
+      const assignment = ledger.getAssignment(assignmentId);
+      const boundAssignment = ledger.resolveAssignmentForChildSession(args.entry.childSessionKey);
+      if (
+        !assignment ||
+        assignment.epoch !== ledger.currentEpoch() ||
+        boundAssignment?.assignmentId !== assignmentId
+      ) {
+        violationCode = "assignment-mismatch";
+      } else {
+        const accepted = ledger.acceptedReceiptForAssignment(assignmentId);
+        if (
+          !args.entry.resultReceiptId ||
+          !args.entry.resultReceiptSha256 ||
+          typeof args.entry.resultReceiptBytes !== "number" ||
+          typeof args.entry.resultReceiptCapturedAt !== "number"
+        ) {
+          violationCode = "missing-terminal-receipt";
+        } else {
+          ledger.recordTerminalResultReceipt({
+            assignmentId,
+            runId: args.entry.runId,
+            createdAt: args.endedAt,
+            resultReceipt: {
+              receiptId: args.entry.resultReceiptId,
+              sha256: args.entry.resultReceiptSha256,
+              bytes: args.entry.resultReceiptBytes,
+              capturedAt: args.entry.resultReceiptCapturedAt,
+              resultText:
+                typeof args.entry.frozenResultText === "string" ? args.entry.frozenResultText : "",
+            },
+          });
+          if (!accepted) {
+            violationCode = "missing-accepted-report";
+          } else {
+            const terminalReceiptId = ledger.promoteRecordedTerminalCompletion({
+              assignmentId,
+              runId: args.entry.runId,
+              createdAt: args.endedAt,
+            });
+            if (!terminalReceiptId) {
+              violationCode = "missing-terminal-receipt";
+            } else {
+              return {
+                outcome: args.outcome,
+                reason: args.reason,
+                mutated: false,
+                evidenceGap: false,
+              };
+            }
+          }
+        }
+      }
+      ledger.appendRouteEvent({
+        assignmentId,
+        kind: "validation_rejected",
+        createdAt: args.endedAt,
+        payload: { runId: args.entry.runId, code: violationCode },
+      });
+      auditRecorded = true;
+    } catch (err) {
+      params.warn("failed to validate guarded subagent completion", {
+        error: buildSafeLifecycleErrorMeta(err),
+        runId: maskRunId(args.entry.runId),
+        childSessionKey: maskSessionKey(args.entry.childSessionKey),
+        code: violationCode,
+      });
+      if (protectedLedger?.getAssignment(assignmentId)) {
+        try {
+          protectedLedger.appendRouteEvent({
+            assignmentId,
+            kind: "validation_rejected",
+            createdAt: args.endedAt,
+            payload: { runId: args.entry.runId, code: violationCode },
+          });
+          auditRecorded = true;
+        } catch (auditError) {
+          params.warn("failed to persist guarded completion rejection", {
+            error: buildSafeLifecycleErrorMeta(auditError),
+            runId: maskRunId(args.entry.runId),
+            childSessionKey: maskSessionKey(args.entry.childSessionKey),
+            code: violationCode,
+          });
+        }
+      }
+    }
+
+    if (auditOnly && auditRecorded) {
+      return { outcome: args.outcome, reason: args.reason, mutated: false, evidenceGap: true };
+    }
+    const outcome = withSubagentOutcomeTiming(
+      { status: "error", error: GUARDED_COMPLETION_EVIDENCE_ERROR },
+      { startedAt: args.entry.startedAt, endedAt: args.endedAt },
+    );
+    args.entry.outcome = outcome;
+    args.entry.endedReason = SUBAGENT_ENDED_REASON_ERROR;
+    return {
+      outcome,
+      reason: SUBAGENT_ENDED_REASON_ERROR,
+      mutated: true,
+      evidenceGap: true,
+    };
+  };
+
+  const hasVisibleFrozenResult = (entry: SubagentRunRecord): boolean =>
+    typeof entry.frozenResultText === "string" && Boolean(entry.frozenResultText.trim());
+
+  const requiresVisibleCompletion = (entry: SubagentRunRecord): boolean =>
+    entry.expectsCompletionMessage === true && entry.outcome?.status === "ok";
+
+  const clearSubagentResultReceipt = (entry: SubagentRunRecord): boolean => {
+    let changed = false;
+    const clear = (key: keyof SubagentRunRecord) => {
+      if (entry[key] === undefined) {
+        return;
+      }
+      delete entry[key];
+      changed = true;
+    };
+    clear("resultReceiptId");
+    clear("resultReceiptSha256");
+    clear("resultReceiptBytes");
+    clear("resultReceiptCapturedAt");
+    return changed;
+  };
+
+  const freezeRunResultAtCompletion = async (
+    entry: SubagentRunRecord,
+  ): Promise<{ mutated: boolean; hasVisibleResult: boolean }> => {
+    const requireAssistantReply = requiresVisibleCompletion(entry);
     if (entry.frozenResultText !== undefined) {
+      if (requireAssistantReply && !hasVisibleFrozenResult(entry)) {
+        return { mutated: false, hasVisibleResult: false };
+      }
       const persisted = persistSubagentResultReceiptForRunSync(entry);
       if (!persisted.ok) {
         params.warn("failed to persist subagent result receipt", {
@@ -252,20 +487,25 @@ export function createSubagentRegistryLifecycleController(params: {
         });
         if (entry.cleanup === "delete") {
           entry.cleanup = "keep";
-          return true;
+          return { mutated: true, hasVisibleResult: hasVisibleFrozenResult(entry) };
         }
       }
-      return false;
+      return { mutated: false, hasVisibleResult: hasVisibleFrozenResult(entry) };
     }
     try {
       const captured = await params.captureSubagentCompletionReply(entry.childSessionKey, {
         waitForReply: entry.expectsCompletionMessage === true,
+        outcome: entry.outcome,
+        ...(requireAssistantReply ? { requireAssistantReply: true } : {}),
       });
       entry.frozenResultText = captured?.trim() ? capFrozenResultText(captured) : null;
     } catch {
       entry.frozenResultText = null;
     }
     entry.frozenResultCapturedAt = Date.now();
+    if (requireAssistantReply && !hasVisibleFrozenResult(entry)) {
+      return { mutated: true, hasVisibleResult: false };
+    }
     const persisted = persistSubagentResultReceiptForRunSync(entry);
     if (!persisted.ok) {
       params.warn("failed to persist subagent result receipt", {
@@ -277,7 +517,7 @@ export function createSubagentRegistryLifecycleController(params: {
         entry.cleanup = "keep";
       }
     }
-    return true;
+    return { mutated: true, hasVisibleResult: hasVisibleFrozenResult(entry) };
   };
 
   const listPendingCompletionRunsForSession = (sessionKey: string): SubagentRunRecord[] => {
@@ -723,24 +963,59 @@ export function createSubagentRegistryLifecycleController(params: {
       mutated = true;
     }
 
-    await recordTerminalRouteHealth({
-      entry,
-      outcome: completeParams.outcome,
-      reason: completeParams.reason,
-      endedAt,
-    });
-
-    if (await freezeRunResultAtCompletion(entry)) {
+    let terminalEvidenceGapKind: "timeout" | "no_visible_final" | "error" | "killed" | undefined =
+      completeParams.outcome.status === "timeout"
+        ? "timeout"
+        : completeParams.outcome.status === "error"
+          ? "error"
+          : undefined;
+    const frozen = await freezeRunResultAtCompletion(entry);
+    if (frozen.mutated) {
       mutated = true;
     }
-
-    if (mutated) {
-      params.persist();
+    if (requiresVisibleCompletion(entry) && !frozen.hasVisibleResult) {
+      terminalEvidenceGapKind = "no_visible_final";
+      const noVisibleOutcome = withSubagentOutcomeTiming(
+        { status: "error", error: NO_VISIBLE_CHILD_COMPLETION_ERROR },
+        {
+          startedAt: entry.startedAt,
+          endedAt,
+        },
+      );
+      if (!runOutcomesEqual(entry.outcome, noVisibleOutcome)) {
+        entry.outcome = noVisibleOutcome;
+        mutated = true;
+      }
+      if (entry.endedReason !== SUBAGENT_ENDED_REASON_ERROR) {
+        entry.endedReason = SUBAGENT_ENDED_REASON_ERROR;
+        mutated = true;
+      }
+      if (clearSubagentResultReceipt(entry)) {
+        mutated = true;
+      }
     }
-    safeFinalizeSubagentTaskRun({
+
+    let terminalOutcome = entry.outcome ?? completeParams.outcome;
+    let terminalReason = entry.endedReason ?? completeParams.reason;
+    const guardedCompletion = validateGuardedCompletion({
       entry,
-      outcome: completeParams.outcome,
+      outcome: terminalOutcome,
+      reason: terminalReason,
+      endedAt,
     });
+    terminalOutcome = guardedCompletion.outcome;
+    terminalReason = guardedCompletion.reason;
+    if (guardedCompletion.mutated) {
+      mutated = true;
+    }
+    if (guardedCompletion.evidenceGap) {
+      terminalEvidenceGapKind = "error";
+    }
+    if (terminalReason === SUBAGENT_ENDED_REASON_KILLED) {
+      terminalEvidenceGapKind = "killed";
+    } else if (!terminalEvidenceGapKind && terminalOutcome.status === "error") {
+      terminalEvidenceGapKind = "error";
+    }
 
     try {
       await persistSubagentSessionTiming(entry);
@@ -751,6 +1026,31 @@ export function createSubagentRegistryLifecycleController(params: {
         childSessionKey: entry.childSessionKey,
       });
     }
+
+    await recordTerminalRouteHealth({
+      entry,
+      outcome: terminalOutcome,
+      reason: terminalReason,
+      endedAt,
+    });
+
+    if (
+      params.recordSubagentSliceTerminalOutcome?.({
+        entry,
+        endedAt,
+        evidenceGapKind: terminalEvidenceGapKind,
+      })
+    ) {
+      mutated = true;
+    }
+
+    if (mutated) {
+      params.persist();
+    }
+    safeFinalizeSubagentTaskRun({
+      entry,
+      outcome: terminalOutcome,
+    });
 
     const suppressedForSteerRestart = params.suppressAnnounceForSteerRestart(entry);
     if (mutated && !suppressedForSteerRestart) {
@@ -765,7 +1065,7 @@ export function createSubagentRegistryLifecycleController(params: {
       !suppressedForSteerRestart &&
       params.shouldEmitEndedHookForRun({
         entry,
-        reason: completeParams.reason,
+        reason: terminalReason,
       });
     const shouldDeferEndedHook =
       shouldEmitEndedHook &&
@@ -775,7 +1075,7 @@ export function createSubagentRegistryLifecycleController(params: {
     if (!shouldDeferEndedHook && shouldEmitEndedHook) {
       await params.emitSubagentEndedHookForRun({
         entry,
-        reason: completeParams.reason,
+        reason: terminalReason,
         sendFarewell: completeParams.sendFarewell,
         accountId: completeParams.accountId,
       });

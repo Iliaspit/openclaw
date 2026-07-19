@@ -1,4 +1,5 @@
-import { formatThinkingLevels } from "../auto-reply/thinking.js";
+import { formatThinkingLevels, isThinkingLevelSupported } from "../auto-reply/thinking.js";
+import type { DelegationGuardThinkingLevel } from "../config/types.agents.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveSubagentSpawnModelSelection } from "./model-selection.js";
 import { resolveSubagentThinkingOverride } from "./subagent-spawn-thinking.js";
@@ -11,9 +12,12 @@ export function splitModelRef(ref?: string) {
   if (!trimmed) {
     return { provider: undefined, model: undefined };
   }
-  const [provider, model] = trimmed.split("/", 2);
-  if (model) {
-    return { provider, model };
+  const separator = trimmed.indexOf("/");
+  if (separator > 0 && separator < trimmed.length - 1) {
+    return {
+      provider: trimmed.slice(0, separator),
+      model: trimmed.slice(separator + 1),
+    };
   }
   return { provider: undefined, model: trimmed };
 }
@@ -38,6 +42,7 @@ export function resolveSubagentModelAndThinkingPlan(params: {
   targetAgentConfig?: unknown;
   modelOverride?: string;
   thinkingOverrideRaw?: string;
+  requiredThinking?: DelegationGuardThinkingLevel;
 }) {
   const resolvedModel = resolveSubagentSpawnModelSelection({
     cfg: params.cfg,
@@ -49,8 +54,16 @@ export function resolveSubagentModelAndThinkingPlan(params: {
     cfg: params.cfg,
     targetAgentConfig: params.targetAgentConfig,
     thinkingOverrideRaw: params.thinkingOverrideRaw,
+    requiredThinking: params.requiredThinking,
   });
   if (thinkingPlan.status === "error") {
+    if ("error" in thinkingPlan && thinkingPlan.error) {
+      return {
+        status: "error" as const,
+        resolvedModel,
+        error: thinkingPlan.error,
+      };
+    }
     const { provider, model } = splitModelRef(resolvedModel);
     const hint = formatThinkingLevels(provider, model);
     return {
@@ -58,6 +71,17 @@ export function resolveSubagentModelAndThinkingPlan(params: {
       resolvedModel,
       error: `Invalid thinking level "${thinkingPlan.thinkingCandidateRaw}". Use one of: ${hint}.`,
     };
+  }
+
+  if (params.requiredThinking) {
+    const { provider, model } = splitModelRef(resolvedModel);
+    if (!isThinkingLevelSupported({ provider, model, level: params.requiredThinking })) {
+      return {
+        status: "error" as const,
+        resolvedModel,
+        error: `Guarded delegation requires exact ${params.requiredThinking} thinking, which is not supported for ${resolvedModel}. Use a model that supports the required level.`,
+      };
+    }
   }
 
   return {

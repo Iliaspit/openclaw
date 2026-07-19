@@ -1448,9 +1448,11 @@ describe("steerControlledSubagentRun", () => {
     });
   });
 
-  it("restarts a finished current run by remapping tracking to the new run", async () => {
+  it("restarts a finished current run and forwards an exact guarded Gateway capability", async () => {
     const childSessionKey = "agent:main:subagent:finished-steer-worker";
     let requestedTimeout: number | undefined;
+    let requestedDispatch: string | undefined;
+    let requestedIdempotencyKey: string | undefined;
     addSubagentRunForTests({
       runId: "run-finished-steer-old",
       childSessionKey,
@@ -1470,8 +1472,16 @@ describe("steerControlledSubagentRun", () => {
     __testing.setDepsForTest({
       callGateway: async <T = Record<string, unknown>>(request: CallGatewayOptions) => {
         if (request.method === "agent") {
-          const params = request.params as { timeout?: number } | undefined;
+          const params = request.params as
+            | {
+                timeout?: number;
+                delegationGatewayDispatch?: string;
+                idempotencyKey?: string;
+              }
+            | undefined;
           requestedTimeout = params?.timeout;
+          requestedDispatch = params?.delegationGatewayDispatch;
+          requestedIdempotencyKey = params?.idempotencyKey;
           return { runId: "run-finished-steer-new" } as T;
         }
         if (request.method === "agent.wait") {
@@ -1505,6 +1515,9 @@ describe("steerControlledSubagentRun", () => {
         outcome: { status: "ok" },
       },
       message: "updated direction",
+      delegationAssignmentId: "assignment-guarded-steer",
+      delegationGatewayDispatch: "dispatch-guarded-steer",
+      idempotencyKey: "run-finished-steer-new",
     });
 
     expect(result).toEqual({
@@ -1524,6 +1537,8 @@ describe("steerControlledSubagentRun", () => {
       runTimeoutSeconds: 42,
     });
     expect(requestedTimeout).toBe(42);
+    expect(requestedDispatch).toBe("dispatch-guarded-steer");
+    expect(requestedIdempotencyKey).toBe("run-finished-steer-new");
     expect(
       listSubagentRunsForController("agent:main:main")
         .filter((entry) => entry.childSessionKey === childSessionKey)

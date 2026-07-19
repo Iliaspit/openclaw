@@ -32,8 +32,9 @@ import {
 import {
   loadSubagentRegistryFromDisk,
   resolveSubagentRegistryPath,
+  saveSubagentRegistryToDisk,
 } from "./subagent-registry.store.js";
-import type { SubagentRunRecord } from "./subagent-registry.types.js";
+import type { SubagentRunRecord, SubagentSliceBudgetRecord } from "./subagent-registry.types.js";
 
 const { announceSpy } = vi.hoisted(() => ({
   announceSpy: vi.fn(async () => true),
@@ -171,6 +172,11 @@ describe("subagent registry persistence", () => {
   const restartRegistry = () => {
     resetSubagentRegistryForTests({ persist: false });
     initSubagentRegistry();
+  };
+
+  const restartRegistryAndFlush = async () => {
+    restartRegistry();
+    await flushQueuedRegistryWork();
   };
 
   const fastPersistSubagentRunsToDisk = (runs: Map<string, SubagentRunRecord>) => {
@@ -822,6 +828,60 @@ describe("subagent registry persistence", () => {
     expect(listSubagentRunsForRequester("agent:main:main")).toHaveLength(0);
     const persisted = loadSubagentRegistryFromDisk();
     expect(persisted.has(runId)).toBe(false);
+  });
+
+  it("persists slice budgets across registry reloads", async () => {
+    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-"));
+    process.env.OPENCLAW_STATE_DIR = tempStateDir;
+    const budget: SubagentSliceBudgetRecord = {
+      sliceKey: "subagent-slice:persistent-budget",
+      requesterSessionKey: "agent:planner-2:main",
+      delegationAssignmentId: "assignment_persistent",
+      delegationSliceId: "slice_persistent",
+      delegationEpoch: 11,
+      targetAgentId: "implementer",
+      label: "contract-v2-recovery",
+      sliceRole: "review",
+      sliceBoundary: "post_full_gate_followup",
+      parentSliceKey: "subagent-slice:original-budget",
+      taskSha256: "a".repeat(64),
+      discriminatorKind: "label",
+      firstObservedAt: 1_000,
+      lastObservedAt: 2_000,
+      childSpawnCount: 2,
+      childTimeoutCount: 2,
+      childTimeoutRunIds: ["run-timeout-1", "run-timeout-2"],
+      childTimeoutSessionKeys: [
+        "agent:implementer:subagent:timeout-1",
+        "agent:implementer:subagent:timeout-2",
+      ],
+      terminalEvidenceGapCount: 2,
+      terminalEvidenceGapRunIds: ["run-timeout-1", "run-timeout-2"],
+      lastTerminalEvidenceGapKind: "timeout",
+      childRouteHealthUnavailableCount: 0,
+      childRouteHealthUnavailableChildSessionKeys: [],
+      fullE2EGateGreen: "unknown",
+      fullE2EGateSignal: "unavailable",
+    };
+
+    saveSubagentRegistryToDisk(new Map(), new Map([[budget.sliceKey, budget]]));
+
+    const loaded = loadSubagentRegistryFromDisk();
+    expect(loaded.size).toBe(0);
+    expect(loaded.sliceBudgets?.get(budget.sliceKey)).toMatchObject({
+      sliceKey: budget.sliceKey,
+      delegationAssignmentId: "assignment_persistent",
+      delegationSliceId: "slice_persistent",
+      delegationEpoch: 11,
+      childSpawnCount: 2,
+      childTimeoutCount: 2,
+      childTimeoutRunIds: ["run-timeout-1", "run-timeout-2"],
+      sliceRole: "review",
+      sliceBoundary: "post_full_gate_followup",
+      parentSliceKey: "subagent-slice:original-budget",
+      fullE2EGateGreen: "unknown",
+      fullE2EGateSignal: "unavailable",
+    });
   });
 
   it("uses isolated temp state when OPENCLAW_STATE_DIR is unset in tests", async () => {

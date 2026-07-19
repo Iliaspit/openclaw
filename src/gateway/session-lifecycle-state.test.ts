@@ -61,6 +61,75 @@ describe("session lifecycle state", () => {
     });
   });
 
+  it("marks persisted lifecycle end events without assistant transcript as failed", () => {
+    expect(
+      derivePersistedSessionLifecyclePatch({
+        entry: {
+          updatedAt: 1_000,
+          status: "running",
+          startedAt: 1_200,
+          systemSent: true,
+          systemPromptReport: {
+            source: "run",
+            generatedAt: 1_100,
+            systemPrompt: {
+              chars: 10,
+              projectContextChars: 0,
+              nonProjectContextChars: 10,
+            },
+          },
+        },
+        event: {
+          ts: 2_000,
+          data: {
+            phase: "end",
+            startedAt: 1_200,
+            endedAt: 1_900,
+          },
+        },
+        hasAssistantTranscript: false,
+      }),
+    ).toEqual({
+      updatedAt: 1_900,
+      status: "failed",
+      startedAt: 1_200,
+      endedAt: 1_900,
+      runtimeMs: 700,
+      abortedLastRun: false,
+      systemSent: false,
+      systemPromptReport: undefined,
+    });
+  });
+
+  it("keeps persisted lifecycle end events done when assistant transcript exists", () => {
+    expect(
+      derivePersistedSessionLifecyclePatch({
+        entry: {
+          updatedAt: 1_000,
+          status: "running",
+          startedAt: 1_200,
+          systemSent: true,
+        },
+        event: {
+          ts: 2_000,
+          data: {
+            phase: "end",
+            startedAt: 1_200,
+            endedAt: 1_900,
+          },
+        },
+        hasAssistantTranscript: true,
+      }),
+    ).toEqual({
+      updatedAt: 1_900,
+      status: "done",
+      startedAt: 1_200,
+      endedAt: 1_900,
+      runtimeMs: 700,
+      abortedLastRun: false,
+    });
+  });
+
   it("maps aborted stop reasons to killed", () => {
     expect(
       derivePersistedSessionLifecyclePatch({
