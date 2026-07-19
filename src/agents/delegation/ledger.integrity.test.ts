@@ -19,6 +19,70 @@ import { resolveDelegationPolicyDigest } from "./policy.js";
 
 const reconcileNoTestGatewayTask = () => "absent" as const;
 
+function replaceV2AppendOrderWithCommittedV1(db: ReturnType<typeof unsafeDatabaseForTest>): void {
+  db.exec(`
+    CREATE TABLE ledger_record_appends (
+      append_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      assignment_id TEXT NOT NULL REFERENCES assignments(assignment_id),
+      record_kind TEXT NOT NULL CHECK(record_kind IN ('receipt', 'route_event')),
+      record_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(record_kind, record_id)
+    );
+    INSERT INTO ledger_record_appends
+      (assignment_id, record_kind, record_id, created_at)
+    SELECT assignment_id, record_kind, record_id, created_at
+    FROM ledger_record_appends_v2
+    ORDER BY append_sequence;
+    DROP TRIGGER receipts_record_append_order_v2;
+    DROP TRIGGER route_events_record_append_order_v2;
+    DROP TABLE ledger_record_appends_v2;
+    DROP TABLE ledger_schema_migrations;
+    CREATE TABLE ledger_schema_migrations (
+      migration_id TEXT PRIMARY KEY
+    );
+    INSERT INTO ledger_schema_migrations (migration_id)
+    VALUES ('receipt-route-causal-order-v1');
+  `);
+}
+
+function replaceV2AppendOrderWithF092BackfilledV1(
+  db: ReturnType<typeof unsafeDatabaseForTest>,
+): void {
+  db.exec(`
+    CREATE TABLE ledger_record_appends (
+      append_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      assignment_id TEXT NOT NULL REFERENCES assignments(assignment_id),
+      record_kind TEXT NOT NULL CHECK(record_kind IN ('receipt', 'route_event')),
+      record_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(record_kind, record_id)
+    );
+    INSERT INTO ledger_record_appends
+      (assignment_id, record_kind, record_id, created_at)
+    SELECT assignment_id, record_kind, record_id, created_at
+    FROM (
+      SELECT r.assignment_id, 'receipt' AS record_kind, r.receipt_id AS record_id,
+             r.created_at, 1 AS tie_rank
+      FROM receipts r
+      UNION ALL
+      SELECT e.assignment_id, 'route_event' AS record_kind, e.event_id AS record_id,
+             e.created_at, CASE e.kind WHEN 'validation_rejected' THEN 2 ELSE 0 END AS tie_rank
+      FROM route_events e
+    )
+    ORDER BY created_at, tie_rank, record_kind, record_id;
+    DROP TRIGGER receipts_record_append_order_v2;
+    DROP TRIGGER route_events_record_append_order_v2;
+    DROP TABLE ledger_record_appends_v2;
+    DROP TABLE ledger_schema_migrations;
+    CREATE TABLE ledger_schema_migrations (
+      migration_id TEXT PRIMARY KEY
+    );
+    INSERT INTO ledger_schema_migrations (migration_id)
+    VALUES ('receipt-route-causal-order-v1');
+  `);
+}
+
 describe("protected delegation ledger integrity", () => {
   it("uses one gateway writer and protects the ledger directory and files", () => {
     const fixture = createLedgerFixture();
@@ -1798,28 +1862,23 @@ describe("protected delegation ledger integrity", () => {
     }
   });
 
-  it("backfills append order for a legacy equal-time post-report rejection", async () => {
+  it("preserves committed v1 receipt-before-rejection order during v2 migration", async () => {
     const fixture = createLedgerFixture();
     const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
     startAssignment({ fixture, ...issued });
-    const accepted = fixture.ledger.appendValidatedReceipt({
+    const rejected = fixture.ledger.appendRejectedReceipt({
       assignmentId: issued.assignment.assignmentId,
       report: makeCompleteReport({ assigned: issued.assignment.scopeUnits }),
-      outcome: "accepted",
+      issues: [{ code: "format", message: "format correction required" }],
       createdAt: 1_000,
     });
     const terminalEventId = fixture.ledger.appendRouteEvent({
       assignmentId: issued.assignment.assignmentId,
       kind: "validation_rejected",
-      payload: { code: "run-timeout-after-report", receiptId: accepted.receiptId },
-      createdAt: 1_000,
+      payload: { receiptId: rejected.receiptId, validationId: rejected.validationId },
+      createdAt: 1_001,
     });
-    unsafeDatabaseForTest(fixture.ledger).exec(`
-      DROP TRIGGER receipts_record_append_order;
-      DROP TRIGGER route_events_record_append_order;
-      DROP TABLE ledger_record_appends;
-      DROP TABLE ledger_schema_migrations;
-    `);
+    replaceV2AppendOrderWithCommittedV1(unsafeDatabaseForTest(fixture.ledger));
     closeLedgerForTest(fixture.ledger);
 
     vi.resetModules();
@@ -1834,20 +1893,179 @@ describe("protected delegation ledger integrity", () => {
       const ordered = unsafeDatabaseForTest(restarted)
         .prepare(
           `SELECT record_kind AS recordKind, record_id AS recordId
-           FROM ledger_record_appends
+           FROM ledger_record_appends_v2
            WHERE assignment_id = ? AND record_id IN (?, ?)
            ORDER BY append_sequence`,
         )
-        .all(issued.assignment.assignmentId, accepted.receiptId, terminalEventId) as Array<{
+        .all(issued.assignment.assignmentId, rejected.receiptId, terminalEventId) as Array<{
         recordKind: string;
         recordId: string;
       }>;
       expect(ordered).toEqual([
-        { recordKind: "receipt", recordId: accepted.receiptId },
+        { recordKind: "receipt", recordId: rejected.receiptId },
         { recordKind: "route_event", recordId: terminalEventId },
       ]);
     } finally {
       closeLedgerForTest(restarted);
+      fixture.close();
+    }
+  });
+
+  it("preserves committed v1 route-before-receipt order and fails closed", async () => {
+    const fixture = createLedgerFixture();
+    const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+    startAssignment({ fixture, ...issued });
+    const legacyReceiptId = "v1-route-first-receipt";
+    const legacyValidationId = "v1-route-first-validation";
+    fixture.ledger.appendRouteEvent({
+      assignmentId: issued.assignment.assignmentId,
+      kind: "validation_rejected",
+      payload: { receiptId: legacyReceiptId, validationId: legacyValidationId },
+      createdAt: 1_000,
+    });
+    const report = makeCompleteReport({ assigned: issued.assignment.scopeUnits });
+    const db = unsafeDatabaseForTest(fixture.ledger);
+    db.prepare(
+      `INSERT INTO receipts
+       (receipt_id, assignment_id, semantic_digest, report_json, correction_of, created_at)
+       VALUES (?, ?, ?, ?, NULL, 1001)`,
+    ).run(
+      legacyReceiptId,
+      issued.assignment.assignmentId,
+      hashDelegationReportSemantics(report),
+      JSON.stringify(report),
+    );
+    db.prepare(
+      `INSERT INTO validations
+       (validation_id, receipt_id, outcome, validator_id, validator_version,
+        validator_digest, issues_json, created_at)
+       VALUES (?, ?, 'rejected', 'legacy-validator', '1', 'legacy-digest', '[]', 1001)`,
+    ).run(legacyValidationId, legacyReceiptId);
+    replaceV2AppendOrderWithCommittedV1(db);
+    closeLedgerForTest(fixture.ledger);
+
+    vi.resetModules();
+    const restartedModule = await import("./ledger.js");
+    const reopen = () =>
+      restartedModule.openDelegationLedger({
+        guard: fixture.guard,
+        policyDigest: fixture.policyDigest,
+        stateDir: fixture.stateDir,
+        reconcileGatewayTask: reconcileNoTestGatewayTask,
+      });
+    try {
+      expect(reopen).toThrow(/receipt contradicts terminal validation_rejected/i);
+      expect(reopen).toThrow(/receipt contradicts terminal validation_rejected/i);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("rejects an equal-time tie already laundered by the f092 v1 backfill", async () => {
+    const fixture = createLedgerFixture();
+    const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+    startAssignment({ fixture, ...issued });
+    const legacyReceiptId = "f092-laundered-receipt";
+    const legacyValidationId = "f092-laundered-validation";
+    fixture.ledger.appendRouteEvent({
+      assignmentId: issued.assignment.assignmentId,
+      kind: "validation_rejected",
+      payload: { receiptId: legacyReceiptId, validationId: legacyValidationId },
+      createdAt: 1_000,
+    });
+    const report = makeCompleteReport({ assigned: issued.assignment.scopeUnits });
+    const db = unsafeDatabaseForTest(fixture.ledger);
+    db.prepare(
+      `INSERT INTO receipts
+       (receipt_id, assignment_id, semantic_digest, report_json, correction_of, created_at)
+       VALUES (?, ?, ?, ?, NULL, 1000)`,
+    ).run(
+      legacyReceiptId,
+      issued.assignment.assignmentId,
+      hashDelegationReportSemantics(report),
+      JSON.stringify(report),
+    );
+    db.prepare(
+      `INSERT INTO validations
+       (validation_id, receipt_id, outcome, validator_id, validator_version,
+        validator_digest, issues_json, created_at)
+       VALUES (?, ?, 'rejected', 'legacy-validator', '1', 'legacy-digest', '[]', 1000)`,
+    ).run(legacyValidationId, legacyReceiptId);
+    replaceV2AppendOrderWithF092BackfilledV1(db);
+    closeLedgerForTest(fixture.ledger);
+
+    vi.resetModules();
+    const restartedModule = await import("./ledger.js");
+    const reopen = () =>
+      restartedModule.openDelegationLedger({
+        guard: fixture.guard,
+        policyDigest: fixture.policyDigest,
+        stateDir: fixture.stateDir,
+        reconcileGatewayTask: reconcileNoTestGatewayTask,
+      });
+    try {
+      expect(reopen).toThrow(/cannot infer equal-time.*operator action/i);
+      expect(reopen).toThrow(/cannot infer equal-time.*operator action/i);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("fails closed repeatedly for ambiguous legacy equal-time route-before-receipt history", async () => {
+    const fixture = createLedgerFixture();
+    const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+    startAssignment({ fixture, ...issued });
+    const legacyReceiptId = "legacy-ambiguous-receipt";
+    const legacyValidationId = "legacy-ambiguous-validation";
+    fixture.ledger.appendRouteEvent({
+      assignmentId: issued.assignment.assignmentId,
+      kind: "validation_rejected",
+      payload: {
+        code: "terminal-before-receipt",
+        receiptId: legacyReceiptId,
+        validationId: legacyValidationId,
+      },
+      createdAt: 1_000,
+    });
+    const report = makeCompleteReport({ assigned: issued.assignment.scopeUnits });
+    const db = unsafeDatabaseForTest(fixture.ledger);
+    db.prepare(
+      `INSERT INTO receipts
+         (receipt_id, assignment_id, semantic_digest, report_json, correction_of, created_at)
+         VALUES (?, ?, ?, ?, NULL, 1000)`,
+    ).run(
+      legacyReceiptId,
+      issued.assignment.assignmentId,
+      hashDelegationReportSemantics(report),
+      JSON.stringify(report),
+    );
+    db.prepare(
+      `INSERT INTO validations
+       (validation_id, receipt_id, outcome, validator_id, validator_version,
+        validator_digest, issues_json, created_at)
+       VALUES (?, ?, 'rejected', 'legacy-validator', '1', 'legacy-digest', '[]', 1000)`,
+    ).run(legacyValidationId, legacyReceiptId);
+    db.exec(`
+      DROP TRIGGER receipts_record_append_order_v2;
+      DROP TRIGGER route_events_record_append_order_v2;
+      DROP TABLE ledger_record_appends_v2;
+      DROP TABLE ledger_schema_migrations;
+    `);
+    closeLedgerForTest(fixture.ledger);
+
+    vi.resetModules();
+    const restartedModule = await import("./ledger.js");
+    const reopen = () =>
+      restartedModule.openDelegationLedger({
+        guard: fixture.guard,
+        policyDigest: fixture.policyDigest,
+        stateDir: fixture.stateDir,
+        reconcileGatewayTask: reconcileNoTestGatewayTask,
+      });
+    try {
+      expect(reopen).toThrow(/cannot infer equal-time.*operator action/i);
+      expect(reopen).toThrow(/cannot infer equal-time.*operator action/i);
+    } finally {
       fixture.close();
     }
   });
@@ -1862,10 +2080,15 @@ describe("protected delegation ledger integrity", () => {
         assignmentId: issued.assignment.assignmentId,
         report,
       });
-      fixture.ledger.appendValidation({
+      const originalValidationId = fixture.ledger.appendValidation({
         receiptId: originalReceiptId,
         outcome: "rejected",
         issues: [{ code: "format", message: "format only" }],
+      });
+      fixture.ledger.appendRouteEvent({
+        assignmentId: issued.assignment.assignmentId,
+        kind: "validation_rejected",
+        payload: { receiptId: originalReceiptId, validationId: originalValidationId },
       });
 
       const correctedReceiptId = fixture.ledger.appendFormatCorrection({
@@ -1901,6 +2124,84 @@ describe("protected delegation ledger integrity", () => {
           report: changed,
         }),
       ).toThrow();
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("rejects a format correction when its original rejection event is missing", () => {
+    const fixture = createLedgerFixture();
+    try {
+      const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+      startAssignment({ fixture, ...issued });
+      const report = makeCompleteReport({ assigned: issued.assignment.scopeUnits });
+      const rejected = fixture.ledger.appendRejectedReceipt({
+        assignmentId: issued.assignment.assignmentId,
+        report,
+        issues: [{ code: "format", message: "format correction required" }],
+      });
+
+      expect(() =>
+        fixture.ledger.appendFormatCorrection({
+          assignmentId: issued.assignment.assignmentId,
+          originalReceiptId: rejected.receiptId,
+          report,
+        }),
+      ).toThrow(/one exact earlier protected rejection event/i);
+      expect(
+        unsafeDatabaseForTest(fixture.ledger)
+          .prepare(`SELECT 1 FROM correction_uses WHERE assignment_id = ?`)
+          .get(issued.assignment.assignmentId),
+      ).toBeUndefined();
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("rejects a format correction when its rejection event precedes the original receipt", () => {
+    const fixture = createLedgerFixture();
+    try {
+      const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+      startAssignment({ fixture, ...issued });
+      const originalReceiptId = "route-first-correction-receipt";
+      const originalValidationId = "route-first-correction-validation";
+      fixture.ledger.appendRouteEvent({
+        assignmentId: issued.assignment.assignmentId,
+        kind: "validation_rejected",
+        payload: { receiptId: originalReceiptId, validationId: originalValidationId },
+      });
+      const report = makeCompleteReport({ assigned: issued.assignment.scopeUnits });
+      const db = unsafeDatabaseForTest(fixture.ledger);
+      db.prepare(
+        `INSERT INTO receipts
+         (receipt_id, assignment_id, semantic_digest, report_json, correction_of, created_at)
+         VALUES (?, ?, ?, ?, NULL, ?)`,
+      ).run(
+        originalReceiptId,
+        issued.assignment.assignmentId,
+        hashDelegationReportSemantics(report),
+        JSON.stringify(report),
+        Date.now(),
+      );
+      db.prepare(
+        `INSERT INTO validations
+         (validation_id, receipt_id, outcome, validator_id, validator_version,
+          validator_digest, issues_json, created_at)
+         VALUES (?, ?, 'rejected', 'legacy-validator', '1', 'legacy-digest', '[]', ?)`,
+      ).run(originalValidationId, originalReceiptId, Date.now());
+
+      expect(() =>
+        fixture.ledger.appendFormatCorrection({
+          assignmentId: issued.assignment.assignmentId,
+          originalReceiptId,
+          report,
+        }),
+      ).toThrow(/one exact earlier protected rejection event/i);
+      expect(
+        db
+          .prepare(`SELECT 1 FROM correction_uses WHERE assignment_id = ?`)
+          .get(issued.assignment.assignmentId),
+      ).toBeUndefined();
     } finally {
       fixture.close();
     }
@@ -2069,22 +2370,46 @@ describe("protected delegation ledger integrity", () => {
   it.each([
     {
       name: "a global post-report rejection",
-      rejectionPayload: (_correctedReceiptId: string, _originalReceiptId: string) => ({
+      rejectionPayload: (
+        _correctedReceiptId: string,
+        _originalReceiptId: string,
+        _originalValidationId: string,
+      ) => ({
         code: "run-timeout-after-report",
       }),
     },
     {
       name: "a rejection targeting the corrected receipt",
-      rejectionPayload: (correctedReceiptId: string, _originalReceiptId: string) => ({
+      rejectionPayload: (
+        correctedReceiptId: string,
+        _originalReceiptId: string,
+        _originalValidationId: string,
+      ) => ({
         receiptId: correctedReceiptId,
         code: "corrected-receipt-terminal-rejection",
       }),
     },
     {
       name: "a later rejection naming the original receipt without its validation identity",
-      rejectionPayload: (_correctedReceiptId: string, originalReceiptId: string) => ({
+      rejectionPayload: (
+        _correctedReceiptId: string,
+        originalReceiptId: string,
+        _originalValidationId: string,
+      ) => ({
         receiptId: originalReceiptId,
         code: "run-timeout-after-correction",
+      }),
+    },
+    {
+      name: "a later rejection repeating the original receipt and validation tuple",
+      rejectionPayload: (
+        _correctedReceiptId: string,
+        originalReceiptId: string,
+        originalValidationId: string,
+      ) => ({
+        receiptId: originalReceiptId,
+        validationId: originalValidationId,
+        code: "same-tuple-rejection-after-correction",
       }),
     },
   ])("keeps $name authoritative across a late result and reopen", async ({ rejectionPayload }) => {
@@ -2133,7 +2458,11 @@ describe("protected delegation ledger integrity", () => {
       outcome: "accepted",
       createdAt: 1_001,
     });
-    const terminalRejectionPayload = rejectionPayload(correctedReceiptId, rejected.receiptId);
+    const terminalRejectionPayload = rejectionPayload(
+      correctedReceiptId,
+      rejected.receiptId,
+      rejected.validationId,
+    );
     fixture.ledger.appendRouteEvent({
       assignmentId: issued.assignment.assignmentId,
       kind: "validation_rejected",
@@ -2197,7 +2526,7 @@ describe("protected delegation ledger integrity", () => {
     }
   });
 
-  it("selects the applicable equal-time rejection without UUID ordering", () => {
+  it("keeps a later same-tuple rejection applicable by event identity", () => {
     const fixture = createLedgerFixture();
     try {
       const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
@@ -2214,6 +2543,16 @@ describe("protected delegation ledger integrity", () => {
         assignmentId: issued.assignment.assignmentId,
         report: rejectedReport,
         issues: [{ code: "format", message: "evidence label requires normalization" }],
+        createdAt: 1_000,
+      });
+      fixture.ledger.appendRouteEvent({
+        assignmentId: issued.assignment.assignmentId,
+        kind: "validation_rejected",
+        payload: {
+          code: "format",
+          receiptId: rejected.receiptId,
+          validationId: rejected.validationId,
+        },
         createdAt: 1_000,
       });
       const correctedReport = structuredClone(rejectedReport);
@@ -2246,7 +2585,7 @@ describe("protected delegation ledger integrity", () => {
         2_000,
       );
       insertRouteEvent.run(
-        "route-event_z-superseded",
+        "route-event_z-later-same-tuple",
         issued.assignment.assignmentId,
         JSON.stringify({
           code: "format",
@@ -2262,8 +2601,12 @@ describe("protected delegation ledger integrity", () => {
           correctedReceiptId,
         ),
       ).toEqual({
-        eventId: "route-event_a-applicable",
-        payload: { code: "run-timeout-after-report", runId: "run-1" },
+        eventId: "route-event_z-later-same-tuple",
+        payload: {
+          code: "format",
+          receiptId: rejected.receiptId,
+          validationId: rejected.validationId,
+        },
         createdAt: 2_000,
       });
     } finally {
