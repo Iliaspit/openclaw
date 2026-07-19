@@ -82,6 +82,25 @@ export {
 } from "../plugins/provider-model-helpers.js";
 import { normalizeOptionalLowercaseString } from "../shared/string-coerce.js";
 
+export function supportsOpenAiFamilyXHighModelId(modelId: string): boolean {
+  const lower = modelId.trim().toLowerCase();
+  if (!lower) {
+    return false;
+  }
+  return (
+    lower.startsWith("gpt-5") ||
+    lower.startsWith("o1") ||
+    lower.startsWith("o3") ||
+    lower.startsWith("o4") ||
+    lower.includes("codex")
+  );
+}
+
+export function supportsOpenAiFamilyMaxThinkingModelId(modelId: string): boolean {
+  const lower = modelId.trim().toLowerCase();
+  return lower === "gpt-5.6" || lower.startsWith("gpt-5.6-");
+}
+
 export function getModelProviderHint(modelId: string): string | null {
   const trimmed = normalizeOptionalLowercaseString(modelId);
   if (!trimmed) {

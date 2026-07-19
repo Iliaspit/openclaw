@@ -1,5 +1,16 @@
 # Unhealthy Child Session Handoff Plan
 
+## Status
+
+Closed for active execution on 2026-07-05.
+
+The unhealthy-child route-health, fresh-reroute, generation, receipt, and
+repair-control work has moved from planning into implementation and incident
+history. Do not append new planner/helper context work to this historical plan.
+Track follow-up items in
+`docs/refactor/planner-child-completion-follow-up-plan.md` so each remaining
+change can be implemented, tested, and reviewed separately.
+
 This plan covers the fix for planner work being sent into unhealthy or bloated
 child sessions, including sub-agent and ACP-backed child lineage, based on the
 June 2026 Docker log investigation and the runtime-health visibility work.

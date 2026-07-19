@@ -1219,6 +1219,228 @@ public struct PushTestResult: Codable, Sendable {
     }
 }
 
+public struct QueueHealthParams: Codable, Sendable {
+    public let lane: String?
+
+    public init(
+        lane: String?)
+    {
+        self.lane = lane
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case lane
+    }
+}
+
+public struct QueueRuntimeIssue: Codable, Sendable {
+    public let runid: String
+    public let code: AnyCodable
+    public let severity: AnyCodable
+    public let message: String
+    public let observedat: Int
+    public let lastupdatedat: Int
+    public let count: Int
+    public let sessionkey: String?
+    public let lane: String?
+    public let livenessstate: String?
+
+    public init(
+        runid: String,
+        code: AnyCodable,
+        severity: AnyCodable,
+        message: String,
+        observedat: Int,
+        lastupdatedat: Int,
+        count: Int,
+        sessionkey: String?,
+        lane: String?,
+        livenessstate: String?)
+    {
+        self.runid = runid
+        self.code = code
+        self.severity = severity
+        self.message = message
+        self.observedat = observedat
+        self.lastupdatedat = lastupdatedat
+        self.count = count
+        self.sessionkey = sessionkey
+        self.lane = lane
+        self.livenessstate = livenessstate
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case runid = "runId"
+        case code
+        case severity
+        case message
+        case observedat = "observedAt"
+        case lastupdatedat = "lastUpdatedAt"
+        case count
+        case sessionkey = "sessionKey"
+        case lane
+        case livenessstate = "livenessState"
+    }
+}
+
+public struct QueueWaitHint: Codable, Sendable {
+    public let code: String
+    public let label: String
+    public let detail: String
+    public let observedat: Int
+
+    public init(
+        code: String,
+        label: String,
+        detail: String,
+        observedat: Int)
+    {
+        self.code = code
+        self.label = label
+        self.detail = detail
+        self.observedat = observedat
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case code
+        case label
+        case detail
+        case observedat = "observedAt"
+    }
+}
+
+public struct QueueLaneSnapshot: Codable, Sendable {
+    public let lane: String
+    public let health: AnyCodable
+    public let queued: Int
+    public let active: Int
+    public let depth: Int
+    public let maxconcurrent: Int
+    public let isoverloaded: Bool?
+    public let draining: Bool
+    public let oldestqueuedat: AnyCodable
+    public let oldestqueuedms: AnyCodable
+    public let oldestactivestartedat: AnyCodable
+    public let oldestactivems: AnyCodable
+    public let lastwaitms: AnyCodable
+    public let lastdequeuedat: AnyCodable
+    public let lasttaskdurationms: AnyCodable
+    public let lastcompletedat: AnyCodable
+    public let lasterrorat: AnyCodable
+    public let lastclearedat: AnyCodable
+    public let runtimeissues: [QueueRuntimeIssue]
+    public let waithint: [String: AnyCodable]?
+
+    public init(
+        lane: String,
+        health: AnyCodable,
+        queued: Int,
+        active: Int,
+        depth: Int,
+        maxconcurrent: Int,
+        isoverloaded: Bool?,
+        draining: Bool,
+        oldestqueuedat: AnyCodable,
+        oldestqueuedms: AnyCodable,
+        oldestactivestartedat: AnyCodable,
+        oldestactivems: AnyCodable,
+        lastwaitms: AnyCodable,
+        lastdequeuedat: AnyCodable,
+        lasttaskdurationms: AnyCodable,
+        lastcompletedat: AnyCodable,
+        lasterrorat: AnyCodable,
+        lastclearedat: AnyCodable,
+        runtimeissues: [QueueRuntimeIssue],
+        waithint: [String: AnyCodable]?)
+    {
+        self.lane = lane
+        self.health = health
+        self.queued = queued
+        self.active = active
+        self.depth = depth
+        self.maxconcurrent = maxconcurrent
+        self.isoverloaded = isoverloaded
+        self.draining = draining
+        self.oldestqueuedat = oldestqueuedat
+        self.oldestqueuedms = oldestqueuedms
+        self.oldestactivestartedat = oldestactivestartedat
+        self.oldestactivems = oldestactivems
+        self.lastwaitms = lastwaitms
+        self.lastdequeuedat = lastdequeuedat
+        self.lasttaskdurationms = lasttaskdurationms
+        self.lastcompletedat = lastcompletedat
+        self.lasterrorat = lasterrorat
+        self.lastclearedat = lastclearedat
+        self.runtimeissues = runtimeissues
+        self.waithint = waithint
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case lane
+        case health
+        case queued
+        case active
+        case depth
+        case maxconcurrent = "maxConcurrent"
+        case isoverloaded = "isOverloaded"
+        case draining
+        case oldestqueuedat = "oldestQueuedAt"
+        case oldestqueuedms = "oldestQueuedMs"
+        case oldestactivestartedat = "oldestActiveStartedAt"
+        case oldestactivems = "oldestActiveMs"
+        case lastwaitms = "lastWaitMs"
+        case lastdequeuedat = "lastDequeuedAt"
+        case lasttaskdurationms = "lastTaskDurationMs"
+        case lastcompletedat = "lastCompletedAt"
+        case lasterrorat = "lastErrorAt"
+        case lastclearedat = "lastClearedAt"
+        case runtimeissues = "runtimeIssues"
+        case waithint = "waitHint"
+    }
+}
+
+public struct QueueHealthResult: Codable, Sendable {
+    public let ts: Int
+    public let gatewaydraining: Bool
+    public let totalqueued: Int
+    public let totalactive: Int
+    public let totaldepth: Int
+    public let totalruntimeissues: Int
+    public let runtimeissues: [QueueRuntimeIssue]
+    public let lanes: [QueueLaneSnapshot]
+
+    public init(
+        ts: Int,
+        gatewaydraining: Bool,
+        totalqueued: Int,
+        totalactive: Int,
+        totaldepth: Int,
+        totalruntimeissues: Int,
+        runtimeissues: [QueueRuntimeIssue],
+        lanes: [QueueLaneSnapshot])
+    {
+        self.ts = ts
+        self.gatewaydraining = gatewaydraining
+        self.totalqueued = totalqueued
+        self.totalactive = totalactive
+        self.totaldepth = totaldepth
+        self.totalruntimeissues = totalruntimeissues
+        self.runtimeissues = runtimeissues
+        self.lanes = lanes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ts
+        case gatewaydraining = "gatewayDraining"
+        case totalqueued = "totalQueued"
+        case totalactive = "totalActive"
+        case totaldepth = "totalDepth"
+        case totalruntimeissues = "totalRuntimeIssues"
+        case runtimeissues = "runtimeIssues"
+        case lanes
+    }
+}
+
 public struct SecretsReloadParams: Codable, Sendable {}
 
 public struct SecretsResolveParams: Codable, Sendable {

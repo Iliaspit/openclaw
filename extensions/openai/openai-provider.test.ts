@@ -229,6 +229,93 @@ describe("buildOpenAIProvider", () => {
     });
   });
 
+  it("keeps GPT-5.6 family metadata aligned with native OpenAI docs", () => {
+    const provider = buildOpenAIProvider();
+    const codexProvider = buildOpenAICodexProviderPlugin();
+    const directRegistry = {
+      find(providerId: string, id: string) {
+        if (providerId !== "openai") {
+          return null;
+        }
+        return {
+          id,
+          name: id,
+          provider: "openai",
+          api: "openai-responses",
+          baseUrl: "https://api.openai.com/v1",
+          reasoning: true,
+          input: ["text", "image"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 1_000_000,
+          maxTokens: 128_000,
+        };
+      },
+    };
+
+    const sol = provider.resolveDynamicModel?.({
+      provider: "openai",
+      modelId: "gpt-5.6-sol",
+      modelRegistry: directRegistry as never,
+    });
+    const alias = provider.resolveDynamicModel?.({
+      provider: "openai",
+      modelId: "gpt-5.6",
+      modelRegistry: directRegistry as never,
+    });
+    const terra = provider.resolveDynamicModel?.({
+      provider: "openai",
+      modelId: "gpt-5.6-terra",
+      modelRegistry: directRegistry as never,
+    });
+    const luna = provider.resolveDynamicModel?.({
+      provider: "openai",
+      modelId: "gpt-5.6-luna",
+      modelRegistry: directRegistry as never,
+    });
+    const codexSol = codexProvider.resolveDynamicModel?.({
+      provider: "openai-codex",
+      modelId: "gpt-5.6-sol",
+      modelRegistry: { find: () => null } as never,
+    });
+
+    for (const model of [sol, alias, terra, luna]) {
+      expect(model).toMatchObject({
+        provider: "openai",
+        api: "openai-responses",
+        baseUrl: "https://api.openai.com/v1",
+        input: ["text", "image"],
+        contextWindow: 1_050_000,
+        maxTokens: 128_000,
+      });
+    }
+    expect(sol).toMatchObject({
+      id: "gpt-5.6-sol",
+      cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+    });
+    expect(alias).toMatchObject({
+      id: "gpt-5.6",
+      cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+    });
+    expect(terra).toMatchObject({
+      id: "gpt-5.6-terra",
+      cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
+    });
+    expect(luna).toMatchObject({
+      id: "gpt-5.6-luna",
+      cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 0 },
+    });
+    expect(codexSol).toMatchObject({
+      provider: "openai-codex",
+      id: "gpt-5.6-sol",
+      api: "openai-codex-responses",
+      baseUrl: "https://chatgpt.com/backend-api/codex",
+      contextWindow: 1_050_000,
+      contextTokens: 272_000,
+      maxTokens: 128_000,
+      cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+    });
+  });
+
   it("leaves gpt-5.5 to Pi and resolves gpt-5.5-pro locally", () => {
     const provider = buildOpenAIProvider();
 
@@ -312,6 +399,84 @@ describe("buildOpenAIProvider", () => {
     );
   });
 
+  it("surfaces GPT-5.6 models through max and augmented catalog metadata", () => {
+    const provider = buildOpenAIProvider();
+    const codexProvider = buildOpenAICodexProviderPlugin();
+
+    for (const modelId of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
+      expect(
+        provider
+          .resolveThinkingProfile?.({
+            provider: "openai",
+            modelId,
+          } as never)
+          ?.levels.some((level) => level.id === "xhigh"),
+      ).toBe(true);
+      expect(
+        provider
+          .resolveThinkingProfile?.({
+            provider: "openai",
+            modelId,
+          } as never)
+          ?.levels.some((level) => level.id === "max"),
+      ).toBe(true);
+      expect(
+        codexProvider
+          .resolveThinkingProfile?.({
+            provider: "openai-codex",
+            modelId,
+          } as never)
+          ?.levels.some((level) => level.id === "max"),
+      ).toBe(true);
+    }
+
+    expect(
+      provider
+        .resolveThinkingProfile?.({
+          provider: "openai",
+          modelId: "gpt-5.5",
+        } as never)
+        ?.levels.some((level) => level.id === "max"),
+    ).toBe(false);
+
+    const entries = provider.augmentModelCatalog?.({
+      env: process.env,
+      entries: [
+        { provider: "openai", id: "gpt-5.5", name: "GPT-5.5" },
+        { provider: "openai", id: "gpt-5.4", name: "GPT-5.4" },
+        { provider: "openai", id: "gpt-5.4-nano", name: "GPT-5.4 nano" },
+      ],
+    } as never);
+
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        provider: "openai",
+        id: "gpt-5.6-sol",
+        name: "gpt-5.6-sol",
+        reasoning: true,
+        input: ["text", "image"],
+        contextWindow: 1_050_000,
+        cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        provider: "openai",
+        id: "gpt-5.6-terra",
+        contextWindow: 1_050_000,
+        cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        provider: "openai",
+        id: "gpt-5.6-luna",
+        contextWindow: 1_050_000,
+        cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 0 },
+      }),
+    );
+  });
+
   it("keeps modern live selection on OpenAI 5.2+ and Codex 5.2+", () => {
     const provider = buildOpenAIProvider();
     const codexProvider = buildOpenAICodexProviderPlugin();
@@ -338,6 +503,12 @@ describe("buildOpenAIProvider", () => {
       provider.isModernModelRef?.({
         provider: "openai",
         modelId: "gpt-5.5",
+      } as never),
+    ).toBe(true);
+    expect(
+      provider.isModernModelRef?.({
+        provider: "openai",
+        modelId: "gpt-5.6-luna",
       } as never),
     ).toBe(true);
 
@@ -369,6 +540,12 @@ describe("buildOpenAIProvider", () => {
       codexProvider.isModernModelRef?.({
         provider: "openai-codex",
         modelId: "gpt-5.5",
+      } as never),
+    ).toBe(true);
+    expect(
+      codexProvider.isModernModelRef?.({
+        provider: "openai-codex",
+        modelId: "gpt-5.6-terra",
       } as never),
     ).toBe(true);
   });

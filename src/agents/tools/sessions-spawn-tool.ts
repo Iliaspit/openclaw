@@ -1,8 +1,15 @@
 import { Type } from "typebox";
 import { loadConfig } from "../../config/config.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { callGateway } from "../../gateway/call.js";
 import { normalizeDeliveryContext } from "../../utils/delivery-context.shared.js";
 import type { GatewayMessageChannel } from "../../utils/message-channel.js";
+import {
+  appendDelegationRouteEvent,
+  authorizeDelegationRoute,
+  resolveDelegationCallerAgentId,
+  type AuthorizedDelegationRoute,
+} from "../delegation/runtime.js";
 import { optionalStringEnum } from "../schema/typebox.js";
 import type { SpawnedToolContext } from "../spawned-context.js";
 import { registerSubagentRun } from "../subagent-registry.js";
@@ -85,6 +92,25 @@ function resolveTrackedSpawnMode(params: {
   return params.threadRequested ? "session" : "run";
 }
 
+export function resolveGuardedSpawnMetadata(
+  role: AuthorizedDelegationRoute["assignment"]["role"],
+): {
+  sandbox: "require";
+  sliceRole: (typeof SESSIONS_SPAWN_SLICE_ROLES)[number] | undefined;
+} {
+  const sliceRole =
+    role === "implementer"
+      ? "implementation"
+      : role === "tester"
+        ? "testing"
+        : role === "reviewer"
+          ? "review"
+          : role === "qa"
+            ? "qa"
+            : undefined;
+  return { sandbox: "require", sliceRole };
+}
+
 async function cleanupUntrackedAcpSession(sessionKey: string): Promise<void> {
   const key = sessionKey.trim();
   if (!key) {
@@ -118,6 +144,12 @@ const SessionsSpawnToolSchema = Type.Object({
   ),
   model: Type.Optional(Type.String()),
   thinking: Type.Optional(Type.String()),
+  delegationToken: Type.Optional(
+    Type.String({
+      minLength: 1,
+      description: "One-use runtime token issued by delegation_guard for guarded workers.",
+    }),
+  ),
   cwd: Type.Optional(Type.String()),
   runTimeoutSeconds: Type.Optional(Type.Number({ minimum: 0 })),
   // Back-compat: older callers used timeoutSeconds for this tool.
@@ -178,6 +210,8 @@ export function createSessionsSpawnTool(
     sandboxed?: boolean;
     /** Explicit agent ID override for cron/hook sessions where session key parsing may not work. */
     requesterAgentIdOverride?: string;
+    config?: OpenClawConfig;
+    effectiveThinking?: string;
   } & SpawnedToolContext,
 ): AnyAgentTool {
   return {
@@ -201,13 +235,14 @@ export function createSessionsSpawnTool(
       const runtime = params.runtime === "acp" ? "acp" : "subagent";
       const requestedAgentId = readStringParam(params, "agentId");
       const resumeSessionId = readStringParam(params, "resumeSessionId");
-      const modelOverride = readStringParam(params, "model");
-      const thinkingOverrideRaw = readStringParam(params, "thinking");
+      let modelOverride = readStringParam(params, "model");
+      let thinkingOverrideRaw = readStringParam(params, "thinking");
+      const delegationToken = readStringParam(params, "delegationToken");
       const cwd = readStringParam(params, "cwd");
       const mode = params.mode === "run" || params.mode === "session" ? params.mode : undefined;
       const cleanup =
         params.cleanup === "keep" || params.cleanup === "delete" ? params.cleanup : "keep";
-      const sliceRole = SESSIONS_SPAWN_SLICE_ROLES.includes(
+      let sliceRole = SESSIONS_SPAWN_SLICE_ROLES.includes(
         params.sliceRole as (typeof SESSIONS_SPAWN_SLICE_ROLES)[number],
       )
         ? (params.sliceRole as (typeof SESSIONS_SPAWN_SLICE_ROLES)[number])
@@ -217,7 +252,7 @@ export function createSessionsSpawnTool(
           ? params.sliceContinuation
           : undefined;
       const expectsCompletionMessage = params.expectsCompletionMessage !== false;
-      const sandbox = params.sandbox === "require" ? "require" : "inherit";
+      let sandbox: "inherit" | "require" = params.sandbox === "require" ? "require" : "inherit";
       const context =
         params.context === "fork" || params.context === "isolated" ? params.context : undefined;
       const streamTo = params.streamTo === "parent" ? "parent" : undefined;
@@ -248,8 +283,95 @@ export function createSessionsSpawnTool(
             mimeType?: string;
           }>)
         : undefined;
-
       const roleContext = requestedAgentId ? { role: requestedAgentId } : {};
+
+      const cfg = opts?.config ?? loadConfig();
+      let guardedRoute: AuthorizedDelegationRoute | undefined;
+      try {
+        const targetAgentId =
+          requestedAgentId ??
+          resolveDelegationCallerAgentId({
+            agentSessionKey: opts?.agentSessionKey,
+            requesterAgentIdOverride: opts?.requesterAgentIdOverride,
+          });
+        guardedRoute = authorizeDelegationRoute({
+          config: cfg,
+          agentSessionKey: opts?.agentSessionKey,
+          requesterAgentIdOverride: opts?.requesterAgentIdOverride,
+          effectiveThinking: opts?.effectiveThinking,
+          targetAgentId,
+          targetThinking: thinkingOverrideRaw,
+          targetModel: modelOverride,
+          delegationToken,
+          routeKind: "spawn",
+        });
+      } catch (error) {
+        return jsonResult({
+          status: "forbidden",
+          error: error instanceof Error ? error.message : "Guarded spawn authorization failed.",
+          ...roleContext,
+        });
+      }
+
+      if (guardedRoute) {
+        const requiredThinking = guardedRoute.assignment.requiredThinking;
+        const requiredModel = guardedRoute.assignment.requiredModel;
+        if (runtime !== "subagent") {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            reason: "guarded workers require the sandboxed subagent runtime",
+          });
+          return jsonResult({
+            status: "forbidden",
+            error: "Guarded workers require runtime=subagent.",
+            ...roleContext,
+          });
+        }
+        if (resumeSessionId || streamTo) {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            reason: "guarded worker session/stream override rejected",
+          });
+          return jsonResult({
+            status: "forbidden",
+            error: "Guarded worker routes do not permit resume-session or host-stream overrides.",
+            ...roleContext,
+          });
+        }
+        if (modelOverride && modelOverride !== requiredModel) {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            reason: "conflicting guarded worker model override",
+          });
+          return jsonResult({
+            status: "forbidden",
+            error: `Guarded assignment requires exact model ${requiredModel}.`,
+            ...roleContext,
+          });
+        }
+        if (thinkingOverrideRaw && thinkingOverrideRaw !== requiredThinking) {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            reason: "conflicting guarded worker thinking override",
+          });
+          return jsonResult({
+            status: "forbidden",
+            error: `Guarded assignment requires exact ${requiredThinking} thinking.`,
+            ...roleContext,
+          });
+        }
+        const guardedMetadata = resolveGuardedSpawnMetadata(guardedRoute.assignment.role);
+        // The assignment token, not planner-supplied generic spawn metadata, owns
+        // the guarded role and sandbox. Normalize both before the worker starts.
+        sliceRole = guardedMetadata.sliceRole;
+        modelOverride = requiredModel;
+        thinkingOverrideRaw = requiredThinking;
+        sandbox = guardedMetadata.sandbox;
+      }
 
       if (streamTo && runtime !== "acp") {
         return jsonResult({
@@ -311,7 +433,7 @@ export function createSessionsSpawnTool(
           Boolean(childRunId) &&
           streamTo !== "parent";
         if (shouldTrackViaRegistry && childSessionKey && childRunId) {
-          const cfg = loadConfig();
+          const cfg = opts?.config ?? loadConfig();
           const trackedSpawnMode = resolveTrackedSpawnMode({
             requestedMode: result.mode,
             threadRequested: thread,
@@ -368,43 +490,100 @@ export function createSessionsSpawnTool(
         return jsonResult(addRoleToFailureResult(result, requestedAgentId));
       }
 
-      const result = await spawnSubagentDirect(
-        {
-          task,
-          label: label || undefined,
-          agentId: requestedAgentId,
-          model: modelOverride,
-          thinking: thinkingOverrideRaw,
-          runTimeoutSeconds,
-          thread,
-          mode,
-          cleanup,
-          sliceRole,
-          sliceContinuation,
-          sandbox,
-          context,
-          lightContext,
-          expectsCompletionMessage,
-          attachments,
-          attachMountPath:
-            params.attachAs && typeof params.attachAs === "object"
-              ? readStringParam(params.attachAs as Record<string, unknown>, "mountPath")
-              : undefined,
-        },
-        {
-          agentSessionKey: opts?.agentSessionKey,
-          agentChannel: opts?.agentChannel,
-          agentAccountId: opts?.agentAccountId,
-          agentTo: opts?.agentTo,
-          agentThreadId: opts?.agentThreadId,
-          agentGroupId: opts?.agentGroupId,
-          agentGroupChannel: opts?.agentGroupChannel,
-          agentGroupSpace: opts?.agentGroupSpace,
-          agentMemberRoleIds: opts?.agentMemberRoleIds,
-          requesterAgentIdOverride: opts?.requesterAgentIdOverride,
-          workspaceDir: opts?.workspaceDir,
-        },
-      );
+      let result: Awaited<ReturnType<typeof spawnSubagentDirect>>;
+      try {
+        result = await spawnSubagentDirect(
+          {
+            task,
+            delegationAssignmentId: guardedRoute?.assignment.assignmentId,
+            label: label || undefined,
+            agentId: requestedAgentId,
+            model: modelOverride,
+            thinking: thinkingOverrideRaw,
+            runTimeoutSeconds,
+            thread,
+            mode,
+            cleanup,
+            sliceRole,
+            sliceContinuation,
+            sandbox,
+            context,
+            lightContext,
+            expectsCompletionMessage,
+            attachments,
+            attachMountPath:
+              params.attachAs && typeof params.attachAs === "object"
+                ? readStringParam(params.attachAs as Record<string, unknown>, "mountPath")
+                : undefined,
+          },
+          {
+            agentSessionKey: opts?.agentSessionKey,
+            agentChannel: opts?.agentChannel,
+            agentAccountId: opts?.agentAccountId,
+            agentTo: opts?.agentTo,
+            agentThreadId: opts?.agentThreadId,
+            agentGroupId: opts?.agentGroupId,
+            agentGroupChannel: opts?.agentGroupChannel,
+            agentGroupSpace: opts?.agentGroupSpace,
+            agentMemberRoleIds: opts?.agentMemberRoleIds,
+            requesterAgentIdOverride: opts?.requesterAgentIdOverride,
+            workspaceDir: opts?.workspaceDir,
+          },
+        );
+      } catch (error) {
+        const message = `${guardedRoute ? "Guarded spawn" : "Subagent spawn"} failed unexpectedly: ${summarizeError(error)}`;
+        if (guardedRoute) {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            reason: message,
+          });
+        }
+        return jsonResult({
+          status: "error",
+          error: message,
+          ...roleContext,
+        });
+      }
+
+      if (guardedRoute) {
+        if (result.status !== "accepted" || !result.childSessionKey) {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            childSessionKey: result.childSessionKey,
+            runId: result.runId,
+            reason: result.error ?? "guarded spawn was not accepted",
+          });
+        } else {
+          try {
+            appendDelegationRouteEvent({
+              authorized: guardedRoute,
+              kind: "accepted",
+              childSessionKey: result.childSessionKey,
+              runId: result.runId,
+            });
+          } catch (error) {
+            appendDelegationRouteEvent({
+              authorized: guardedRoute,
+              kind: "route_rejected",
+              childSessionKey: result.childSessionKey,
+              runId: result.runId,
+              reason: "protected assignment binding failed after spawn acceptance",
+            });
+            return jsonResult({
+              status: "error",
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "Protected assignment binding failed after spawn acceptance.",
+              childSessionKey: result.childSessionKey,
+              runId: result.runId,
+              ...roleContext,
+            });
+          }
+        }
+      }
 
       return jsonResult(addRoleToFailureResult(result, requestedAgentId));
     },

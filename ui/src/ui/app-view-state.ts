@@ -14,6 +14,7 @@ import type {
 import type { EmbedSandboxMode } from "./embed-sandbox.ts";
 import type { GatewayBrowserClient, GatewayHelloOk } from "./gateway.ts";
 import type { Tab } from "./navigation.ts";
+import type { PlannerCompletionNotification } from "./planner-notifications.ts";
 import type { SidebarContent } from "./sidebar-content.ts";
 import type { UiSettings } from "./storage.ts";
 import type { ThemeTransitionContext } from "./theme-transition.ts";
@@ -370,6 +371,9 @@ export type AppViewState = {
     logsMaxBytes: number;
     logsAtBottom: boolean;
     updateAvailable: import("./types.js").UpdateAvailable | null;
+    plannerCompletionNotification: PlannerCompletionNotification | null;
+    plannerCompletionNotificationDismissTimer: ReturnType<typeof setTimeout> | null;
+    plannerCompletionNotificationSeenIds: Set<string>;
     attentionItems: AttentionItem[];
     paletteOpen: boolean;
     paletteQuery: string;

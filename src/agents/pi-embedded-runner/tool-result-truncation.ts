@@ -328,7 +328,7 @@ function summarizeToolResultDetailValue(
     return value.name ? `[Function ${value.name}]` : "[Function]";
   }
   if (typeof value !== "object") {
-    return String(value);
+    return value;
   }
   if (seen.has(value)) {
     return "[Circular]";
@@ -421,7 +421,7 @@ function truncateToolResultDetails(
     detailsTruncated: true,
     originalDetailsChars: serialized.length,
   };
-  for (const key of Object.keys(fallbackBase).reverse()) {
+  for (const key of Object.keys(fallbackBase).toReversed()) {
     if (key === "detailsTruncated" || key === "originalDetailsChars") {
       continue;
     }

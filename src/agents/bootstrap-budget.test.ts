@@ -57,8 +57,8 @@ describe("analyzeBootstrapBudget", () => {
     const analysis = analyzeBootstrapBudget({
       files: [
         {
-          name: "AGENTS.md",
-          path: "/tmp/AGENTS.md",
+          name: "TOOLS.md",
+          path: "/tmp/TOOLS.md",
           missing: false,
           rawChars: 150,
           injectedChars: 120,
@@ -79,11 +79,34 @@ describe("analyzeBootstrapBudget", () => {
     expect(analysis.hasTruncation).toBe(true);
     expect(analysis.totalNearLimit).toBe(true);
     expect(analysis.truncatedFiles).toHaveLength(2);
-    const agents = analysis.truncatedFiles.find((file) => file.name === "AGENTS.md");
+    const tools = analysis.truncatedFiles.find((file) => file.name === "TOOLS.md");
     const soul = analysis.truncatedFiles.find((file) => file.name === "SOUL.md");
-    expect(agents?.causes).toContain("per-file-limit");
-    expect(agents?.causes).toContain("total-limit");
+    expect(tools?.causes).toContain("per-file-limit");
+    expect(tools?.causes).toContain("total-limit");
     expect(soul?.causes).toContain("total-limit");
+  });
+
+  it("uses max/total as the AGENTS.md policy limit", () => {
+    const analysis = analyzeBootstrapBudget({
+      files: [
+        {
+          name: "AGENTS.md",
+          path: "/tmp/AGENTS.md",
+          missing: false,
+          rawChars: 160,
+          injectedChars: 160,
+          truncated: false,
+        },
+      ],
+      bootstrapMaxChars: 120,
+      bootstrapTotalMaxChars: 200,
+    });
+    expect(analysis.files[0]).toMatchObject({
+      limitChars: 200,
+      limitCause: "total-limit",
+      nearLimit: true,
+      truncated: false,
+    });
   });
 
   it("does not force a total-limit cause when totals are within limits", () => {
@@ -111,8 +134,8 @@ describe("bootstrap prompt warnings", () => {
       "AGENTS.md: 200 raw -> 0 injected",
     ]);
     expect(prompt.startsWith("Please continue.")).toBe(true);
-    expect(prompt).toContain("[Bootstrap truncation warning]");
-    expect(prompt).toContain("Treat Project Context as partial");
+    expect(prompt).toContain("[Bootstrap context budget warning]");
+    expect(prompt).toContain("treat Project Context as partial");
     expect(prompt).toContain("- AGENTS.md: 200 raw -> 0 injected");
     expect(prompt.endsWith("- AGENTS.md: 200 raw -> 0 injected")).toBe(true);
   });
@@ -210,6 +233,30 @@ describe("bootstrap prompt warnings", () => {
     expect(second.lines).toEqual([]);
   });
 
+  it("warns before AGENTS.md reaches the total policy limit", () => {
+    const analysis = analyzeBootstrapBudget({
+      files: [
+        {
+          name: "AGENTS.md",
+          path: "/tmp/AGENTS.md",
+          missing: false,
+          rawChars: 160,
+          injectedChars: 160,
+          truncated: false,
+        },
+      ],
+      bootstrapMaxChars: 120,
+      bootstrapTotalMaxChars: 200,
+    });
+    const warning = buildBootstrapPromptWarning({
+      analysis,
+      mode: "once",
+    });
+    expect(warning.warningShown).toBe(true);
+    expect(warning.lines.join("\n")).toContain("80% of max/total 200; near limit");
+    expect(warning.lines.join("\n")).toContain("before truncation occurs");
+  });
+
   it("dedupes once mode across non-consecutive repeated signatures", () => {
     const analysisA = analyzeBootstrapBudget({
       files: [
@@ -293,7 +340,7 @@ describe("bootstrap prompt warnings", () => {
       analysis,
       maxFiles: 2,
     });
-    expect(lines).toContain("+1 more truncated file(s).");
+    expect(lines).toContain("+1 more near/over-limit file(s).");
   });
 
   it("disambiguates duplicate file names in warning lines", () => {
@@ -402,7 +449,7 @@ describe("bootstrap prompt warnings", () => {
           name: "AGENTS.md",
           path: "/tmp/AGENTS.md",
           missing: false,
-          rawChars: 150,
+          rawChars: 160,
           injectedChars: 100,
           truncated: true,
         },

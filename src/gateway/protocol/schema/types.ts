@@ -41,6 +41,7 @@ export type PushTestParams = SchemaType<"PushTestParams">;
 export type PushTestResult = SchemaType<"PushTestResult">;
 export type QueueHealthParams = SchemaType<"QueueHealthParams">;
 export type QueueRuntimeIssue = SchemaType<"QueueRuntimeIssue">;
+export type QueueWaitHint = SchemaType<"QueueWaitHint">;
 export type QueueLaneSnapshot = SchemaType<"QueueLaneSnapshot">;
 export type QueueHealthResult = SchemaType<"QueueHealthResult">;
 export type SessionsListParams = SchemaType<"SessionsListParams">;

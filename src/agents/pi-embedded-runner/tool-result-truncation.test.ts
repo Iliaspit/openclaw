@@ -226,7 +226,8 @@ describe("truncateToolResultMessage", () => {
     const details = (result as { details?: Record<string, unknown> }).details;
     expect(details?.status).toBe("completed");
     expect(details?.detailsTruncated).toBe(true);
-    expect(String(details?.aggregated ?? details?.preview ?? "").length).toBeLessThan(5_000);
+    const compactDetails = details?.aggregated ?? details?.preview;
+    expect(typeof compactDetails === "string" ? compactDetails.length : 0).toBeLessThan(5_000);
   });
 
   it("keeps tight fallback details within the requested context budget", () => {

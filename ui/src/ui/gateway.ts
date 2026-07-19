@@ -1,5 +1,6 @@
 import { buildDeviceAuthPayload } from "../../../src/gateway/device-auth.js";
 import {
+  GATEWAY_CLIENT_CAPS,
   GATEWAY_CLIENT_MODES,
   GATEWAY_CLIENT_NAMES,
   type GatewayClientMode,
@@ -131,6 +132,7 @@ export type GatewayHelloOk = {
 type Pending = {
   resolve: (value: unknown) => void;
   reject: (err: unknown) => void;
+  timeoutId?: number;
 };
 
 type SelectedConnectAuth = {
@@ -292,6 +294,7 @@ export class GatewayBrowserClient {
   private ws: WebSocket | null = null;
   private pending = new Map<string, Pending>();
   private closed = false;
+  private ready = false;
   private lastSeq: number | null = null;
   private connectNonce: string | null = null;
   private connectSent = false;
@@ -311,6 +314,7 @@ export class GatewayBrowserClient {
 
   stop() {
     this.closed = true;
+    this.ready = false;
     this.clearConnectTimer();
     this.ws?.close();
     this.ws = null;
@@ -321,13 +325,16 @@ export class GatewayBrowserClient {
   }
 
   get connected() {
-    return this.ws?.readyState === WebSocket.OPEN;
+    return this.ready && this.ws?.readyState === WebSocket.OPEN;
   }
 
   private connect() {
     if (this.closed) {
       return;
     }
+    this.ready = false;
+    this.connectNonce = null;
+    this.connectSent = false;
     this.ws = new WebSocket(this.opts.url);
     this.ws.addEventListener("open", () => this.queueConnect());
     this.ws.addEventListener("message", (ev) => this.handleMessage(String(ev.data ?? "")));
@@ -335,6 +342,7 @@ export class GatewayBrowserClient {
       const reason = ev.reason ?? "";
       const connectError = this.pendingConnectError;
       this.pendingConnectError = undefined;
+      this.ready = false;
       this.ws = null;
       this.flushPending(new Error(`gateway closed (${ev.code}): ${reason}`));
       this.opts.onClose?.({ code: ev.code, reason, error: connectError });
@@ -370,6 +378,9 @@ export class GatewayBrowserClient {
 
   private flushPending(err: Error) {
     for (const [, p] of this.pending) {
+      if (p.timeoutId !== undefined) {
+        window.clearTimeout(p.timeoutId);
+      }
       p.reject(err);
     }
     this.pending.clear();
@@ -393,7 +404,7 @@ export class GatewayBrowserClient {
       role: plan.role,
       scopes: plan.scopes,
       device: plan.device,
-      caps: ["tool-events"],
+      caps: [GATEWAY_CLIENT_CAPS.TOOL_EVENTS, GATEWAY_CLIENT_CAPS.ORCHESTRATION_EVENTS],
       auth: plan.auth,
       userAgent: navigator.userAgent,
       locale: navigator.language,
@@ -449,6 +460,7 @@ export class GatewayBrowserClient {
   }
 
   private handleConnectHello(hello: GatewayHelloOk, plan: ConnectPlan) {
+    this.ready = true;
     this.pendingDeviceTokenRetry = false;
     this.deviceTokenRetryBudgetUsed = false;
     if (hello?.auth?.deviceToken && plan.deviceIdentity) {
@@ -568,6 +580,9 @@ export class GatewayBrowserClient {
         return;
       }
       this.pending.delete(res.id);
+      if (pending.timeoutId !== undefined) {
+        window.clearTimeout(pending.timeoutId);
+      }
       if (res.ok) {
         pending.resolve(res.payload);
       } else {
@@ -618,16 +633,40 @@ export class GatewayBrowserClient {
     };
   }
 
-  request<T = unknown>(method: string, params?: unknown): Promise<T> {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+  request<T = unknown>(
+    method: string,
+    params?: unknown,
+    options?: { timeoutMs?: number },
+  ): Promise<T> {
+    const isConnectRequest = method === "connect";
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || (!isConnectRequest && !this.ready)) {
       return Promise.reject(new Error("gateway not connected"));
     }
     const id = generateUUID();
     const frame = { type: "req", id, method, params };
     const p = new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: (v) => resolve(v as T), reject });
+      const pending: Pending = { resolve: (v) => resolve(v as T), reject };
+      const timeoutMs = options?.timeoutMs;
+      if (typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        pending.timeoutId = window.setTimeout(() => {
+          if (!this.pending.delete(id)) {
+            return;
+          }
+          reject(new Error(`gateway request timeout for ${method}`));
+        }, timeoutMs);
+      }
+      this.pending.set(id, pending);
     });
-    this.ws.send(JSON.stringify(frame));
+    try {
+      this.ws.send(JSON.stringify(frame));
+    } catch (err) {
+      const pending = this.pending.get(id);
+      if (pending?.timeoutId !== undefined) {
+        window.clearTimeout(pending.timeoutId);
+      }
+      this.pending.delete(id);
+      return Promise.reject(err);
+    }
     return p;
   }
 

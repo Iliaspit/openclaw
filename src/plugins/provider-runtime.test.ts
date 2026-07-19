@@ -140,7 +140,7 @@ function createOpenAiCatalogProviderPlugin(
         ? {
             suppress: true,
             errorMessage:
-              "gpt-5.3-codex-spark is no longer exposed by the OpenAI or Codex catalogs. Use openai/gpt-5.5.",
+              "gpt-5.3-codex-spark is no longer exposed by the OpenAI or Codex catalogs. Use openai/gpt-5.6-sol.",
           }
         : undefined,
     augmentModelCatalog: () => [
@@ -1130,7 +1130,7 @@ describe("provider-runtime", () => {
         {
           ...createOpenAiCatalogProviderPlugin({
             buildMissingAuthMessage: () =>
-              'No API key found for provider "openai". Use openai/gpt-5.5.',
+              'No API key found for provider "openai". Use openai/gpt-5.6-sol.',
             buildUnknownModelHint,
           }),
         } as ProviderPlugin,

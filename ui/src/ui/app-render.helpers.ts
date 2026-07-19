@@ -41,6 +41,7 @@ type SessionOptionEntry = {
   label: string;
   scopeLabel: string;
   title: string;
+  disabled?: boolean;
 };
 
 type SessionOptionGroup = {
@@ -89,6 +90,8 @@ function formatQueueCount(count: number, singular: string, plural = `${singular}
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+const QUEUE_WAIT_HINT_DETAIL_MAX_CHARS = 82;
+
 function formatQueueTimestamp(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return "n/a";
@@ -120,6 +123,9 @@ function resolveQueueHealthAction(lane: QueueLaneSnapshot | null): string {
   if (lane.runtimeIssues.length > 0) {
     return "Open session/logs; check final report or retry if needed.";
   }
+  if (lane.waitHint) {
+    return "Scheduler is idle; open the session or subagents to see what it is waiting on.";
+  }
   if (lane.isOverloaded) {
     return "Backlog is saturated. Wait, stop, or reduce sends to this lane.";
   }
@@ -147,6 +153,22 @@ function formatQueueIssuePillDetail(issue: QueueLaneSnapshot["runtimeIssues"][nu
   }
 }
 
+function formatQueueWaitHintPillDetail(
+  waitHint: NonNullable<QueueLaneSnapshot["waitHint"]>,
+): string {
+  const normalized = waitHint.detail
+    .replace(/^current status:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return waitHint.code;
+  }
+  if (normalized.length <= QUEUE_WAIT_HINT_DETAIL_MAX_CHARS) {
+    return normalized;
+  }
+  return `${normalized.slice(0, QUEUE_WAIT_HINT_DETAIL_MAX_CHARS - 3).trimEnd()}...`;
+}
+
 function summarizeQueueLane(lane: QueueLaneSnapshot): string {
   const parts = [
     `${lane.lane} (selected)`,
@@ -160,6 +182,7 @@ function summarizeQueueLane(lane: QueueLaneSnapshot): string {
     lane.runtimeIssues.length > 0
       ? `issues=${lane.runtimeIssues.map((issue) => issue.code).join(",")}`
       : null,
+    lane.waitHint ? `wait=${lane.waitHint.code}` : null,
     lane.draining ? "draining=true" : null,
   ];
   return parts.filter(Boolean).join(" ");
@@ -183,6 +206,14 @@ function buildQueueHealthTitle(params: {
     `Selected lane: ${params.laneKey}`,
     `active=${params.lane?.active ?? 0} queued=${params.lane?.queued ?? 0} tasks=${params.lane?.depth ?? 0}`,
     `runtime issues=${params.lane?.runtimeIssues.length ?? 0}`,
+    ...(params.lane?.waitHint
+      ? [
+          `Status: ${params.lane.waitHint.label}`,
+          `Waiting detail: ${params.lane.waitHint.detail}`,
+          `Observed: ${formatQueueTimestamp(params.lane.waitHint.observedAt)}`,
+          "Meaning: the scheduler can be idle because the latest planner status yielded while waiting on another agent or follow-up.",
+        ]
+      : []),
     ...(params.lane ? [summarizeQueueLane(params.lane)] : []),
   ].join("\n");
 }
@@ -216,6 +247,8 @@ function logQueueHealthDebugSnapshot(params: {
         lastCompletedAt: formatQueueTimestamp(selectedLane.lastCompletedAt),
         lastErrorAt: formatQueueTimestamp(selectedLane.lastErrorAt),
         lastClearedAt: formatQueueTimestamp(selectedLane.lastClearedAt),
+        wait: selectedLane.waitHint?.code ?? "none",
+        waitDetail: selectedLane.waitHint?.detail ?? "none",
         issueCount: selectedLane.runtimeIssues.length,
         issueCodes: selectedLane.runtimeIssues.map((issue) => issue.code).join(", ") || "none",
       }
@@ -258,6 +291,9 @@ function resolveQueueHealthClass(params: {
   ) {
     return "queue-health--degraded";
   }
+  if (params.lane?.waitHint) {
+    return "queue-health--waiting";
+  }
   if ((params.lane?.queued ?? 0) > 0) {
     return "queue-health--waiting";
   }
@@ -283,6 +319,7 @@ function renderQueueHealthWidget(state: AppViewState) {
   const laneRuntimeIssues = lane?.runtimeIssues ?? [];
   const blockingIssue = laneRuntimeIssues.find((issue) => issue.severity === "error");
   const degradedIssue = laneRuntimeIssues.find((issue) => issue.severity === "warning");
+  const waitHint = lane?.waitHint ?? null;
   const oldestWait = lane?.oldestQueuedMs ?? lane?.lastWaitMs ?? null;
   const activeAge = lane?.oldestActiveMs ?? null;
   const className = resolveQueueHealthClass({
@@ -299,6 +336,8 @@ function renderQueueHealthWidget(state: AppViewState) {
     label = "Agent blocked";
   } else if (degradedIssue) {
     label = "Agent degraded";
+  } else if (waitHint) {
+    label = waitHint.label;
   } else if (lane?.isOverloaded) {
     label = "Selected lane overloaded";
   } else if (queued > 0) {
@@ -322,6 +361,8 @@ function renderQueueHealthWidget(state: AppViewState) {
     detail = `${formatQueueIssuePillDetail(blockingIssue)}${laneDetail ? ` | ${laneDetail}` : ""}`;
   } else if (degradedIssue) {
     detail = `${formatQueueIssuePillDetail(degradedIssue)}${laneDetail ? ` | ${laneDetail}` : ""}`;
+  } else if (waitHint) {
+    detail = formatQueueWaitHintPillDetail(waitHint);
   } else if (queued > 0) {
     detail = `oldest ${formatQueueDuration(oldestWait)}${laneDetail ? ` | ${laneDetail}` : ""}`;
   } else if (active > 0) {
@@ -607,6 +648,7 @@ export function renderChatSessionSelect(state: AppViewState) {
                       html`<option
                         value=${entry.key}
                         title=${entry.title}
+                        ?disabled=${entry.disabled === true}
                         ?selected=${entry.key === state.sessionKey}
                       >
                         ${entry.label}
@@ -887,6 +929,7 @@ export function renderChatMobileToggle(state: AppViewState) {
                         <option
                           value=${opt.key}
                           title=${opt.title}
+                          ?disabled=${opt.disabled === true}
                           ?selected=${opt.key === state.sessionKey}
                         >
                           ${opt.label}
@@ -1040,8 +1083,7 @@ function resolveThinkingTargetModel(state: AppViewState): {
 }
 
 function buildThinkingOptions(
-  provider: string | null,
-  model: string | null,
+  labels: readonly string[],
   currentOverride: string,
 ): ChatThinkingSelectOption[] {
   const seen = new Set<string>();
@@ -1068,9 +1110,9 @@ function buildThinkingOptions(
     });
   };
 
-  for (const label of listThinkingLevelLabels(provider)) {
+  for (const label of labels) {
     const normalized = normalizeThinkLevel(label) ?? normalizeLowercaseStringOrEmpty(label);
-    addOption(normalized);
+    addOption(normalized, label);
   }
   if (currentOverride) {
     addOption(currentOverride);
@@ -1086,18 +1128,22 @@ function resolveChatThinkingSelectState(state: AppViewState): ChatThinkingSelect
       ? (normalizeThinkLevel(persisted) ?? persisted.trim())
       : "";
   const { provider, model } = resolveThinkingTargetModel(state);
+  const labels =
+    activeRow?.thinkingOptions ??
+    (provider && model ? listThinkingLevelLabels(provider, model) : listThinkingLevelLabels());
   const defaultLevel =
-    provider && model
+    activeRow?.thinkingDefault ??
+    (provider && model
       ? resolveThinkingDefaultForModel({
           provider,
           model,
           catalog: state.chatModelCatalog ?? [],
         })
-      : "off";
+      : "off");
   return {
     currentOverride,
     defaultLabel: `Default (${defaultLevel})`,
-    options: buildThinkingOptions(provider, model, currentOverride),
+    options: buildThinkingOptions(labels, currentOverride),
   };
 }
 
@@ -1178,12 +1224,7 @@ function patchSessionThinkingLevel(
   state.sessionsResult = {
     ...current,
     sessions: current.sessions.map((row) =>
-      row.key === sessionKey
-        ? {
-            ...row,
-            thinkingLevel,
-          }
-        : row,
+      row.key === sessionKey ? Object.assign({}, row, { thinkingLevel }) : row,
     ),
   };
 }
@@ -1528,10 +1569,13 @@ export function resolveSessionOptionGroups(
         agentId,
         mainKey: mainRest,
       });
-      if (keysToInclude.has(pk)) {
-        primaryKeys.push(pk);
-        primarySet.add(pk);
+      const includePrimaryKey = hasPlannerTopology || keysToInclude.has(pk);
+      if (!includePrimaryKey) {
+        continue;
       }
+      keysToInclude.add(pk);
+      primaryKeys.push(pk);
+      primarySet.add(pk);
     }
     const topLevelExtraKeys = hasPlannerTopology
       ? Array.from(keysToInclude)
@@ -1552,6 +1596,10 @@ export function resolveSessionOptionGroups(
           const parsed = parseAgentSessionKey(pk);
           const row = byKey.get(pk);
           const opt = buildOption(pk);
+          if (!row) {
+            opt.disabled = true;
+            opt.title = `${pk} (session row not loaded yet)`;
+          }
           if (parsed) {
             opt.label = resolveAgentGroupLabel(state, parsed.agentId);
             opt.scopeLabel = normalizeOptionalString(parsed.rest) ?? pk;

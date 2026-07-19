@@ -14,7 +14,6 @@ import {
 } from "../agents/tools/sessions-helpers.js";
 import { normalizeGroupActivation } from "../auto-reply/group-activation.js";
 import { resolveSelectedAndActiveModel } from "../auto-reply/model-runtime.js";
-import type { ThinkLevel } from "../auto-reply/thinking.js";
 import { toAgentModelListLike } from "../config/model-input.js";
 import type { SessionEntry } from "../config/sessions.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -291,9 +290,7 @@ export async function buildStatusText(params: BuildStatusTextParams): Promise<st
     });
   const agentFallbacksOverride = resolveAgentModelFallbacksOverride(cfg, statusAgentId);
   const { buildStatusMessage } = await loadStatusMessageRuntime();
-  const explicitThinkingDefault =
-    (agentConfig?.thinkingDefault as ThinkLevel | undefined) ??
-    (agentDefaults.thinkingDefault as ThinkLevel | undefined);
+  const explicitThinkingDefault = agentConfig?.thinkingDefault ?? agentDefaults.thinkingDefault;
   return buildStatusMessage({
     config: cfg,
     agent: {

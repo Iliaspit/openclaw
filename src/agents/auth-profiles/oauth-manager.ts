@@ -520,6 +520,9 @@ export function createOAuthManager(adapter: OAuthManagerAdapter) {
       const refreshedStore = loadAuthProfileStoreForSecretsRuntime(params.agentDir);
       const refreshed = refreshedStore.profiles[params.profileId];
       if (refreshed?.type === "oauth" && hasUsableOAuthCredential(refreshed)) {
+        if (params.agentDir) {
+          saveAuthProfileStore(refreshedStore, params.agentDir);
+        }
         return {
           apiKey: await adapter.buildApiKey(refreshed.provider, refreshed),
           credential: refreshed,

@@ -45,14 +45,14 @@ describe("prompt composition invariants", () => {
     const deduped = getTurn(scenario!, "t2");
     const always = getTurn(scenario!, "t3");
 
-    expect(first.systemPrompt).not.toContain("[Bootstrap truncation warning]");
-    expect(first.systemPrompt).toContain("[...truncated, read AGENTS.md for full content...]");
+    expect(first.systemPrompt).not.toContain("[Bootstrap context budget warning]");
+    expect(first.systemPrompt).toContain("[...truncated, read TOOLS.md for full content...]");
     expect(first.bodyPrompt.startsWith("hello")).toBe(true);
-    expect(first.bodyPrompt).toContain("[Bootstrap truncation warning]");
+    expect(first.bodyPrompt).toContain("[Bootstrap context budget warning]");
 
     expect(deduped.bodyPrompt).toBe("hello again");
     expect(always.bodyPrompt.startsWith("one more turn")).toBe(true);
-    expect(always.bodyPrompt).toContain("[Bootstrap truncation warning]");
+    expect(always.bodyPrompt).toContain("[Bootstrap context budget warning]");
   });
 
   it("keeps the group auto-reply prompt dynamic only across the first-turn intro boundary", () => {

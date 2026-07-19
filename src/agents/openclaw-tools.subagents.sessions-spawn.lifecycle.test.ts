@@ -1,17 +1,28 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { emitAgentEvent } from "../infra/agent-events.js";
+import {
+  recordChildRouteHealthEvent,
+  resetChildRouteHealthForTest,
+  resolveChildRouteHealthPath,
+} from "./child-route-health.js";
 import "./test-helpers/fast-core-tools.js";
 import {
   getCallGatewayMock,
   getSessionsSpawnTool,
   resetSessionsSpawnAnnounceFlowOverride,
+  resetSessionsSpawnCaptureReplyOverride,
   resetSessionsSpawnConfigOverride,
   resetSessionsSpawnHookRunnerOverride,
+  setSessionsSpawnCaptureReplyOverride,
   setSessionsSpawnHookRunnerOverride,
   setupSessionsSpawnGatewayMock,
   setSessionsSpawnConfigOverride,
 } from "./openclaw-tools.subagents.sessions-spawn.test-harness.js";
 import {
+  getSubagentSliceBudgetForTests,
   getLatestSubagentRunByChildSessionKey,
   resetSubagentRegistryForTests,
 } from "./subagent-registry.js";
@@ -56,6 +67,8 @@ vi.mock("./subagent-output-latest-reply.js", () => ({
 
 const callGatewayMock = getCallGatewayMock();
 const RUN_TIMEOUT_SECONDS = 1;
+const originalStateDir = process.env.OPENCLAW_STATE_DIR;
+let tempStateDir: string | undefined;
 
 function buildDiscordCleanupHooks(onDelete: (key: string | undefined) => void) {
   return {
@@ -101,6 +114,11 @@ async function executeSpawnAndExpectAccepted(params: {
     ...(params.label ? { label: params.label } : {}),
     ...(params.expectsCompletionMessage === false ? { expectsCompletionMessage: false } : {}),
   });
+  if ((result.details as { status?: unknown }).status !== "accepted") {
+    throw new Error(
+      `expected accepted spawn, received ${JSON.stringify(result.details, null, 2)}`,
+    );
+  }
   expect(result.details).toMatchObject({
     status: "accepted",
     runId: expect.any(String),
@@ -139,8 +157,14 @@ async function waitForRunCleanup(childSessionKey: string) {
 }
 
 describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    tempStateDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "openclaw-sessions-spawn-lifecycle-"),
+    );
+    process.env.OPENCLAW_STATE_DIR = tempStateDir;
+    resetChildRouteHealthForTest();
     resetSessionsSpawnAnnounceFlowOverride();
+    resetSessionsSpawnCaptureReplyOverride();
     resetSessionsSpawnHookRunnerOverride();
     resetSessionsSpawnConfigOverride();
     setSessionsSpawnConfigOverride({
@@ -170,11 +194,27 @@ describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
     callGatewayMock.mockClear();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     resetSessionsSpawnAnnounceFlowOverride();
+    resetSessionsSpawnCaptureReplyOverride();
     resetSessionsSpawnHookRunnerOverride();
     resetSessionsSpawnConfigOverride();
     resetSubagentRegistryForTests({ persist: false });
+    resetChildRouteHealthForTest();
+    if (originalStateDir === undefined) {
+      delete process.env.OPENCLAW_STATE_DIR;
+    } else {
+      process.env.OPENCLAW_STATE_DIR = originalStateDir;
+    }
+    if (tempStateDir) {
+      await fs.rm(tempStateDir, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 50,
+      });
+      tempStateDir = undefined;
+    }
   });
 
   afterAll(() => {
@@ -408,6 +448,174 @@ describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
     const childWait = ctx.waitCalls.find((call) => call.runId === child.runId);
     expect(childWait?.timeoutMs).toBe(1000);
     expect(getLatestSubagentRunByChildSessionKey(childSessionKey)?.outcome?.status).toBe("timeout");
+  });
+
+  it("sessions_spawn blocks a same-slice child after two timeout outcomes", async () => {
+    const ctx = setupSessionsSpawnGatewayMock({
+      includeChatHistory: true,
+      chatHistoryText: "still working",
+      agentWaitResult: { status: "timeout", startedAt: 6000, endedAt: 7000 },
+    });
+
+    const tool = await getDiscordGroupSpawnTool();
+    const spawnSameSlice = async (callId: string) =>
+      await tool.execute(callId, {
+        task: "recover the Contract V2 E2E gate",
+        label: "contract-v2-recovery",
+        runTimeoutSeconds: RUN_TIMEOUT_SECONDS,
+        cleanup: "keep",
+        expectsCompletionMessage: false,
+      });
+
+    const first = await spawnSameSlice("call-timeout-budget-1");
+    expect(first.details).toMatchObject({ status: "accepted" });
+    const firstChild = ctx.getChild();
+    if (!firstChild.runId || !firstChild.sessionKey) {
+      throw new Error("missing first child sessionKey");
+    }
+    await waitFor(
+      "first timeout budget evidence",
+      () =>
+        getLatestSubagentRunByChildSessionKey(firstChild.sessionKey)?.outcome?.status ===
+        "timeout",
+      20_000,
+    );
+    await waitForRunCleanup(firstChild.sessionKey);
+
+    const second = await spawnSameSlice("call-timeout-budget-2");
+    expect(second.details).toMatchObject({ status: "accepted" });
+    const secondChild = ctx.getChild();
+    if (!secondChild.runId || !secondChild.sessionKey) {
+      throw new Error("missing second child sessionKey");
+    }
+    await waitFor(
+      "second timeout budget evidence",
+      () =>
+        getLatestSubagentRunByChildSessionKey(secondChild.sessionKey)?.outcome?.status ===
+        "timeout",
+      20_000,
+    );
+    await waitForRunCleanup(secondChild.sessionKey);
+
+    const third = await spawnSameSlice("call-timeout-budget-3");
+    expect(third.details).toMatchObject({
+      status: "error",
+      error: expect.stringContaining("Subagent slice budget exhausted"),
+    });
+    const blockerError = String((third.details as { error?: unknown }).error);
+    expect(blockerError).toContain(firstChild.runId);
+    expect(blockerError).toContain(secondChild.runId);
+    const subagentAgentCalls = ctx.calls.filter((call) => {
+      const params = call.params as { lane?: string } | undefined;
+      return call.method === "agent" && params?.lane === "subagent";
+    });
+    expect(subagentAgentCalls).toHaveLength(2);
+  });
+
+  it("sessions_spawn escalates repeated route-health unavailable preflight failures", async () => {
+    const ctx = setupSessionsSpawnGatewayMock({});
+    const healthPath = resolveChildRouteHealthPath();
+    await fs.mkdir(path.dirname(healthPath), { recursive: true });
+    await fs.writeFile(healthPath, "{not-json", "utf8");
+    const failedHealthWrite = await recordChildRouteHealthEvent({
+      code: "context_overflow",
+      status: "active",
+      source: "context_overflow",
+      reason: "route-health store is unavailable during spawn preflight",
+    });
+    expect(failedHealthWrite).toEqual(expect.objectContaining({ ok: false }));
+    await fs.rm(healthPath, { force: true });
+
+    const tool = await getDiscordGroupSpawnTool();
+    const spawnSameSlice = async (callId: string) =>
+      await tool.execute(callId, {
+        task: "recover the Contract V2 E2E gate",
+        label: "contract-v2-recovery",
+        runTimeoutSeconds: RUN_TIMEOUT_SECONDS,
+        cleanup: "keep",
+        expectsCompletionMessage: false,
+      });
+
+    const first = await spawnSameSlice("call-route-health-budget-1");
+    expect(first.details).toMatchObject({
+      status: "error",
+      error: expect.stringContaining("Auth route health is unavailable"),
+    });
+
+    const second = await spawnSameSlice("call-route-health-budget-2");
+    expect(second.details).toMatchObject({
+      status: "error",
+      error: expect.stringContaining("Subagent route/system health blocker"),
+    });
+    const blockerError = String((second.details as { error?: unknown }).error);
+    expect(blockerError).toContain("childRouteHealthUnavailableCount=2");
+    expect(blockerError).toContain("routeHealthUnavailableChildSessionKeys=");
+
+    const subagentAgentCalls = ctx.calls.filter((call) => {
+      const params = call.params as { lane?: string } | undefined;
+      return call.method === "agent" && params?.lane === "subagent";
+    });
+    expect(subagentAgentCalls).toHaveLength(0);
+  });
+
+  it("sessions_spawn opens a bounded review follow-up slice after a green full gate", async () => {
+    const ctx = setupSessionsSpawnGatewayMock({});
+    setSessionsSpawnCaptureReplyOverride(async () => "full gate passed");
+    const tool = await getDiscordGroupSpawnTool();
+    const sharedTask = "recover the Contract V2 E2E gate";
+    const sharedLabel = "contract-v2-recovery";
+
+    const fullGate = await tool.execute("call-full-gate-budget", {
+      task: sharedTask,
+      label: sharedLabel,
+      sliceRole: "full_gate",
+      runTimeoutSeconds: RUN_TIMEOUT_SECONDS,
+      cleanup: "keep",
+    });
+    expect(fullGate.details).toMatchObject({ status: "accepted" });
+    const fullGateChild = ctx.getChild();
+    if (!fullGateChild.sessionKey) {
+      throw new Error("missing full-gate child sessionKey");
+    }
+
+    await waitFor("full-gate green slice marker", () => {
+      const run = getLatestSubagentRunByChildSessionKey(fullGateChild.sessionKey);
+      const budget = run?.sliceBudgetKey
+        ? getSubagentSliceBudgetForTests(run.sliceBudgetKey)
+        : undefined;
+      return run?.outcome?.status === "ok" && budget?.fullE2EGateGreen === true;
+    });
+    const fullGateRun = getLatestSubagentRunByChildSessionKey(fullGateChild.sessionKey);
+    const originalSliceKey = fullGateRun?.sliceBudgetKey;
+    if (!originalSliceKey) {
+      throw new Error("missing original slice budget key");
+    }
+
+    const review = await tool.execute("call-review-followup-budget", {
+      task: sharedTask,
+      label: sharedLabel,
+      sliceRole: "review",
+      runTimeoutSeconds: RUN_TIMEOUT_SECONDS,
+      cleanup: "keep",
+    });
+    expect(review.details).toMatchObject({ status: "accepted" });
+    const reviewChild = ctx.getChild();
+    if (!reviewChild.sessionKey) {
+      throw new Error("missing review child sessionKey");
+    }
+
+    await waitFor("post-green review follow-up slice", () => {
+      const run = getLatestSubagentRunByChildSessionKey(reviewChild.sessionKey);
+      const budget = run?.sliceBudgetKey
+        ? getSubagentSliceBudgetForTests(run.sliceBudgetKey)
+        : undefined;
+      return (
+        run?.sliceBudgetKey !== originalSliceKey &&
+        budget?.sliceBoundary === "post_full_gate_followup" &&
+        budget?.sliceRole === "review" &&
+        budget?.parentSliceKey === originalSliceKey
+      );
+    });
   });
 
   it("sessions_spawn announces with requester accountId", async () => {

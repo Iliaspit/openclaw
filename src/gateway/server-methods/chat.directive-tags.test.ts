@@ -1646,6 +1646,26 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     });
   });
 
+  it("persists a delivered final reply when an agent run starts without a transcript", async () => {
+    createTranscriptFixture("openclaw-chat-send-agent-run-missing-transcript-");
+    fs.unlinkSync(mockState.transcriptPath);
+    mockState.transcriptPath = path.join(path.dirname(mockState.transcriptPath), "sess-1.jsonl");
+    mockState.finalText = "⚠️ Agent failed before reply: backend died.";
+    mockState.triggerAgentRunStart = true;
+    const respond = vi.fn();
+    const context = createChatContext();
+
+    const payload = await runNonStreamingChatSend({
+      context,
+      respond,
+      idempotencyKey: "idem-agent-run-missing-transcript",
+      message: "/new",
+    });
+
+    expect(extractFirstTextBlock(payload)).toBe("⚠️ Agent failed before reply: backend died.");
+    expect(fs.readFileSync(mockState.transcriptPath, "utf-8")).toContain("backend died");
+  });
+
   it("adds persisted media paths to the user transcript update", async () => {
     createTranscriptFixture("openclaw-chat-send-user-transcript-images-");
     mockState.finalText = "ok";

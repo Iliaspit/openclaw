@@ -160,6 +160,7 @@ import {
   QueueHealthResultSchema,
   QueueLaneSnapshotSchema,
   QueueRuntimeIssueSchema,
+  QueueWaitHintSchema,
 } from "./queue.js";
 import {
   SecretsReloadParamsSchema,
@@ -244,6 +245,7 @@ export const ProtocolSchemas = {
   PushTestResult: PushTestResultSchema,
   QueueHealthParams: QueueHealthParamsSchema,
   QueueRuntimeIssue: QueueRuntimeIssueSchema,
+  QueueWaitHint: QueueWaitHintSchema,
   QueueLaneSnapshot: QueueLaneSnapshotSchema,
   QueueHealthResult: QueueHealthResultSchema,
   SecretsReloadParams: SecretsReloadParamsSchema,

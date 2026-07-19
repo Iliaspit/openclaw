@@ -221,6 +221,20 @@ describe("app-tool-stream fallback lifecycle handling", () => {
     vi.useRealTimers();
   });
 
+  it("rejects idle compaction events for other sessions", () => {
+    vi.useFakeTimers();
+    const host = createHost();
+
+    handleAgentEvent(
+      host,
+      agentEvent("run-1", 1, "compaction", { phase: "start" }, "agent:other:main"),
+    );
+
+    expect(host.compactionStatus).toBeNull();
+    expect(host.compactionClearTimer).toBeNull();
+    vi.useRealTimers();
+  });
+
   it("treats lifecycle error as terminal for retry-pending compaction", () => {
     vi.useFakeTimers();
     const host = createHost();

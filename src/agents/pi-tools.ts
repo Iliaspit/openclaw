@@ -1,4 +1,4 @@
-import { createCodingTools, createReadTool } from "@mariozechner/pi-coding-agent";
+import { createCodingTools } from "@mariozechner/pi-coding-agent";
 import type { ModelCompatConfig } from "../config/types.models.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { ToolLoopDetectionConfig } from "../config/types.tools.js";
@@ -35,8 +35,8 @@ import {
 import {
   assertRequiredParams,
   createHostWorkspaceEditTool,
+  createHostWorkspaceReadTool,
   createHostWorkspaceWriteTool,
-  createOpenClawReadTool,
   createSandboxedEditTool,
   createSandboxedReadTool,
   createSandboxedWriteTool,
@@ -293,6 +293,8 @@ export function createOpenClawCodingTools(options?: {
   modelProvider?: string;
   /** Model id for the current provider (used for model-specific tool gating). */
   modelId?: string;
+  /** Effective runtime thinking level after defaults and directives resolve. */
+  effectiveThinking?: string;
   /** Model API for the current provider (used for provider-native tool arbitration). */
   modelApi?: string;
   /** Model context window in tokens (used to scale read-tool output budget). */
@@ -470,8 +472,7 @@ export function createOpenClawCodingTools(options?: {
             : sandboxed,
         ];
       }
-      const freshReadTool = createReadTool(workspaceRoot);
-      const wrapped = createOpenClawReadTool(freshReadTool, {
+      const wrapped = createHostWorkspaceReadTool(workspaceRoot, {
         modelContextWindowTokens: options?.modelContextWindowTokens,
         imageSanitization,
       });
@@ -645,6 +646,7 @@ export function createOpenClawCodingTools(options?: {
       currentMessageId: options?.currentMessageId,
       modelProvider: options?.modelProvider,
       modelId: options?.modelId,
+      effectiveThinking: options?.effectiveThinking,
       replyToMode: options?.replyToMode,
       hasRepliedRef: options?.hasRepliedRef,
       modelHasVision: options?.modelHasVision,

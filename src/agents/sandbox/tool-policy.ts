@@ -1,6 +1,10 @@
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { normalizeLowercaseStringOrEmpty } from "../../shared/string-coerce.js";
 import { resolveAgentConfig } from "../agent-scope.js";
+import {
+  resolveDelegationGuardConfig,
+  resolveDelegationGuardPrincipal,
+} from "../delegation/policy.js";
 import { compileGlobPatterns, matchesAnyGlobPattern } from "../glob-pattern.js";
 import { expandToolGroups, normalizeToolName } from "../tool-policy.js";
 import { DEFAULT_TOOL_ALLOW, DEFAULT_TOOL_DENY } from "./constants.js";
@@ -234,7 +238,25 @@ export function resolveSandboxToolPolicyForAgent(
     alsoAllow: alsoAllowConfig.values,
   });
 
-  const resolvedAllow = mergeAllowlist(allowConfig.values, alsoAllowConfig.values);
+  const delegationGuard = cfg ? resolveDelegationGuardConfig(cfg) : undefined;
+  const delegationPrincipal =
+    delegationGuard && agentId
+      ? resolveDelegationGuardPrincipal(delegationGuard, agentId)
+      : undefined;
+  const protectedDelegationTool =
+    delegationPrincipal?.kind === "controller"
+      ? "delegation_guard"
+      : delegationPrincipal?.kind === "worker"
+        ? "delegation_report"
+        : undefined;
+  const configuredAllow = mergeAllowlist(allowConfig.values, alsoAllowConfig.values);
+  // Guarded principals must retain their runtime-authority tool through both the
+  // general profile filter and the independent sandbox policy filter. Preserve
+  // the existing empty-list meaning (allow all) when it is configured explicitly.
+  const resolvedAllow =
+    protectedDelegationTool && configuredAllow.length > 0
+      ? Array.from(new Set([...configuredAllow, protectedDelegationTool]))
+      : configuredAllow;
   const resolvedDeny = Array.isArray(denyConfig.values)
     ? [...denyConfig.values]
     : filterDefaultDenyForExplicitAllows({

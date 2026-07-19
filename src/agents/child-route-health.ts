@@ -808,10 +808,68 @@ function normalizeUnavailableState(
   return result;
 }
 
+function findFirstJsonDocumentEnd(raw: string): number | undefined {
+  let index = 0;
+  while (index < raw.length && /\s/.test(raw[index] ?? "")) {
+    index += 1;
+  }
+  const first = raw[index];
+  if (first !== "{" && first !== "[") {
+    return undefined;
+  }
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === "{" || char === "[") {
+      depth += 1;
+      continue;
+    }
+    if (char === "}" || char === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return index + 1;
+      }
+    }
+  }
+  return undefined;
+}
+
+function parseStateJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    const documentEnd = findFirstJsonDocumentEnd(raw);
+    if (documentEnd === undefined || !raw.slice(documentEnd).trim()) {
+      throw error;
+    }
+    try {
+      return JSON.parse(raw.slice(0, documentEnd));
+    } catch {
+      throw error;
+    }
+  }
+}
+
 async function readStateFromPath(pathname: string): Promise<RouteHealthState> {
   try {
     const raw = await fs.readFile(pathname, "utf8");
-    return normalizeState(JSON.parse(raw));
+    return normalizeState(parseStateJson(raw));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return emptyState();

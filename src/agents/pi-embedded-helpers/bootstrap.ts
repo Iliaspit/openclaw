@@ -5,7 +5,7 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { sanitizeGoogleAssistantFirstOrdering } from "../../shared/google-turn-ordering.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import { truncateUtf16Safe } from "../../utils.js";
-import type { WorkspaceBootstrapFile } from "../workspace.js";
+import { DEFAULT_AGENTS_FILENAME, type WorkspaceBootstrapFile } from "../workspace.js";
 import type { EmbeddedContextFile } from "./types.js";
 
 type ContentBlockWithSignature = {
@@ -241,6 +241,21 @@ function clampToBudget(content: string, budget: number): string {
   return `${truncateUtf16Safe(content, safe)}…`;
 }
 
+function isPolicyBootstrapFile(file: WorkspaceBootstrapFile): boolean {
+  return file.name.toLowerCase() === DEFAULT_AGENTS_FILENAME.toLowerCase();
+}
+
+function resolvePolicyInjectionDemand(file: WorkspaceBootstrapFile): number {
+  const pathValue = normalizeOptionalString(file.path) ?? "";
+  if (!pathValue || !isPolicyBootstrapFile(file)) {
+    return 0;
+  }
+  if (file.missing) {
+    return 0;
+  }
+  return (file.content ?? "").trimEnd().length;
+}
+
 export async function ensureSessionHeader(params: {
   sessionFile: string;
   sessionId: string;
@@ -270,19 +285,44 @@ export async function ensureSessionHeader(params: {
 
 export function buildBootstrapContextFiles(
   files: WorkspaceBootstrapFile[],
-  opts?: { warn?: (message: string) => void; maxChars?: number; totalMaxChars?: number },
+  opts?: {
+    warn?: (message: string) => void;
+    maxChars?: number;
+    totalMaxChars?: number;
+    allowPolicyTruncationForDiagnostics?: boolean;
+  },
 ): EmbeddedContextFile[] {
   const maxChars = opts?.maxChars ?? DEFAULT_BOOTSTRAP_MAX_CHARS;
   const totalMaxChars = Math.max(
     1,
     Math.floor(opts?.totalMaxChars ?? Math.max(maxChars, DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS)),
   );
+  // AGENTS.md is policy authority: reserve it before optional context and never run partially.
+  const policyDemandByIndex = files.map(resolvePolicyInjectionDemand);
+  const totalPolicyDemand = policyDemandByIndex.reduce((sum, chars) => sum + chars, 0);
+  if (totalPolicyDemand > totalMaxChars && !opts?.allowPolicyTruncationForDiagnostics) {
+    throw new Error(
+      `${DEFAULT_AGENTS_FILENAME} policy context is ${totalPolicyDemand} chars, exceeding the total bootstrap limit of ${totalMaxChars}. OpenClaw refuses to inject partial policy. Shorten ${DEFAULT_AGENTS_FILENAME} or raise agents.defaults.bootstrapTotalMaxChars.`,
+    );
+  }
+
   let remainingTotalChars = totalMaxChars;
+  let remainingPolicyReserve = totalPolicyDemand;
   const result: EmbeddedContextFile[] = [];
-  for (const file of files) {
+  for (const [index, file] of files.entries()) {
     if (remainingTotalChars <= 0) {
       break;
     }
+    const policyFile = isPolicyBootstrapFile(file);
+    if (policyFile) {
+      remainingPolicyReserve = Math.max(
+        0,
+        remainingPolicyReserve - (policyDemandByIndex[index] ?? 0),
+      );
+    }
+    const availableChars = policyFile
+      ? remainingTotalChars
+      : Math.max(0, remainingTotalChars - remainingPolicyReserve);
     const pathValue = normalizeOptionalString(file.path) ?? "";
     if (!pathValue) {
       opts?.warn?.(
@@ -292,9 +332,9 @@ export function buildBootstrapContextFiles(
     }
     if (file.missing) {
       const missingText = `[MISSING] Expected at: ${pathValue}`;
-      const cappedMissingText = clampToBudget(missingText, remainingTotalChars);
+      const cappedMissingText = clampToBudget(missingText, availableChars);
       if (!cappedMissingText) {
-        break;
+        continue;
       }
       remainingTotalChars = Math.max(0, remainingTotalChars - cappedMissingText.length);
       result.push({
@@ -303,17 +343,29 @@ export function buildBootstrapContextFiles(
       });
       continue;
     }
-    if (remainingTotalChars < MIN_BOOTSTRAP_FILE_BUDGET_CHARS) {
+    if (!policyFile && availableChars < MIN_BOOTSTRAP_FILE_BUDGET_CHARS) {
       opts?.warn?.(
-        `remaining bootstrap budget is ${remainingTotalChars} chars (<${MIN_BOOTSTRAP_FILE_BUDGET_CHARS}); skipping additional bootstrap files`,
+        `remaining bootstrap budget is ${availableChars} chars (<${MIN_BOOTSTRAP_FILE_BUDGET_CHARS}); skipping bootstrap file ${file.name}`,
       );
-      break;
+      continue;
     }
-    const fileMaxChars = Math.max(1, Math.min(maxChars, remainingTotalChars));
+    const fileMaxChars = Math.max(
+      1,
+      policyFile ? availableChars : Math.min(maxChars, availableChars),
+    );
     const trimmed = trimBootstrapContent(file.content ?? "", file.name, fileMaxChars);
-    const contentWithinBudget = clampToBudget(trimmed.content, remainingTotalChars);
+    const contentWithinBudget = clampToBudget(trimmed.content, availableChars);
     if (!contentWithinBudget) {
       continue;
+    }
+    if (
+      policyFile &&
+      !opts?.allowPolicyTruncationForDiagnostics &&
+      (trimmed.truncated || contentWithinBudget.length < trimmed.content.length)
+    ) {
+      throw new Error(
+        `${DEFAULT_AGENTS_FILENAME} policy context could not be injected completely. OpenClaw refuses to continue with partial policy.`,
+      );
     }
     if (trimmed.truncated || contentWithinBudget.length < trimmed.content.length) {
       opts?.warn?.(

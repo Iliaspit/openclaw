@@ -10,8 +10,8 @@ describe("mapThinkingLevelToReasoningEffort", () => {
     expect(mapThinkingLevelToReasoningEffort("adaptive")).toBe("medium");
   });
 
-  it('maps "max" to "xhigh"', () => {
-    expect(mapThinkingLevelToReasoningEffort("max")).toBe("xhigh");
+  it('passes "max" through to OpenAI responses', () => {
+    expect(mapThinkingLevelToReasoningEffort("max")).toBe("max");
   });
 
   it.each(["minimal", "low", "medium", "high", "xhigh"] as const)(

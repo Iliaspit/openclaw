@@ -174,11 +174,17 @@ describe("validateQueueHealthResult", () => {
             livenessState: "abandoned",
           },
         ],
+        waitHint: {
+          code: "sessions_yield",
+          label: "Waiting on agent",
+          detail: "Current status: waiting for tester.",
+          observedAt: 130,
+        },
       },
     ],
   };
 
-  it("accepts additive queue health runtime and overload fields", () => {
+  it("accepts additive queue health runtime, overload, and wait hint fields", () => {
     expect(validateQueueHealthResult(queueHealthResult)).toBe(true);
   });
 
@@ -190,6 +196,23 @@ describe("validateQueueHealthResult", () => {
           {
             ...queueHealthResult.runtimeIssues[0],
             prompt: "do not expose transcript text here",
+          },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects rich wait hint payload fields", () => {
+    expect(
+      validateQueueHealthResult({
+        ...queueHealthResult,
+        lanes: [
+          {
+            ...queueHealthResult.lanes[0],
+            waitHint: {
+              ...queueHealthResult.lanes[0].waitHint,
+              transcriptExcerpt: "do not expose extra transcript text here",
+            },
           },
         ],
       }),

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
+import { createDelegationGuardTestConfig } from "./delegation/test-helpers.js";
 import {
   filterToolsByPolicy,
   isToolAllowedByPolicyName,
@@ -240,6 +241,19 @@ describe("resolveSubagentToolPolicy depth awareness", () => {
 });
 
 describe("resolveEffectiveToolPolicy", () => {
+  it("adds each principal's protected delegation tool to profile allowances", () => {
+    const config = createDelegationGuardTestConfig();
+    expect(resolveEffectiveToolPolicy({ config, agentId: "planner" }).profileAlsoAllow).toContain(
+      "delegation_guard",
+    );
+    expect(resolveEffectiveToolPolicy({ config, agentId: "helper" }).profileAlsoAllow).toContain(
+      "delegation_report",
+    );
+    expect(
+      resolveEffectiveToolPolicy({ config, agentId: "outsider" }).profileAlsoAllow,
+    ).toBeUndefined();
+  });
+
   it("implicitly re-exposes exec and process when tools.exec is configured", () => {
     const cfg = {
       tools: {

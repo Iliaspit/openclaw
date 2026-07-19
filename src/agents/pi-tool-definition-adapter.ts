@@ -9,6 +9,10 @@ import { redactToolDetail } from "../logging/redact.js";
 import { isPlainObject } from "../utils.js";
 import { sanitizeForConsole } from "./console-sanitize.js";
 import type { ClientToolDefinition } from "./pi-embedded-runner/run/params.js";
+import {
+  DEFAULT_MAX_LIVE_TOOL_RESULT_CHARS,
+  truncateToolResultPayload,
+} from "./pi-embedded-runner/tool-result-truncation.js";
 import type { HookContext } from "./pi-tools.before-tool-call.js";
 import {
   isToolWrappedWithBeforeToolCallHook,
@@ -38,6 +42,10 @@ type ToolExecuteArgs = ToolDefinition["execute"] extends (...args: infer P) => u
   : ToolExecuteArgsCurrent;
 type ToolExecuteArgsAny = ToolExecuteArgs | ToolExecuteArgsLegacy | ToolExecuteArgsCurrent;
 const TOOL_ERROR_PARAM_PREVIEW_MAX_CHARS = 600;
+
+type ToolDefinitionAdapterOptions = {
+  liveToolResultMaxChars?: number;
+};
 
 function isAbortSignal(value: unknown): value is AbortSignal {
   return typeof value === "object" && value !== null && "aborted" in value;
@@ -213,7 +221,14 @@ export function isClientToolNameConflictError(err: unknown): err is Error {
   return err instanceof Error && err.message.startsWith(CLIENT_TOOL_NAME_CONFLICT_PREFIX);
 }
 
-export function toToolDefinitions(tools: AnyAgentTool[]): ToolDefinition[] {
+export function toToolDefinitions(
+  tools: AnyAgentTool[],
+  options: ToolDefinitionAdapterOptions = {},
+): ToolDefinition[] {
+  const liveToolResultMaxChars = Math.max(
+    1,
+    Math.floor(options.liveToolResultMaxChars ?? DEFAULT_MAX_LIVE_TOOL_RESULT_CHARS),
+  );
   return tools.map((tool) => {
     const name = tool.name || "tool";
     const normalizedName = normalizeToolName(name);
@@ -243,7 +258,7 @@ export function toToolDefinitions(tools: AnyAgentTool[]): ToolDefinition[] {
             toolName: normalizedName,
             result: rawResult,
           });
-          return result;
+          return truncateToolResultPayload(result, liveToolResultMaxChars);
         } catch (err) {
           if (signal?.aborted) {
             throw err;

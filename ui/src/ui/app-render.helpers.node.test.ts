@@ -174,6 +174,55 @@ describe("resolveSessionOptionGroups", () => {
       "agent:implementer:subagent:impl-1",
     ]);
   });
+
+  it("keeps missing configured planner top-level options visible but disabled", () => {
+    const state = {
+      sessionsHideCron: true,
+      hello: {
+        snapshot: {
+          sessionDefaults: { mainKey: "main" },
+        },
+      },
+      agentsList: {
+        agents: [
+          { id: "planner", name: "Planner 1" },
+          { id: "planner-2", name: "Planner 2" },
+          { id: "planner-3", name: "Planner 3" },
+          { id: "planner-4", name: "Planner 4" },
+        ],
+        defaultId: "planner",
+      },
+    } as unknown as AppViewState;
+
+    const sessions: SessionsListResult = {
+      ts: 1,
+      path: "/p",
+      count: 1,
+      defaults: { model: null, modelProvider: null, contextTokens: null },
+      sessions: [row({ key: "agent:planner-2:main", updatedAt: 100 })],
+    };
+
+    const groups = resolveSessionOptionGroups(state, "agent:planner-2:main", sessions);
+    expect(groups[0]?.id).toBe("top-level-agents");
+    expect(groups[0]?.options.map((o) => o.key)).toEqual([
+      "agent:planner:main",
+      "agent:planner-2:main",
+      "agent:planner-3:main",
+      "agent:planner-4:main",
+    ]);
+    expect(groups[0]?.options.map((o) => o.label)).toEqual([
+      "Planner 1 (planner)",
+      "Planner 2 (planner-2)",
+      "Planner 3 (planner-3)",
+      "Planner 4 (planner-4)",
+    ]);
+    expect(groups[0]?.options.map((o) => [o.key, o.disabled === true])).toEqual([
+      ["agent:planner:main", true],
+      ["agent:planner-2:main", false],
+      ["agent:planner-3:main", true],
+      ["agent:planner-4:main", true],
+    ]);
+  });
 });
 
 /* ================================================================

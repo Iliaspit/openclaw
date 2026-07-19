@@ -7,6 +7,7 @@ import {
   archiveSessionTranscripts,
   readFirstUserMessageFromTranscript,
   readLastMessagePreviewFromTranscript,
+  readLatestSessionsYieldStatusFromTranscript,
   readLatestSessionUsageFromTranscript,
   readRecentSessionMessages,
   readSessionMessages,
@@ -602,6 +603,51 @@ describe("readSessionMessages", () => {
       },
     });
     expect(JSON.stringify(out[0])).not.toContain("previous turn ended intentionally");
+  });
+
+  test("reads the latest sessions_yield status as a selected-lane wait hint", () => {
+    const sessionId = "test-session-yield-wait-hint";
+    writeTranscript(tmpDir, sessionId, [
+      { type: "session", version: 1, id: sessionId },
+      { message: { role: "assistant", content: "Working" } },
+      {
+        type: "custom_message",
+        customType: "openclaw.sessions_yield",
+        content: "Current status: waiting for planner-2.\n\n[Context: internal orchestration note]",
+        display: false,
+        details: { source: "sessions_yield", message: "Current status: waiting for planner-2." },
+        id: "yield-1",
+        timestamp: "2026-02-07T00:01:00.000Z",
+      },
+    ]);
+
+    const out = readLatestSessionsYieldStatusFromTranscript(sessionId, storePath);
+
+    expect(out).toEqual({
+      message: "Current status: waiting for planner-2.",
+      observedAt: Date.parse("2026-02-07T00:01:00.000Z"),
+    });
+  });
+
+  test("clears the sessions_yield wait hint after a later visible message", () => {
+    const sessionId = "test-session-yield-wait-hint-cleared";
+    writeTranscript(tmpDir, sessionId, [
+      { type: "session", version: 1, id: sessionId },
+      {
+        type: "custom_message",
+        customType: "openclaw.sessions_yield",
+        content: "Current status: waiting for planner-2.",
+        display: false,
+        details: { source: "sessions_yield", message: "Current status: waiting for planner-2." },
+        id: "yield-1",
+        timestamp: "2026-02-07T00:01:00.000Z",
+      },
+      { message: { role: "assistant", content: "Final report" } },
+    ]);
+
+    const out = readLatestSessionsYieldStatusFromTranscript(sessionId, storePath);
+
+    expect(out).toBeNull();
   });
 
   test("surfaces displayed custom messages from transcripts", () => {

@@ -16,7 +16,13 @@ const SYNTHETIC_TRANSCRIPT_REPAIR_RESULT =
 const STARTUP_CHAT_HISTORY_RETRY_TIMEOUT_MS = 60_000;
 const STARTUP_CHAT_HISTORY_DEFAULT_RETRY_MS = 500;
 const STARTUP_CHAT_HISTORY_MAX_RETRY_MS = 5_000;
+const CHAT_SEND_ACK_TIMEOUT_MS = 15_000;
 const chatHistoryRequestVersions = new WeakMap<object, number>();
+
+type ChatSendAck = {
+  runId?: string;
+  status?: string;
+};
 
 function beginChatHistoryRequest(state: ChatState): number {
   const key = state as object;
@@ -247,13 +253,17 @@ async function requestChatSend(
   state: ChatState,
   params: { message: string; attachments?: ChatAttachment[]; runId: string },
 ) {
-  await state.client!.request("chat.send", {
-    sessionKey: state.sessionKey,
-    message: params.message,
-    deliver: false,
-    idempotencyKey: params.runId,
-    attachments: buildApiAttachments(params.attachments),
-  });
+  return await state.client!.request<ChatSendAck>(
+    "chat.send",
+    {
+      sessionKey: state.sessionKey,
+      message: params.message,
+      deliver: false,
+      idempotencyKey: params.runId,
+      attachments: buildApiAttachments(params.attachments),
+    },
+    { timeoutMs: CHAT_SEND_ACK_TIMEOUT_MS },
+  );
 }
 
 type AssistantMessageNormalizationOptions = {
@@ -336,25 +346,25 @@ export async function sendChatMessage(
     }
   }
 
-  state.chatMessages = [
-    ...state.chatMessages,
-    {
-      role: "user",
-      content: contentBlocks,
-      timestamp: now,
-    },
-  ];
-
   state.chatSending = true;
   state.lastError = null;
   const runId = generateUUID();
-  state.chatRunId = runId;
-  state.chatStream = "";
-  state.chatStreamStartedAt = now;
 
   try {
-    await requestChatSend(state, { message: msg, attachments, runId });
-    return runId;
+    const ack = await requestChatSend(state, { message: msg, attachments, runId });
+    const ackRunId = typeof ack?.runId === "string" && ack.runId.trim() ? ack.runId : runId;
+    state.chatMessages = [
+      ...state.chatMessages,
+      {
+        role: "user",
+        content: contentBlocks,
+        timestamp: now,
+      },
+    ];
+    state.chatRunId = ackRunId;
+    state.chatStream = "";
+    state.chatStreamStartedAt = now;
+    return ackRunId;
   } catch (err) {
     const error = formatConnectError(err);
     state.chatRunId = null;

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
+import { createDelegationGuardTestConfig } from "../delegation/test-helpers.js";
 import { resolveSandboxConfigForAgent } from "./config.js";
 import {
   formatSandboxToolPolicyBlockedMessage,
@@ -8,6 +9,19 @@ import {
 import { isToolAllowed, resolveSandboxToolPolicyForAgent } from "./tool-policy.js";
 
 describe("sandbox/tool-policy", () => {
+  it("retains each guarded principal's protected tool in the sandbox allowlist", () => {
+    const cfg = createDelegationGuardTestConfig();
+
+    expect(resolveSandboxToolPolicyForAgent(cfg, "planner").allow).toContain("delegation_guard");
+    expect(resolveSandboxToolPolicyForAgent(cfg, "helper").allow).toContain("delegation_report");
+    expect(resolveSandboxToolPolicyForAgent(cfg, "outsider").allow).not.toContain(
+      "delegation_guard",
+    );
+    expect(resolveSandboxToolPolicyForAgent(cfg, "outsider").allow).not.toContain(
+      "delegation_report",
+    );
+  });
+
   it("merges sandbox alsoAllow into the default sandbox allowlist", () => {
     const cfg: OpenClawConfig = {
       agents: {

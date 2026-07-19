@@ -338,6 +338,9 @@ export function loadBundledCapabilityRuntimeRegistry(params: {
       record.memoryEmbeddingProviderIds.push(
         ...captured.memoryEmbeddingProviders.map((entry) => entry.id),
       );
+      record.gatewayDiscoveryServiceIds.push(
+        ...captured.gatewayDiscoveryServices.map((entry) => entry.id),
+      );
       record.agentHarnessIds.push(...captured.agentHarnesses.map((entry) => entry.id));
       record.toolNames.push(...captured.tools.map((entry) => entry.name));
 
@@ -454,6 +457,15 @@ export function loadBundledCapabilityRuntimeRegistry(params: {
           pluginId: record.id,
           pluginName: record.name,
           provider,
+          source: record.source,
+          rootDir: record.rootDir,
+        })),
+      );
+      registry.gatewayDiscoveryServices.push(
+        ...captured.gatewayDiscoveryServices.map((service) => ({
+          pluginId: record.id,
+          pluginName: record.name,
+          service,
           source: record.source,
           rootDir: record.rootDir,
         })),

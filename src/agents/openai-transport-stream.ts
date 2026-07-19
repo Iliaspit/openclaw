@@ -1545,10 +1545,8 @@ function getCompat(model: OpenAIModeModel): {
       compat.requiresAssistantAfterToolResult ?? detected.requiresAssistantAfterToolResult,
     requiresThinkingAsText: compat.requiresThinkingAsText ?? detected.requiresThinkingAsText,
     thinkingFormat: (compat.thinkingFormat as string | undefined) ?? detected.thinkingFormat,
-    openRouterRouting: (compat.openRouterRouting as Record<string, unknown> | undefined) ?? {},
-    vercelGatewayRouting:
-      (compat.vercelGatewayRouting as Record<string, unknown> | undefined) ??
-      detected.vercelGatewayRouting,
+    openRouterRouting: compat.openRouterRouting ?? {},
+    vercelGatewayRouting: compat.vercelGatewayRouting ?? detected.vercelGatewayRouting,
     supportsStrictMode: compat.supportsStrictMode ?? detected.supportsStrictMode,
     requiresStringContent: compat.requiresStringContent ?? false,
     visibleReasoningDetailTypes:

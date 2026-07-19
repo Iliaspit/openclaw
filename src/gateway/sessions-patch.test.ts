@@ -1,7 +1,16 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
+import { createDelegationGuardTestConfig } from "../agents/delegation/test-helpers.js";
 import type { OpenClawConfig } from "../config/config.js";
 import type { SessionEntry } from "../config/sessions.js";
 import { applySessionsPatchToStore } from "./sessions-patch.js";
+
+const delegationLedgerMocks = vi.hoisted(() => ({
+  appendAuditEvent: vi.fn(),
+}));
+
+vi.mock("../agents/delegation/ledger.js", () => ({
+  openDelegationLedger: () => ({ appendAuditEvent: delegationLedgerMocks.appendAuditEvent }),
+}));
 
 const SUBAGENT_MODEL = "synthetic/hf:moonshotai/Kimi-K2.5";
 const KIMI_SUBAGENT_KEY = "agent:kimi:subagent:child";
@@ -105,6 +114,28 @@ function createAllowlistedAnthropicModelCfg(): OpenClawConfig {
 }
 
 describe("gateway sessions patch", () => {
+  test("allows retry labels when the existing labeled session is terminal", async () => {
+    const retryKey = "agent:main:subagent:retry";
+    const store: Record<string, SessionEntry> = {
+      "agent:main:subagent:failed-attempt": {
+        sessionId: "sess-failed",
+        updatedAt: 1,
+        label: "Briefing",
+        status: "failed",
+      },
+    };
+
+    const entry = expectPatchOk(
+      await runPatch({
+        store,
+        storeKey: retryKey,
+        patch: { key: retryKey, label: "Briefing" },
+      }),
+    );
+
+    expect(entry.label).toBe("Briefing");
+  });
+
   test("persists thinkingLevel=off (does not clear)", async () => {
     const entry = expectPatchOk(
       await runPatch({
@@ -112,6 +143,43 @@ describe("gateway sessions patch", () => {
       }),
     );
     expect(entry.thinkingLevel).toBe("off");
+  });
+
+  test("allows a guarded planner to restore its exact required thinking level", async () => {
+    const key = "agent:planner:main";
+    const entry = expectPatchOk(
+      await runPatch({
+        cfg: createDelegationGuardTestConfig(),
+        storeKey: key,
+        patch: { key, thinkingLevel: "xhigh" },
+      }),
+    );
+
+    expect(entry.thinkingLevel).toBe("xhigh");
+  });
+
+  test("normalizes a guarded planner's required thinking restore", async () => {
+    const key = "agent:planner:main";
+    const entry = expectPatchOk(
+      await runPatch({
+        cfg: createDelegationGuardTestConfig(),
+        storeKey: key,
+        patch: { key, thinkingLevel: "XHIGH" },
+      }),
+    );
+
+    expect(entry.thinkingLevel).toBe("xhigh");
+  });
+
+  test("rejects a conflicting guarded planner thinking level", async () => {
+    const key = "agent:planner:main";
+    const result = await runPatch({
+      cfg: createDelegationGuardTestConfig(),
+      storeKey: key,
+      patch: { key, thinkingLevel: "high" },
+    });
+
+    expectPatchError(result, "required thinking is xhigh");
   });
 
   test("clears thinkingLevel when patch sets null", async () => {

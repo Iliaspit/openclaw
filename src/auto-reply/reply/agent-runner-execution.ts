@@ -89,6 +89,15 @@ const GPT_CHAT_BREVITY_ACK_MAX_SENTENCES = 3;
 const GPT_CHAT_BREVITY_SOFT_MAX_CHARS = 900;
 const GPT_CHAT_BREVITY_SOFT_MAX_SENTENCES = 6;
 
+let attemptExecutionRuntimePromise:
+  | Promise<typeof import("../../agents/command/attempt-execution.runtime.js")>
+  | null = null;
+
+function loadAttemptExecutionRuntime() {
+  attemptExecutionRuntimePromise ??= import("../../agents/command/attempt-execution.runtime.js");
+  return attemptExecutionRuntimePromise;
+}
+
 function readApprovalScopeValue(value: unknown): "turn" | "session" | undefined {
   return value === "turn" || value === "session" ? value : undefined;
 }
@@ -993,6 +1002,19 @@ export async function runAgentTurnWithFallback(params: {
                 bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
                   result.meta?.systemPromptReport,
                 );
+
+                const { persistCliTurnTranscript } = await loadAttemptExecutionRuntime();
+                await persistCliTurnTranscript({
+                  body: params.commandBody,
+                  result,
+                  sessionId: params.followupRun.run.sessionId,
+                  sessionKey: params.sessionKey ?? params.followupRun.run.sessionId,
+                  sessionEntry: params.getActiveSessionEntry(),
+                  sessionStore: params.activeSessionStore,
+                  storePath: params.storePath,
+                  sessionAgentId: params.followupRun.run.agentId,
+                  sessionCwd: params.followupRun.run.workspaceDir,
+                });
 
                 // CLI backends don't emit streaming assistant events, so we need to
                 // emit one with the final text so server-chat can populate its buffer

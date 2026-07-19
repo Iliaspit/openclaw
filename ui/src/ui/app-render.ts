@@ -122,6 +122,7 @@ import { buildExternalLinkRel, EXTERNAL_LINK_TARGET } from "./external-link.ts";
 import { icons } from "./icons.ts";
 import "./components/dashboard-header.ts";
 import { normalizeBasePath, TAB_GROUPS, subtitleForTab, titleForTab } from "./navigation.ts";
+import { dismissPlannerCompletionNotification } from "./planner-notifications.ts";
 import { isPluginEnabledInConfigSnapshot } from "./plugin-activation.ts";
 import { isRenderableControlUiAvatarUrl } from "./views/agents-utils.ts";
 import { agentLogoUrl } from "./views/agents-utils.ts";
@@ -217,6 +218,41 @@ let clawhubSearchTimer: ReturnType<typeof setTimeout> | null = null;
 function lazyRender<M>(getter: () => M | null, render: (mod: M) => unknown) {
   const mod = getter();
   return mod ? render(mod) : nothing;
+}
+
+function renderPlannerCompletionToast(state: AppViewState) {
+  const notification = state.plannerCompletionNotification;
+  if (!notification) {
+    return nothing;
+  }
+  const toneClass =
+    notification.status === "done"
+      ? "planner-completion-toast--ok"
+      : "planner-completion-toast--warn";
+  const statusIcon = notification.status === "done" ? icons.check : icons.alertTriangle;
+  return html`
+    <div
+      class="planner-completion-toast ${toneClass}"
+      role="status"
+      aria-live="polite"
+      data-test-id="planner-completion-toast"
+    >
+      <span class="planner-completion-toast__icon" aria-hidden="true">${statusIcon}</span>
+      <span class="planner-completion-toast__copy">
+        <span class="planner-completion-toast__title">${notification.title}</span>
+        <span class="planner-completion-toast__body">${notification.body}</span>
+      </span>
+      <button
+        type="button"
+        class="planner-completion-toast__close"
+        title="Dismiss"
+        aria-label="Dismiss"
+        @click=${() => dismissPlannerCompletionNotification(state)}
+      >
+        ${icons.x}
+      </button>
+    </div>
+  `;
 }
 
 const UPDATE_BANNER_DISMISS_KEY = "openclaw:control-ui:update-banner-dismissed:v1";
@@ -1216,6 +1252,7 @@ export function renderApp(state: AppViewState) {
         state.chatMessage = cmd.endsWith(" ") ? cmd : `${cmd} `;
       },
     })}
+    ${renderPlannerCompletionToast(state)}
     <div
       class="shell ${isChat ? "shell--chat" : ""} ${chatFocus
         ? "shell--chat-focus"

@@ -36,6 +36,9 @@ type SupportedThinkingFormat =
 
 export type ModelCompatConfig = SupportedOpenAICompatFields & {
   thinkingFormat?: SupportedThinkingFormat;
+  openRouterRouting?: Record<string, unknown>;
+  vercelGatewayRouting?: Record<string, unknown>;
+  visibleReasoningDetailTypes?: string[];
   supportsTools?: boolean;
   supportsPromptCacheKey?: boolean;
   requiresStringContent?: boolean;
@@ -53,6 +56,7 @@ export type ModelDefinitionConfig = {
   id: string;
   name: string;
   api?: ModelApi;
+  baseUrl?: string;
   reasoning: boolean;
   input: Array<"text" | "image">;
   cost: {
@@ -60,6 +64,13 @@ export type ModelDefinitionConfig = {
     output: number;
     cacheRead: number;
     cacheWrite: number;
+    tieredPricing?: Array<{
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+      range: [number, number] | [number];
+    }>;
   };
   contextWindow: number;
   /**
@@ -71,6 +82,7 @@ export type ModelDefinitionConfig = {
   maxTokens: number;
   headers?: Record<string, string>;
   compat?: ModelCompatConfig;
+  metadataSource?: "models-add";
 };
 
 export type ModelProviderConfig = {

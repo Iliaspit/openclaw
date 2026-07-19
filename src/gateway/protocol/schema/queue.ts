@@ -30,6 +30,16 @@ export const QueueRuntimeIssueSchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const QueueWaitHintSchema = Type.Object(
+  {
+    code: Type.Literal("sessions_yield"),
+    label: Type.String({ minLength: 1, maxLength: 80 }),
+    detail: Type.String({ minLength: 1, maxLength: 240 }),
+    observedAt: Type.Integer({ minimum: 0 }),
+  },
+  { additionalProperties: false },
+);
+
 export const QueueLaneSnapshotSchema = Type.Object(
   {
     lane: Type.String({ minLength: 1, maxLength: 512 }),
@@ -58,6 +68,7 @@ export const QueueLaneSnapshotSchema = Type.Object(
     lastErrorAt: NullableNonNegativeInteger,
     lastClearedAt: NullableNonNegativeInteger,
     runtimeIssues: Type.Array(QueueRuntimeIssueSchema, { maxItems: 100 }),
+    waitHint: Type.Optional(QueueWaitHintSchema),
   },
   { additionalProperties: false },
 );

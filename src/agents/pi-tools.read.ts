@@ -686,6 +686,28 @@ export function createHostWorkspaceEditTool(
   });
 }
 
+function createHostReadOperations() {
+  return {
+    readFile: (absolutePath: string) =>
+      withHostReadFallback(absolutePath, (candidatePath) => fs.readFile(candidatePath)),
+    access: (absolutePath: string) =>
+      withHostReadFallback(absolutePath, (candidatePath) => fs.access(candidatePath)),
+    detectImageMimeType: (absolutePath: string) =>
+      withHostReadFallback(absolutePath, async (candidatePath) => {
+        const buffer = await fs.readFile(candidatePath);
+        const mime = await detectMime({ buffer, filePath: candidatePath });
+        return mime && mime.startsWith("image/") ? mime : undefined;
+      }),
+  } as const;
+}
+
+export function createHostWorkspaceReadTool(root: string, options?: OpenClawReadToolOptions) {
+  const base = createReadTool(root, {
+    operations: createHostReadOperations(),
+  }) as unknown as AnyAgentTool;
+  return createOpenClawReadTool(base, options);
+}
+
 export function createOpenClawReadTool(
   base: AnyAgentTool,
   options?: OpenClawReadToolOptions,
@@ -761,6 +783,49 @@ function createSandboxEditOperations(params: SandboxToolParams) {
 function expandTildeToOsHome(filePath: string): string {
   const home = resolveOsHomeDir();
   return home ? expandHomePrefix(filePath, { home }) : filePath;
+}
+
+function resolveRootCodexHomeAlias(filePath: string): string | undefined {
+  const resolved = path.resolve(expandTildeToOsHome(filePath));
+  const rootCodex = path.resolve("/root/.codex");
+  if (resolved !== rootCodex && !resolved.startsWith(`${rootCodex}${path.sep}`)) {
+    return undefined;
+  }
+
+  const configuredCodexHome = process.env.CODEX_HOME?.trim();
+  const osHome = resolveOsHomeDir();
+  const fallbackCodexHome = osHome ? path.join(osHome, ".codex") : undefined;
+  const codexHome = configuredCodexHome
+    ? path.resolve(expandTildeToOsHome(configuredCodexHome))
+    : fallbackCodexHome;
+  if (!codexHome || path.resolve(codexHome) === rootCodex) {
+    return undefined;
+  }
+
+  const relative = path.relative(rootCodex, resolved);
+  return relative ? path.join(codexHome, relative) : codexHome;
+}
+
+function hostReadCandidatePaths(filePath: string): string[] {
+  const resolved = path.resolve(expandTildeToOsHome(filePath));
+  const alias = resolveRootCodexHomeAlias(resolved);
+  return alias ? [resolved, alias] : [resolved];
+}
+
+async function withHostReadFallback<T>(
+  filePath: string,
+  operation: (candidatePath: string) => Promise<T>,
+): Promise<T> {
+  const candidates = hostReadCandidatePaths(filePath);
+  let firstError: unknown;
+  for (const candidate of candidates) {
+    try {
+      return await operation(candidate);
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+  throw firstError;
 }
 
 async function writeHostFile(absolutePath: string, content: string) {

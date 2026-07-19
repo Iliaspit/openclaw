@@ -139,10 +139,7 @@ export async function maybeHandleResetCommand(
         }
         return { shouldContinue: false };
       }
-      return {
-        shouldContinue: false,
-        reply: { text: "✅ ACP session reset in place." },
-      };
+      return null;
     }
     return {
       shouldContinue: false,

@@ -587,6 +587,7 @@ export function createSessionStatusTool(opts?: {
             provider: providerForCard,
             model: defaultModelForCard,
             catalog,
+            agentId,
           });
         },
         isGroup,

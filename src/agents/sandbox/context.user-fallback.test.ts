@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { resolveSandboxDockerUser } from "./context.js";
+import { createDelegationGuardTestConfig } from "../delegation/test-helpers.js";
+import { resolveSandboxDockerUser, resolveSandboxPrimaryWorkspaceDir } from "./context.js";
 import type { SandboxDockerConfig } from "./types.js";
 
 const baseDocker: SandboxDockerConfig = {
@@ -40,5 +41,56 @@ describe("resolveSandboxDockerUser", () => {
       },
     });
     expect(resolved.user).toBeUndefined();
+  });
+});
+
+describe("resolveSandboxPrimaryWorkspaceDir", () => {
+  const agentWorkspaceDir = "/tmp/assigned-workspace";
+  const sandboxWorkspaceDir = "/tmp/sandbox-staging";
+
+  it("mounts a guarded read-only agent workspace as the primary workspace", () => {
+    expect(
+      resolveSandboxPrimaryWorkspaceDir({
+        config: createDelegationGuardTestConfig(),
+        agentId: "planner",
+        workspaceAccess: "ro",
+        agentWorkspaceDir,
+        sandboxWorkspaceDir,
+      }),
+    ).toBe(agentWorkspaceDir);
+  });
+
+  it("preserves copied staging workspaces for unguarded read-only sessions", () => {
+    expect(
+      resolveSandboxPrimaryWorkspaceDir({
+        config: {},
+        agentId: "planner",
+        workspaceAccess: "ro",
+        agentWorkspaceDir,
+        sandboxWorkspaceDir,
+      }),
+    ).toBe(sandboxWorkspaceDir);
+  });
+
+  it("preserves existing read-write and no-workspace behavior", () => {
+    const config = createDelegationGuardTestConfig();
+    expect(
+      resolveSandboxPrimaryWorkspaceDir({
+        config,
+        agentId: "implementer",
+        workspaceAccess: "rw",
+        agentWorkspaceDir,
+        sandboxWorkspaceDir,
+      }),
+    ).toBe(agentWorkspaceDir);
+    expect(
+      resolveSandboxPrimaryWorkspaceDir({
+        config,
+        agentId: "planner",
+        workspaceAccess: "none",
+        agentWorkspaceDir,
+        sandboxWorkspaceDir,
+      }),
+    ).toBe(sandboxWorkspaceDir);
   });
 });

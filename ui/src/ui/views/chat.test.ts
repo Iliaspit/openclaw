@@ -773,6 +773,23 @@ describe("chat view", () => {
     expect(container.textContent).not.toContain("Stop");
   });
 
+  it("hides the new session button while drafting a message", () => {
+    const container = document.createElement("div");
+    render(
+      renderChat(
+        createProps({
+          canAbort: false,
+          draft: "send this",
+          onNewSession: vi.fn(),
+        }),
+      ),
+      container,
+    );
+
+    expect(container.querySelector<HTMLButtonElement>('button[title="New session"]')).toBeNull();
+    expect(container.querySelector<HTMLButtonElement>('button[title="Send"]')).not.toBeNull();
+  });
+
   it("shows sender labels from sanitized gateway messages instead of generic You", () => {
     const container = document.createElement("div");
     render(
@@ -930,6 +947,39 @@ describe("chat view", () => {
     vi.unstubAllGlobals();
   });
 
+  it("shows the configured agent thinking default for a fresh session", () => {
+    const { state } = createChatHeaderState({
+      model: "gpt-5.6-sol",
+      modelProvider: "openai-codex",
+      models: [
+        {
+          id: "gpt-5.6-sol",
+          name: "GPT-5.6 Sol",
+          provider: "openai-codex",
+          reasoning: true,
+        },
+      ],
+    });
+    const session = state.sessionsResult?.sessions[0];
+    if (!session) {
+      throw new Error("expected session fixture");
+    }
+    session.thinkingDefault = "xhigh";
+    session.thinkingOptions = ["off", "minimal", "low", "medium", "high", "xhigh"];
+
+    const container = document.createElement("div");
+    render(renderChatSessionSelect(state), container);
+
+    const thinkingSelect = container.querySelector<HTMLSelectElement>(
+      'select[data-chat-thinking-select="true"]',
+    );
+    expect(thinkingSelect?.value).toBe("");
+    expect(thinkingSelect?.selectedOptions[0]?.textContent?.trim()).toBe("Default (xhigh)");
+    expect(Array.from(thinkingSelect?.options ?? []).map((option) => option.value)).toContain(
+      "xhigh",
+    );
+  });
+
   it("renders queue pressure for the selected chat session", () => {
     const { state } = createChatHeaderState();
     state.queueHealthResult = {
@@ -1044,6 +1094,63 @@ describe("chat view", () => {
     expect(widget?.textContent).not.toContain("Other lane overloaded");
     expect(widget?.textContent).not.toContain("3 tasks");
     expect(widget?.getAttribute("title")).not.toContain("session:agent:planner-2:main");
+  });
+
+  it("renders selected-lane orchestration waits instead of queue idle", () => {
+    const { state } = createChatHeaderState();
+    state.sessionKey = "agent:planner-4:main";
+    state.queueHealthResult = {
+      ts: 123,
+      gatewayDraining: false,
+      totalQueued: 0,
+      totalActive: 0,
+      totalDepth: 0,
+      totalRuntimeIssues: 0,
+      runtimeIssues: [],
+      lanes: [
+        {
+          lane: "session:agent:planner-4:main",
+          health: "idle",
+          queued: 0,
+          active: 0,
+          depth: 0,
+          maxConcurrent: 1,
+          isOverloaded: false,
+          draining: false,
+          oldestQueuedAt: null,
+          oldestQueuedMs: null,
+          oldestActiveStartedAt: null,
+          oldestActiveMs: null,
+          lastWaitMs: null,
+          lastDequeuedAt: null,
+          lastTaskDurationMs: null,
+          lastCompletedAt: null,
+          lastErrorAt: null,
+          lastClearedAt: null,
+          runtimeIssues: [],
+          waitHint: {
+            code: "sessions_yield",
+            label: "Waiting on agent",
+            detail: "Current status: waiting for planner-2.",
+            observedAt: Date.parse("2026-02-07T00:01:00.000Z"),
+          },
+        },
+      ],
+    };
+    const container = document.createElement("div");
+
+    render(renderChatSessionSelect(state), container);
+
+    const widget = container.querySelector<HTMLElement>(".queue-health");
+    expect(widget).not.toBeNull();
+    expect(widget?.classList.contains("queue-health--waiting")).toBe(true);
+    expect(widget?.textContent).toContain("Waiting on agent");
+    expect(widget?.textContent).toContain("waiting for planner-2");
+    expect(widget?.textContent).not.toContain("Queue idle");
+    expect(widget?.getAttribute("title")).toContain("Status: Waiting on agent");
+    expect(widget?.getAttribute("title")).toContain("Waiting detail: Current status");
+    expect(widget?.getAttribute("title")).toContain("scheduler can be idle");
+    expect(widget?.getAttribute("title")).toContain("wait=sessions_yield");
   });
 
   it("renders selected-lane runtime issues when the scheduler queue is otherwise idle", () => {

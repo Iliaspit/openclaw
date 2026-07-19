@@ -224,7 +224,7 @@ describe("openai codex provider", () => {
           },
         },
       ],
-      defaultModel: "openai-codex/gpt-5.5",
+      defaultModel: "openai-codex/gpt-5.6-sol",
     });
     expect(result?.profiles[0]?.credential).not.toHaveProperty("idToken");
     expect(result?.profiles[0]?.credential).not.toHaveProperty("accountId");
@@ -326,6 +326,51 @@ describe("openai codex provider", () => {
       contextTokens: 272_000,
       maxTokens: 128_000,
       cost: { input: 30, output: 180, cacheRead: 0, cacheWrite: 0 },
+    });
+  });
+
+  it("resolves gpt-5.6 Sol, Terra, and Luna with Codex transport metadata", () => {
+    const provider = buildOpenAICodexProviderPlugin();
+
+    const sol = provider.resolveDynamicModel?.({
+      provider: "openai-codex",
+      modelId: "gpt-5.6-sol",
+      modelRegistry: createSingleModelRegistry(createCodexTemplate({ id: "gpt-5.5" })) as never,
+    });
+    const terra = provider.resolveDynamicModel?.({
+      provider: "openai-codex",
+      modelId: "gpt-5.6-terra",
+      modelRegistry: createSingleModelRegistry(createCodexTemplate({ id: "gpt-5.5" })) as never,
+    });
+    const luna = provider.resolveDynamicModel?.({
+      provider: "openai-codex",
+      modelId: "gpt-5.6-luna",
+      modelRegistry: createSingleModelRegistry(createCodexTemplate({ id: "gpt-5.5" })) as never,
+    });
+
+    for (const model of [sol, terra, luna]) {
+      expect(model).toMatchObject({
+        provider: "openai-codex",
+        api: "openai-codex-responses",
+        baseUrl: "https://chatgpt.com/backend-api",
+        reasoning: true,
+        input: ["text", "image"],
+        contextWindow: 1_050_000,
+        contextTokens: 272_000,
+        maxTokens: 128_000,
+      });
+    }
+    expect(sol).toMatchObject({
+      id: "gpt-5.6-sol",
+      cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+    });
+    expect(terra).toMatchObject({
+      id: "gpt-5.6-terra",
+      cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
+    });
+    expect(luna).toMatchObject({
+      id: "gpt-5.6-luna",
+      cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 0 },
     });
   });
 
@@ -458,7 +503,7 @@ describe("openai codex provider", () => {
     expect(model).not.toHaveProperty("contextTokens");
   });
 
-  it("augments catalog with gpt-5.5-pro and gpt-5.4 native metadata", () => {
+  it("augments catalog with gpt-5.6, gpt-5.5-pro, and gpt-5.4 native metadata", () => {
     const provider = buildOpenAICodexProviderPlugin();
 
     const entries = provider.augmentModelCatalog?.({
@@ -478,6 +523,30 @@ describe("openai codex provider", () => {
     expect(entries).not.toContainEqual(
       expect.objectContaining({
         id: "gpt-5.5",
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        id: "gpt-5.6-sol",
+        contextWindow: 1_050_000,
+        contextTokens: 272_000,
+        cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        id: "gpt-5.6-terra",
+        contextWindow: 1_050_000,
+        contextTokens: 272_000,
+        cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        id: "gpt-5.6-luna",
+        contextWindow: 1_050_000,
+        contextTokens: 272_000,
+        cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 0 },
       }),
     );
     expect(entries).toContainEqual(

@@ -362,6 +362,59 @@ function reconcileMainStoreOAuthProfileDrift(params: {
   });
 }
 
+function shouldPreferBaseCredential(params: {
+  baseCredential: AuthProfileCredential | undefined;
+  overrideCredential: AuthProfileCredential;
+}): boolean {
+  const { baseCredential, overrideCredential } = params;
+  if (baseCredential?.type !== "oauth" || overrideCredential.type !== "oauth") {
+    return false;
+  }
+  return (
+    isSafeToAdoptMainStoreOAuthIdentity(overrideCredential, baseCredential) &&
+    isNewerUsableOAuthCredential(overrideCredential, baseCredential)
+  );
+}
+
+function mergeProfileCredentials(
+  baseProfiles: AuthProfileStore["profiles"],
+  overrideProfiles: AuthProfileStore["profiles"],
+): AuthProfileStore["profiles"] {
+  const profiles = { ...baseProfiles };
+  for (const [profileId, overrideCredential] of Object.entries(overrideProfiles)) {
+    const baseCredential = baseProfiles[profileId];
+    if (shouldPreferBaseCredential({ baseCredential, overrideCredential })) {
+      continue;
+    }
+    profiles[profileId] = overrideCredential;
+  }
+  return profiles;
+}
+
+export function inheritUsableMainOAuthProfiles(
+  base: AuthProfileStore,
+  override: AuthProfileStore,
+): AuthProfileStore {
+  let changed = false;
+  const profiles = { ...override.profiles };
+  for (const [profileId, overrideCredential] of Object.entries(override.profiles)) {
+    const baseCredential = base.profiles[profileId];
+    if (!shouldPreferBaseCredential({ baseCredential, overrideCredential })) {
+      continue;
+    }
+    profiles[profileId] = baseCredential;
+    changed = true;
+  }
+  if (!changed) {
+    return override;
+  }
+  return {
+    ...override,
+    version: Math.max(base.version, override.version ?? base.version),
+    profiles,
+  };
+}
+
 export function mergeAuthProfileStores(
   base: AuthProfileStore,
   override: AuthProfileStore,
@@ -376,7 +429,7 @@ export function mergeAuthProfileStores(
   }
   const merged = {
     version: Math.max(base.version, override.version ?? base.version),
-    profiles: { ...base.profiles, ...override.profiles },
+    profiles: mergeProfileCredentials(base.profiles, override.profiles),
     order: mergeRecord(base.order, override.order),
     lastGood: mergeRecord(base.lastGood, override.lastGood),
     usageStats: mergeRecord(base.usageStats, override.usageStats),

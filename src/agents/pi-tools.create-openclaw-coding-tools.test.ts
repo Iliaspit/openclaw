@@ -14,7 +14,7 @@ import "./test-helpers/fast-coding-tools.js";
 import "./test-helpers/fast-openclaw-tools.js";
 import { createOpenClawCodingTools } from "./pi-tools.js";
 import { createHostSandboxFsBridge } from "./test-helpers/host-sandbox-fs-bridge.js";
-import { expectReadWriteEditTools } from "./test-helpers/pi-tools-fs-helpers.js";
+import { expectReadWriteEditTools, getTextContent } from "./test-helpers/pi-tools-fs-helpers.js";
 import { createPiToolsSandboxContext } from "./test-helpers/pi-tools-sandbox-context.js";
 
 const tinyPngBuffer = Buffer.from(
@@ -353,6 +353,7 @@ describe("createOpenClawCodingTools", () => {
     expect(names.has("browser")).toBe(false);
   });
 
+
   it("can keep message available when a cron route needs it under the coding profile", () => {
     const codingTools = createOpenClawCodingTools({
       config: { tools: { profile: "coding" } },
@@ -504,6 +505,36 @@ describe("createOpenClawCodingTools", () => {
       const combinedText = textBlocks?.map((block) => block.text ?? "").join("\n");
       expect(combinedText).toContain(contents);
     } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back /root/.codex reads to CODEX_HOME when a Docker agent assumes root home", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-home-read-"));
+    const previousCodexHome = process.env.CODEX_HOME;
+    try {
+      const codexHome = path.join(tmpDir, "codex-home");
+      const fileName = `AGENTS-${process.pid}-${Date.now()}.md`;
+      const expected = "read from configured CODEX_HOME";
+      await fs.mkdir(codexHome, { recursive: true });
+      await fs.writeFile(path.join(codexHome, fileName), expected, "utf8");
+      process.env.CODEX_HOME = codexHome;
+
+      const tools = createOpenClawCodingTools({ workspaceDir: tmpDir });
+      const readTool = tools.find((tool) => tool.name === "read");
+      expect(readTool).toBeDefined();
+
+      const result = await readTool?.execute("tool-root-codex", {
+        path: `/root/.codex/${fileName}`,
+      });
+
+      expect(getTextContent(result)).toContain(expected);
+    } finally {
+      if (previousCodexHome === undefined) {
+        delete process.env.CODEX_HOME;
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });

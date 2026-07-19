@@ -20,21 +20,37 @@ import {
   findCatalogTemplate,
   matchesExactOrPrefix,
 } from "./shared.js";
-import { supportsOpenAiFamilyXHighModelId } from "./xhigh-model-support.js";
+import {
+  supportsOpenAiFamilyMaxThinkingModelId,
+  supportsOpenAiFamilyXHighModelId,
+} from "./xhigh-model-support.js";
 
 const PROVIDER_ID = "openai";
+const OPENAI_GPT_56_ALIAS_MODEL_ID = "gpt-5.6";
+const OPENAI_GPT_56_SOL_MODEL_ID = "gpt-5.6-sol";
+const OPENAI_GPT_56_TERRA_MODEL_ID = "gpt-5.6-terra";
+const OPENAI_GPT_56_LUNA_MODEL_ID = "gpt-5.6-luna";
 const OPENAI_GPT_55_MODEL_ID = "gpt-5.5";
 const OPENAI_GPT_55_PRO_MODEL_ID = "gpt-5.5-pro";
 const OPENAI_GPT_54_MODEL_ID = "gpt-5.4";
 const OPENAI_GPT_54_PRO_MODEL_ID = "gpt-5.4-pro";
 const OPENAI_GPT_54_MINI_MODEL_ID = "gpt-5.4-mini";
 const OPENAI_GPT_54_NANO_MODEL_ID = "gpt-5.4-nano";
+const OPENAI_GPT_56_CONTEXT_TOKENS = 1_050_000;
 const OPENAI_GPT_55_PRO_CONTEXT_TOKENS = 1_000_000;
 const OPENAI_GPT_54_CONTEXT_TOKENS = 1_050_000;
 const OPENAI_GPT_54_PRO_CONTEXT_TOKENS = 1_050_000;
 const OPENAI_GPT_54_MINI_CONTEXT_TOKENS = 400_000;
 const OPENAI_GPT_54_NANO_CONTEXT_TOKENS = 400_000;
 const OPENAI_GPT_54_MAX_TOKENS = 128_000;
+const OPENAI_GPT_56_SOL_COST = { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 } as const;
+const OPENAI_GPT_56_TERRA_COST = {
+  input: 2.5,
+  output: 15,
+  cacheRead: 0.25,
+  cacheWrite: 0,
+} as const;
+const OPENAI_GPT_56_LUNA_COST = { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 0 } as const;
 const OPENAI_GPT_55_PRO_COST = { input: 30, output: 180, cacheRead: 0, cacheWrite: 0 } as const;
 const OPENAI_GPT_54_COST = { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 } as const;
 const OPENAI_GPT_54_PRO_COST = { input: 30, output: 180, cacheRead: 0, cacheWrite: 0 } as const;
@@ -50,6 +66,21 @@ const OPENAI_GPT_54_NANO_COST = {
   cacheRead: 0.02,
   cacheWrite: 0,
 } as const;
+const OPENAI_GPT_56_SOL_TEMPLATE_MODEL_IDS = [
+  OPENAI_GPT_55_MODEL_ID,
+  OPENAI_GPT_54_MODEL_ID,
+  "gpt-5.2",
+] as const;
+const OPENAI_GPT_56_TERRA_TEMPLATE_MODEL_IDS = [
+  OPENAI_GPT_54_MODEL_ID,
+  OPENAI_GPT_54_MINI_MODEL_ID,
+  "gpt-5-mini",
+] as const;
+const OPENAI_GPT_56_LUNA_TEMPLATE_MODEL_IDS = [
+  OPENAI_GPT_54_NANO_MODEL_ID,
+  "gpt-5-nano",
+  OPENAI_GPT_54_MINI_MODEL_ID,
+] as const;
 const OPENAI_GPT_55_PRO_TEMPLATE_MODEL_IDS = [
   OPENAI_GPT_54_PRO_MODEL_ID,
   OPENAI_GPT_54_MODEL_ID,
@@ -61,6 +92,7 @@ const OPENAI_GPT_54_PRO_TEMPLATE_MODEL_IDS = ["gpt-5.2-pro", "gpt-5.2"] as const
 const OPENAI_GPT_54_MINI_TEMPLATE_MODEL_IDS = ["gpt-5-mini"] as const;
 const OPENAI_GPT_54_NANO_TEMPLATE_MODEL_IDS = ["gpt-5-nano", "gpt-5-mini"] as const;
 const OPENAI_MODERN_MODEL_IDS = [
+  OPENAI_GPT_56_ALIAS_MODEL_ID,
   OPENAI_GPT_55_MODEL_ID,
   OPENAI_GPT_55_PRO_MODEL_ID,
   OPENAI_GPT_54_MODEL_ID,
@@ -108,7 +140,43 @@ function resolveOpenAIGptForwardCompatModel(ctx: ProviderResolveDynamicModelCont
   const lower = normalizeLowercaseStringOrEmpty(trimmedModelId);
   let templateIds: readonly string[];
   let patch: Partial<ProviderRuntimeModel>;
-  if (lower === OPENAI_GPT_55_PRO_MODEL_ID) {
+  if (lower === OPENAI_GPT_56_ALIAS_MODEL_ID || lower === OPENAI_GPT_56_SOL_MODEL_ID) {
+    templateIds = OPENAI_GPT_56_SOL_TEMPLATE_MODEL_IDS;
+    patch = {
+      api: "openai-responses",
+      provider: PROVIDER_ID,
+      baseUrl: "https://api.openai.com/v1",
+      reasoning: true,
+      input: ["text", "image"],
+      cost: OPENAI_GPT_56_SOL_COST,
+      contextWindow: OPENAI_GPT_56_CONTEXT_TOKENS,
+      maxTokens: OPENAI_GPT_54_MAX_TOKENS,
+    };
+  } else if (lower === OPENAI_GPT_56_TERRA_MODEL_ID) {
+    templateIds = OPENAI_GPT_56_TERRA_TEMPLATE_MODEL_IDS;
+    patch = {
+      api: "openai-responses",
+      provider: PROVIDER_ID,
+      baseUrl: "https://api.openai.com/v1",
+      reasoning: true,
+      input: ["text", "image"],
+      cost: OPENAI_GPT_56_TERRA_COST,
+      contextWindow: OPENAI_GPT_56_CONTEXT_TOKENS,
+      maxTokens: OPENAI_GPT_54_MAX_TOKENS,
+    };
+  } else if (lower === OPENAI_GPT_56_LUNA_MODEL_ID) {
+    templateIds = OPENAI_GPT_56_LUNA_TEMPLATE_MODEL_IDS;
+    patch = {
+      api: "openai-responses",
+      provider: PROVIDER_ID,
+      baseUrl: "https://api.openai.com/v1",
+      reasoning: true,
+      input: ["text", "image"],
+      cost: OPENAI_GPT_56_LUNA_COST,
+      contextWindow: OPENAI_GPT_56_CONTEXT_TOKENS,
+      maxTokens: OPENAI_GPT_54_MAX_TOKENS,
+    };
+  } else if (lower === OPENAI_GPT_55_PRO_MODEL_ID) {
     templateIds = OPENAI_GPT_55_PRO_TEMPLATE_MODEL_IDS;
     patch = {
       api: "openai-responses",
@@ -184,7 +252,7 @@ function resolveOpenAIGptForwardCompatModel(ctx: ProviderResolveDynamicModelCont
       id: trimmedModelId,
       name: trimmedModelId,
       ...patch,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      cost: patch.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: patch.contextWindow ?? DEFAULT_CONTEXT_TOKENS,
       maxTokens: patch.maxTokens ?? DEFAULT_CONTEXT_TOKENS,
     } as ProviderRuntimeModel)
@@ -241,6 +309,7 @@ export function buildOpenAIProvider(): ProviderPlugin {
         { id: "medium" },
         { id: "high" },
         ...(supportsOpenAiFamilyXHighModelId(modelId) ? [{ id: "xhigh" as const }] : []),
+        ...(supportsOpenAiFamilyMaxThinkingModelId(modelId) ? [{ id: "max" as const }] : []),
       ],
     }),
     isModernModelRef: ({ modelId }) => matchesExactOrPrefix(modelId, OPENAI_MODERN_MODEL_IDS),
@@ -248,7 +317,7 @@ export function buildOpenAIProvider(): ProviderPlugin {
       if (ctx.provider !== PROVIDER_ID || ctx.listProfileIds("openai-codex").length === 0) {
         return undefined;
       }
-      return 'No API key found for provider "openai". You are authenticated with OpenAI Codex OAuth. Use openai-codex/gpt-5.5, or set OPENAI_API_KEY for direct OpenAI API access.';
+      return 'No API key found for provider "openai". You are authenticated with OpenAI Codex OAuth. Use openai-codex/gpt-5.6-sol, or set OPENAI_API_KEY for direct OpenAI API access.';
     },
     suppressBuiltInModel: (ctx) => {
       if (
@@ -259,10 +328,25 @@ export function buildOpenAIProvider(): ProviderPlugin {
       }
       return {
         suppress: true,
-        errorMessage: `Unknown model: ${ctx.provider}/${OPENAI_DIRECT_SPARK_MODEL_ID}. ${OPENAI_DIRECT_SPARK_MODEL_ID} is no longer exposed by the OpenAI or Codex catalogs. Use openai/gpt-5.5.`,
+        errorMessage: `Unknown model: ${ctx.provider}/${OPENAI_DIRECT_SPARK_MODEL_ID}. ${OPENAI_DIRECT_SPARK_MODEL_ID} is no longer exposed by the OpenAI or Codex catalogs. Use openai/gpt-5.6-sol.`,
       };
     },
     augmentModelCatalog: (ctx) => {
+      const openAiGpt56SolTemplate = findCatalogTemplate({
+        entries: ctx.entries,
+        providerId: PROVIDER_ID,
+        templateIds: OPENAI_GPT_56_SOL_TEMPLATE_MODEL_IDS,
+      });
+      const openAiGpt56TerraTemplate = findCatalogTemplate({
+        entries: ctx.entries,
+        providerId: PROVIDER_ID,
+        templateIds: OPENAI_GPT_56_TERRA_TEMPLATE_MODEL_IDS,
+      });
+      const openAiGpt56LunaTemplate = findCatalogTemplate({
+        entries: ctx.entries,
+        providerId: PROVIDER_ID,
+        templateIds: OPENAI_GPT_56_LUNA_TEMPLATE_MODEL_IDS,
+      });
       const openAiGpt55ProTemplate = findCatalogTemplate({
         entries: ctx.entries,
         providerId: PROVIDER_ID,
@@ -289,6 +373,27 @@ export function buildOpenAIProvider(): ProviderPlugin {
         templateIds: OPENAI_GPT_54_NANO_TEMPLATE_MODEL_IDS,
       });
       return [
+        buildOpenAISyntheticCatalogEntry(openAiGpt56SolTemplate, {
+          id: OPENAI_GPT_56_SOL_MODEL_ID,
+          reasoning: true,
+          input: ["text", "image"],
+          contextWindow: OPENAI_GPT_56_CONTEXT_TOKENS,
+          cost: OPENAI_GPT_56_SOL_COST,
+        }),
+        buildOpenAISyntheticCatalogEntry(openAiGpt56TerraTemplate, {
+          id: OPENAI_GPT_56_TERRA_MODEL_ID,
+          reasoning: true,
+          input: ["text", "image"],
+          contextWindow: OPENAI_GPT_56_CONTEXT_TOKENS,
+          cost: OPENAI_GPT_56_TERRA_COST,
+        }),
+        buildOpenAISyntheticCatalogEntry(openAiGpt56LunaTemplate, {
+          id: OPENAI_GPT_56_LUNA_MODEL_ID,
+          reasoning: true,
+          input: ["text", "image"],
+          contextWindow: OPENAI_GPT_56_CONTEXT_TOKENS,
+          cost: OPENAI_GPT_56_LUNA_COST,
+        }),
         buildOpenAISyntheticCatalogEntry(openAiGpt55ProTemplate, {
           id: OPENAI_GPT_55_PRO_MODEL_ID,
           reasoning: true,

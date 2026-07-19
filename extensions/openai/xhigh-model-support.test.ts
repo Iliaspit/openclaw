@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { supportsOpenAiFamilyXHighModelId } from "./xhigh-model-support.js";
+import {
+  supportsOpenAiFamilyMaxThinkingModelId,
+  supportsOpenAiFamilyXHighModelId,
+} from "./xhigh-model-support.js";
 
 describe("supportsOpenAiFamilyXHighModelId", () => {
   it("allows gpt-5 family and codex ids", () => {
@@ -15,5 +18,19 @@ describe("supportsOpenAiFamilyXHighModelId", () => {
     expect(supportsOpenAiFamilyXHighModelId("gpt-4o")).toBe(false);
     expect(supportsOpenAiFamilyXHighModelId("gpt-3.5-turbo")).toBe(false);
     expect(supportsOpenAiFamilyXHighModelId("")).toBe(false);
+  });
+});
+
+describe("supportsOpenAiFamilyMaxThinkingModelId", () => {
+  it("allows GPT-5.6 models only", () => {
+    expect(supportsOpenAiFamilyMaxThinkingModelId("gpt-5.6")).toBe(true);
+    expect(supportsOpenAiFamilyMaxThinkingModelId("gpt-5.6-sol")).toBe(true);
+    expect(supportsOpenAiFamilyMaxThinkingModelId("gpt-5.6-terra")).toBe(true);
+    expect(supportsOpenAiFamilyMaxThinkingModelId("gpt-5.6-luna")).toBe(true);
+  });
+
+  it("keeps earlier models at xhigh", () => {
+    expect(supportsOpenAiFamilyMaxThinkingModelId("gpt-5.5")).toBe(false);
+    expect(supportsOpenAiFamilyMaxThinkingModelId("gpt-5.4-pro")).toBe(false);
   });
 });

@@ -495,7 +495,7 @@ Consult this before investigating a new issue or making a related change.
    - **Fix and why:** Reserved complete `AGENTS.md` content ahead of optional bootstrap context, exempted it from `bootstrapMaxChars`, and made agent execution fail closed when policy cannot fit within `bootstrapTotalMaxChars`. Near-limit prompt and doctor warnings now identify the effective file or total budget; doctor alone may render a truncated diagnostic copy so it can explain an over-limit policy.
    - **Result:** Agents no longer run with partially injected `AGENTS.md`; repository-size, reordered-file, overflow, warning, doctor, CLI, and embedded prompt regressions cover the contract.
 
-3. **Bootstrap truncation silently removed workspace policy**
+4. **Bootstrap truncation silently removed workspace policy**
    - **Issue:** `AGENTS.md` used the same content-unaware per-file head/tail truncation as ordinary bootstrap files. A policy file slightly above `bootstrapMaxChars` could therefore lose middle instructions while the agent continued running with partial workspace authority.
    - **Fix and why:** Exempted `AGENTS.md` from the ordinary per-file cap, reserved its complete contents within the total bootstrap budget regardless of hook ordering, and made policy overflow fail closed instead of injecting a partial file. Bootstrap budget analysis now treats `AGENTS.md` against `bootstrapTotalMaxChars` and emits a prompt/doctor warning at 80% usage.
    - **Result:** Regression coverage prevents default-limit drift or repository policy growth from silently truncating `AGENTS.md`; near-limit pressure is visible before failure, and an over-total policy stops the run with an actionable configuration error.

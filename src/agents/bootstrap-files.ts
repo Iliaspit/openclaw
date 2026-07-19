@@ -13,7 +13,14 @@ import {
   resolveBootstrapTotalMaxChars,
 } from "./pi-embedded-helpers.js";
 import {
+  DEFAULT_AGENTS_FILENAME,
+  DEFAULT_BOOTSTRAP_FILENAME,
   DEFAULT_HEARTBEAT_FILENAME,
+  DEFAULT_IDENTITY_FILENAME,
+  DEFAULT_MEMORY_FILENAME,
+  DEFAULT_SOUL_FILENAME,
+  DEFAULT_TOOLS_FILENAME,
+  DEFAULT_USER_FILENAME,
   filterBootstrapFilesForSession,
   isWorkspaceBootstrapPending,
   loadWorkspaceBootstrapFiles,
@@ -214,6 +221,136 @@ function filterHeartbeatBootstrapFile(
   return files.filter((file) => file.name !== DEFAULT_HEARTBEAT_FILENAME);
 }
 
+const ALWAYS_SUBSTANTIVE_BOOTSTRAP_FILES = new Set([
+  DEFAULT_AGENTS_FILENAME,
+  DEFAULT_BOOTSTRAP_FILENAME,
+]);
+
+const TEMPLATE_ONLY_LINE_PATTERNS_BY_FILE: Partial<
+  Record<WorkspaceBootstrapFile["name"], readonly RegExp[]>
+> = {
+  [DEFAULT_SOUL_FILENAME]: [
+    /^_?you're not a chatbot\. you're becoming someone\.?_?$/i,
+    /^want a sharper version\? see \[soul\.md personality guide\]\(\/concepts\/soul\)\.?$/i,
+    /^\*\*be genuinely helpful, not performatively helpful\./i,
+    /^\*\*have opinions\./i,
+    /^\*\*be resourceful before asking\./i,
+    /^\*\*earn trust through competence\./i,
+    /^\*\*remember you're a guest\./i,
+    /^private things stay private\. period\.$/i,
+    /^when in doubt, ask before acting externally\.$/i,
+    /^never send half-baked replies to messaging surfaces\.$/i,
+    /^you're not the user's voice/i,
+    /^be the assistant you'd actually want to talk to\./i,
+    /^each session, you wake up fresh\./i,
+    /^if you change this file, tell the user/i,
+    /^_?this file is yours to evolve\./i,
+  ],
+  [DEFAULT_TOOLS_FILENAME]: [
+    /^skills define _?\\?\*?how_?\\?\*? tools work\./i,
+    /^this file is for _?\\?\*?your_?\\?\*? specifics/i,
+    /^things like:$/i,
+    /^- camera names and locations$/i,
+    /^- ssh hosts and aliases$/i,
+    /^- preferred voices for tts$/i,
+    /^- speaker\/room names$/i,
+    /^- device nicknames$/i,
+    /^- anything environment-specific$/i,
+    /^- living-room .+ main area/i,
+    /^- front-door .+ entrance/i,
+    /^- home-server .+ 192\.168\.1\.100/i,
+    /^- preferred voice:/i,
+    /^- default speaker:/i,
+    /^skills are shared\. your setup is yours\./i,
+    /^keeping them apart means you can update skills/i,
+    /^add whatever helps you do your job\. this is your cheat sheet\.$/i,
+  ],
+  [DEFAULT_IDENTITY_FILENAME]: [
+    /^_?\\?\*?fill this in during your first conversation/i,
+    /^- \*\*name:\*\*$/i,
+    /^- \*\*creature:\*\*$/i,
+    /^- \*\*vibe:\*\*$/i,
+    /^- \*\*emoji:\*\*$/i,
+    /^- \*\*avatar:\*\*$/i,
+    /^_?\\?\*?\(pick something you like\)_?\\?\*?$/i,
+    /^_?\\?\*?\(ai\? robot\? familiar\? ghost in the machine\? something weirder\?\)_?\\?\*?$/i,
+    /^_?\\?\*?\(how do you come across\? sharp\? warm\? chaotic\? calm\?\)_?\\?\*?$/i,
+    /^_?\\?\*?\(your signature/i,
+    /^_?\\?\*?\(workspace-relative path, http\(s\) url, or data uri\)_?\\?\*?$/i,
+    /^this isn't just metadata\. it's the start of figuring out who you are\.$/i,
+    /^notes:?$/i,
+    /^- save this file at the workspace root as `identity\.md`\.$/i,
+    /^- for avatars, use a workspace-relative path like `avatars\/openclaw\.png`\.$/i,
+  ],
+  [DEFAULT_USER_FILENAME]: [
+    /^_?\\?\*?learn about the person you're helping/i,
+    /^- \*\*name:\*\*$/i,
+    /^- \*\*what to call them:\*\*$/i,
+    /^- \*\*pronouns:\*\*/i,
+    /^- \*\*timezone:\*\*$/i,
+    /^- \*\*notes:\*\*$/i,
+    /^_?\\?\*?\(what do they care about\? what projects are they working on\? what annoys them\? what makes them laugh\? build this over time\.\)_?\\?\*?$/i,
+    /^the more you know, the better you can help\./i,
+  ],
+  [DEFAULT_HEARTBEAT_FILENAME]: [
+    /^# keep this file empty \(or with only comments\) to skip heartbeat api calls\.$/i,
+    /^# add tasks below when you want the agent to check something periodically\.$/i,
+  ],
+};
+
+function isCommonTemplateOnlyLine(line: string): boolean {
+  return (
+    line === "---" ||
+    /^summary:/i.test(line) ||
+    /^title:/i.test(line) ||
+    /^read_when:/i.test(line) ||
+    /^-\s+bootstrapping a workspace manually$/i.test(line) ||
+    /^#+(\s|$)/.test(line) ||
+    /^[-*+]\s*(\[[\sXx]?\]\s*)?$/.test(line) ||
+    /^```[A-Za-z0-9_-]*$/.test(line) ||
+    /^\[agent workspace\]\(\/concepts\/agent-workspace\)$/i.test(line) ||
+    /^-\s+\[agent workspace\]\(\/concepts\/agent-workspace\)$/i.test(line) ||
+    /^-\s+\[heartbeat config\]\(\/gateway\/config-agents\)$/i.test(line) ||
+    /^-\s+\[soul\.md personality guide\]\(\/concepts\/soul\)$/i.test(line)
+  );
+}
+
+function isTemplateOnlyLine(fileName: WorkspaceBootstrapFile["name"], line: string): boolean {
+  if (isCommonTemplateOnlyLine(line)) {
+    return true;
+  }
+  return (
+    TEMPLATE_ONLY_LINE_PATTERNS_BY_FILE[fileName]?.some((pattern) => pattern.test(line)) === true
+  );
+}
+
+function isSubstantiveBootstrapFile(file: WorkspaceBootstrapFile): boolean {
+  if (file.missing) {
+    return false;
+  }
+  const content = file.content ?? "";
+  if (!content.trim()) {
+    return false;
+  }
+  const lines = content.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0) {
+    return false;
+  }
+  if (ALWAYS_SUBSTANTIVE_BOOTSTRAP_FILES.has(file.name)) {
+    return lines.some((line) => !isCommonTemplateOnlyLine(line));
+  }
+  if (file.name === DEFAULT_MEMORY_FILENAME) {
+    return lines.some((line) => !isCommonTemplateOnlyLine(line));
+  }
+  return lines.some((line) => !isTemplateOnlyLine(file.name, line));
+}
+
+function filterNonSubstantiveBootstrapFiles(
+  files: WorkspaceBootstrapFile[],
+): WorkspaceBootstrapFile[] {
+  return files.filter(isSubstantiveBootstrapFile);
+}
+
 export async function resolveBootstrapFilesForRun(params: {
   workspaceDir: string;
   config?: OpenClawConfig;
@@ -246,9 +383,11 @@ export async function resolveBootstrapFilesForRun(params: {
     sessionId: params.sessionId,
     agentId: params.agentId,
   });
-  return sanitizeBootstrapFiles(
-    filterHeartbeatBootstrapFile(updated, excludeHeartbeatBootstrapFile),
-    params.warn,
+  return filterNonSubstantiveBootstrapFiles(
+    sanitizeBootstrapFiles(
+      filterHeartbeatBootstrapFile(updated, excludeHeartbeatBootstrapFile),
+      params.warn,
+    ),
   );
 }
 
@@ -261,6 +400,7 @@ export async function resolveBootstrapContextForRun(params: {
   warn?: (message: string) => void;
   contextMode?: BootstrapContextMode;
   runKind?: BootstrapContextRunKind;
+  allowPolicyTruncationForDiagnostics?: boolean;
 }): Promise<{
   bootstrapFiles: WorkspaceBootstrapFile[];
   contextFiles: EmbeddedContextFile[];
@@ -270,6 +410,7 @@ export async function resolveBootstrapContextForRun(params: {
     maxChars: resolveBootstrapMaxChars(params.config),
     totalMaxChars: resolveBootstrapTotalMaxChars(params.config),
     warn: params.warn,
+    allowPolicyTruncationForDiagnostics: params.allowPolicyTruncationForDiagnostics,
   });
   return { bootstrapFiles, contextFiles };
 }

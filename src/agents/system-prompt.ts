@@ -420,8 +420,7 @@ export function buildAgentUserPromptPrefix(params: {
     return [
       "[Bootstrap pending]",
       ...buildLimitedBootstrapPromptLines({
-        introLine:
-          "This run cannot safely complete the full BOOTSTRAP.md workflow here.",
+        introLine: "This run cannot safely complete the full BOOTSTRAP.md workflow here.",
         nextStepLine:
           "If bootstrap still needs work, recommend switching to a primary interactive run with normal workspace access.",
       }),

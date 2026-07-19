@@ -67,6 +67,36 @@ export type AgentAcpBinding = {
 
 export type AgentBinding = AgentRouteBinding | AgentAcpBinding;
 
+export type DelegationGuardThinkingLevel = "medium" | "high" | "xhigh";
+
+export type DelegationGuardWorkerRole = "helper" | "implementer" | "tester" | "reviewer" | "qa";
+
+export type DelegationGuardConfig = {
+  /** Enables runtime-owned delegation evidence and routing authority. */
+  enabled: boolean;
+  /** Audit records violations; enforce rejects them. */
+  mode: "audit" | "enforce";
+  controllers: Array<{
+    agentId: string;
+    requiredThinking: "xhigh";
+  }>;
+  workers: Array<{
+    agentId: string;
+    role: DelegationGuardWorkerRole;
+    requiredThinking: DelegationGuardThinkingLevel;
+    workspaceAccess: "ro" | "rw";
+  }>;
+  validator: {
+    id: string;
+    version: string;
+    /** Lowercase SHA-256 digest of the installed validator artifact. */
+    sha256: string;
+    /** Operator-installed validator entrypoint outside agent workspaces. */
+    entrypoint: string;
+    maxOutputBytes: number;
+  };
+};
+
 export type AgentConfig = {
   id: string;
   default?: boolean;
@@ -124,4 +154,5 @@ export type AgentConfig = {
 export type AgentsConfig = {
   defaults?: AgentDefaultsConfig;
   list?: AgentConfig[];
+  delegationGuard?: DelegationGuardConfig;
 };

@@ -109,9 +109,10 @@ Bootstrap files are trimmed and appended under **Project Context** so the model 
 - `BOOTSTRAP.md` (only on brand-new workspaces)
 - `MEMORY.md` when present
 
-All of these files are **injected into the context window** on every turn unless
-a file-specific gate applies. `HEARTBEAT.md` is omitted on normal runs when
-heartbeats are disabled for the default agent or
+All of these files are **eligible for injection into the context window** on
+every turn unless a file-specific gate applies. Missing, blank, header-only, and
+template-only bootstrap files are skipped before model injection. `HEARTBEAT.md`
+is omitted on normal runs when heartbeats are disabled for the default agent or
 `agents.defaults.heartbeat.includeSystemPromptSection` is false. Keep injected
 files concise — especially `MEMORY.md`, which can grow over time and lead to
 unexpectedly high context usage and more frequent compaction.

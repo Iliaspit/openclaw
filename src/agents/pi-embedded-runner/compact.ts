@@ -52,6 +52,10 @@ import {
 import { resolveContextWindowInfo } from "../context-window-guard.js";
 import { formatUserTime, resolveUserTimeFormat, resolveUserTimezone } from "../date-time.js";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MODEL, DEFAULT_PROVIDER } from "../defaults.js";
+import {
+  rejectGuardedThinkingFallback,
+  resolveGuardedDelegationExecution,
+} from "../delegation/execution.js";
 import { resolveOpenClawDocsPath } from "../docs-path.js";
 import { resolveHeartbeatPromptForSystemPrompt } from "../heartbeat-system-prompt.js";
 import {
@@ -138,6 +142,7 @@ import {
   collectRegisteredToolNames,
   toSessionToolAllowlist,
 } from "./tool-name-allowlist.js";
+import { resolveLiveToolResultMaxChars } from "./tool-result-truncation.js";
 import {
   logProviderToolSchemaDiagnostics,
   normalizeProviderToolSchemas,
@@ -530,6 +535,7 @@ export async function compactEmbeddedPiSessionDirect(
       abortSignal: runAbortController.signal,
       modelProvider: model.provider,
       modelId,
+      effectiveThinking: thinkLevel,
       modelCompat: extractModelCompat(effectiveModel),
       modelApi: model.api,
       modelContextWindowTokens: ctxInfo.tokens,
@@ -643,6 +649,15 @@ export async function compactEmbeddedPiSessionDirect(
     const { defaultAgentId, sessionAgentId } = resolveSessionAgentIds({
       sessionKey: params.sessionKey,
       config: params.config,
+    });
+    const guardedDelegationAssignment = resolveGuardedDelegationExecution({
+      config: params.config,
+      sessionKey: params.sessionKey,
+      agentId: sessionAgentId,
+      provider,
+      model: modelId,
+      thinking: thinkLevel,
+      workspaceDir: resolvedWorkspace,
     });
     // Resolve channel-specific message actions for system prompt
     const channelActions = runtimeChannel
@@ -850,6 +865,11 @@ export async function compactEmbeddedPiSessionDirect(
       const { customTools } = splitSdkTools({
         tools: effectiveTools,
         sandboxEnabled: !!sandbox?.enabled,
+        liveToolResultMaxChars: resolveLiveToolResultMaxChars({
+          contextWindowTokens: ctxInfo.tokens,
+          cfg: params.config,
+          agentId: sessionAgentId,
+        }),
       });
       // Pi treats `tools` as a name allowlist during session creation. Pass the
       // exact OpenClaw-managed registrations so custom tools survive startup.
@@ -1182,6 +1202,7 @@ export async function compactEmbeddedPiSessionDirect(
             attempted: attemptedThinking,
           });
           if (fallbackThinking) {
+            rejectGuardedThinkingFallback(guardedDelegationAssignment);
             // Near-term provider fix: when compaction hits a reasoning-mandatory
             // endpoint with `off`, retry once with `minimal` instead of surfacing
             // a user-visible failure.

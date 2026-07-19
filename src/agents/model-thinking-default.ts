@@ -4,6 +4,7 @@ import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalLowercaseString,
 } from "../shared/string-coerce.js";
+import { resolveAgentConfig } from "./agent-scope-config.js";
 import type { ModelCatalogEntry } from "./model-catalog.types.js";
 import { legacyModelKey, modelKey, normalizeProviderId } from "./model-selection-normalize.js";
 import { normalizeModelSelection } from "./model-selection-resolve.js";
@@ -15,7 +16,14 @@ export function resolveThinkingDefault(params: {
   provider: string;
   model: string;
   catalog?: ModelCatalogEntry[];
+  agentId?: string;
 }): ThinkLevel {
+  const agentThinkingDefault = params.agentId
+    ? resolveAgentConfig(params.cfg, params.agentId)?.thinkingDefault
+    : undefined;
+  if (agentThinkingDefault) {
+    return agentThinkingDefault;
+  }
   const normalizedProvider = normalizeProviderId(params.provider);
   const normalizedModel = normalizeLowercaseStringOrEmpty(params.model).replace(/\./g, "-");
   const catalogCandidate = Array.isArray(params.catalog)

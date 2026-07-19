@@ -466,6 +466,64 @@ export function describeOpenAIProviderRuntimeContract(load: ProviderRuntimeContr
       expect(model).toBeUndefined();
     });
 
+    it("owns openai gpt-5.6 Sol, Terra, and Luna forward-compat resolution", () => {
+      const provider = requireProviderContractProvider("openai");
+      const registry = {
+        find: (_provider: string, id: string) =>
+          createModel({
+            id,
+            provider: "openai",
+            api: "openai-responses",
+            baseUrl: "https://api.openai.com/v1",
+            input: ["text", "image"],
+            reasoning: true,
+            contextWindow: 1_050_000,
+            maxTokens: 128_000,
+          }),
+      };
+
+      const sol = provider.resolveDynamicModel?.({
+        provider: "openai",
+        modelId: "gpt-5.6-sol",
+        modelRegistry: registry as never,
+      });
+      const terra = provider.resolveDynamicModel?.({
+        provider: "openai",
+        modelId: "gpt-5.6-terra",
+        modelRegistry: registry as never,
+      });
+      const luna = provider.resolveDynamicModel?.({
+        provider: "openai",
+        modelId: "gpt-5.6-luna",
+        modelRegistry: registry as never,
+      });
+
+      expect(sol).toMatchObject({
+        id: "gpt-5.6-sol",
+        provider: "openai",
+        api: "openai-responses",
+        contextWindow: 1_050_000,
+        maxTokens: 128_000,
+        cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+      });
+      expect(terra).toMatchObject({
+        id: "gpt-5.6-terra",
+        provider: "openai",
+        api: "openai-responses",
+        contextWindow: 1_050_000,
+        maxTokens: 128_000,
+        cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
+      });
+      expect(luna).toMatchObject({
+        id: "gpt-5.6-luna",
+        provider: "openai",
+        api: "openai-responses",
+        contextWindow: 1_050_000,
+        maxTokens: 128_000,
+        cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 0 },
+      });
+    });
+
     it("owns openai gpt-5.4 mini forward-compat resolution", () => {
       const provider = requireProviderContractProvider("openai");
       const model = provider.resolveDynamicModel?.({
@@ -591,6 +649,38 @@ export function describeOpenAIProviderRuntimeContract(load: ProviderRuntimeContr
         api: "openai-codex-responses",
         contextWindow: 400_000,
         maxTokens: 128_000,
+      });
+    });
+
+    it("owns forward-compat codex gpt-5.6 models", () => {
+      const provider = requireProviderContractProvider("openai-codex");
+      const model = provider.resolveDynamicModel?.({
+        provider: "openai-codex",
+        modelId: "gpt-5.6-sol",
+        modelRegistry: {
+          find: (_provider: string, id: string) =>
+            id === "gpt-5.5"
+              ? createModel({
+                  id,
+                  api: "openai-codex-responses",
+                  provider: "openai-codex",
+                  baseUrl: "https://chatgpt.com/backend-api",
+                  input: ["text", "image"],
+                  contextWindow: 1_000_000,
+                  maxTokens: 128_000,
+                })
+              : null,
+        } as never,
+      });
+
+      expect(model).toMatchObject({
+        id: "gpt-5.6-sol",
+        provider: "openai-codex",
+        api: "openai-codex-responses",
+        contextWindow: 1_050_000,
+        contextTokens: 272_000,
+        maxTokens: 128_000,
+        cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
       });
     });
 

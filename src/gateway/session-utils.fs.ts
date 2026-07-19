@@ -87,7 +87,7 @@ function shouldSurfaceCustomMessage(entry: Record<string, unknown>): boolean {
   return entry.display === true || customType === SESSIONS_YIELD_CUSTOM_TYPE;
 }
 
-function buildVisibleCustomTranscriptMessage(entry: Record<string, unknown>): unknown | null {
+function buildVisibleCustomTranscriptMessage(entry: Record<string, unknown>): unknown {
   const text = extractVisibleCustomMessageText(entry);
   if (!text) {
     return null;
@@ -195,6 +195,41 @@ export function readSessionMessages(
   return messages;
 }
 
+export function sessionTranscriptHasAssistantMessage(
+  sessionId: string,
+  storePath: string | undefined,
+  sessionFile?: string,
+): boolean {
+  const candidates = resolveSessionTranscriptCandidates(sessionId, storePath, sessionFile);
+  const filePath = candidates.find((p) => fs.existsSync(p));
+  if (!filePath) {
+    return false;
+  }
+
+  const lines = fs.readFileSync(filePath, "utf-8").split(/\r?\n/);
+  let messageSeq = 0;
+  for (const line of lines) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(line);
+      const message = parsedSessionEntryToMessage(parsed, messageSeq + 1);
+      if (!message) {
+        continue;
+      }
+      messageSeq += 1;
+      const role = (message as { role?: unknown }).role;
+      if (role === "assistant") {
+        return true;
+      }
+    } catch {
+      // ignore bad lines
+    }
+  }
+  return false;
+}
+
 export type ReadRecentSessionMessagesOptions = {
   maxMessages: number;
   maxBytes?: number;
@@ -270,7 +305,7 @@ export function readRecentSessionMessages(
   );
 }
 
-function parsedSessionEntryToMessage(parsed: unknown, seq: number): unknown | null {
+function parsedSessionEntryToMessage(parsed: unknown, seq: number): unknown {
   if (!isRecord(parsed)) {
     return null;
   }
@@ -526,6 +561,12 @@ export function readFirstUserMessageFromTranscript(
 
 const LAST_MSG_MAX_BYTES = 16384;
 const LAST_MSG_MAX_LINES = 20;
+const LATEST_YIELD_STATUS_MAX_CHARS = 180;
+
+export type LatestSessionsYieldStatus = {
+  message: string;
+  observedAt: number;
+};
 
 function readLastMessagePreviewFromOpenTranscript(params: {
   fd: number;
@@ -557,6 +598,81 @@ function readLastMessagePreviewFromOpenTranscript(params: {
     }
   }
   return null;
+}
+
+function readLatestSessionsYieldStatusFromOpenTranscript(params: {
+  fd: number;
+  size: number;
+}): LatestSessionsYieldStatus | null {
+  const readStart = Math.max(0, params.size - LAST_MSG_MAX_BYTES);
+  const readLen = Math.min(params.size, LAST_MSG_MAX_BYTES);
+  const buf = Buffer.alloc(readLen);
+  fs.readSync(params.fd, buf, 0, readLen, readStart);
+
+  const chunk = buf.toString("utf-8");
+  const lines = chunk.split(/\r?\n/).filter((line) => line.trim());
+  const tailLines = lines.slice(-LAST_MSG_MAX_LINES);
+
+  for (let i = tailLines.length - 1; i >= 0; i--) {
+    const line = tailLines[i];
+    try {
+      const parsed = JSON.parse(line);
+      if (!isRecord(parsed)) {
+        continue;
+      }
+      const msg = parsed.message as TranscriptMessage | undefined;
+      if (msg?.role === "user" || msg?.role === "assistant") {
+        return null;
+      }
+      if (parsed.type !== "custom_message") {
+        continue;
+      }
+      const customType = typeof parsed.customType === "string" ? parsed.customType : "";
+      if (customType !== SESSIONS_YIELD_CUSTOM_TYPE) {
+        continue;
+      }
+      const text = extractVisibleCustomMessageText(parsed);
+      if (!text) {
+        return null;
+      }
+      return {
+        message: truncatePreviewText(
+          text.replace(/\s+/g, " ").trim(),
+          LATEST_YIELD_STATUS_MAX_CHARS,
+        ),
+        observedAt: parseTranscriptTimestamp(parsed.timestamp),
+      };
+    } catch {
+      // skip malformed tail lines
+    }
+  }
+  return null;
+}
+
+export function readLatestSessionsYieldStatusFromTranscript(
+  sessionId: string,
+  storePath: string | undefined,
+  sessionFile?: string,
+  agentId?: string,
+): LatestSessionsYieldStatus | null {
+  const filePath = findExistingTranscriptPath(sessionId, storePath, sessionFile, agentId);
+  if (!filePath) {
+    return null;
+  }
+
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    return null;
+  }
+  if (stat.size === 0) {
+    return null;
+  }
+
+  return withOpenTranscriptFd(filePath, (fd) =>
+    readLatestSessionsYieldStatusFromOpenTranscript({ fd, size: stat.size }),
+  );
 }
 
 export function readLastMessagePreviewFromTranscript(

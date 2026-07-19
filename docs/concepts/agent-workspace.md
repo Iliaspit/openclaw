@@ -18,6 +18,10 @@ elsewhere on the host unless sandboxing is enabled. If you need isolation, use
 [`agents.defaults.sandbox`](/gateway/sandboxing) (and/or per‑agent sandbox config).
 When sandboxing is enabled and `workspaceAccess` is not `"rw"`, tools operate
 inside a sandbox workspace under `~/.openclaw/sandboxes`, not your host workspace.
+Guarded delegation principals are the exception: a guarded read-only controller or
+worker receives its assigned workspace directly at the sandbox workdir with a
+read-only mount. This keeps relative paths bound to the protected assignment while
+still preventing repository writes.
 
 ## Default location
 
@@ -70,12 +74,12 @@ These are the standard files OpenClaw expects inside the workspace:
 
 - `SOUL.md`
   - Persona, tone, and boundaries.
-  - Loaded every session.
+  - Loaded every session when it contains substantive, non-template guidance.
   - Guide: [SOUL.md Personality Guide](/concepts/soul)
 
 - `USER.md`
   - Who the user is and how to address them.
-  - Loaded every session.
+  - Loaded every session when it contains substantive, non-template guidance.
 
 - `IDENTITY.md`
   - The agent's name, vibe, and emoji.

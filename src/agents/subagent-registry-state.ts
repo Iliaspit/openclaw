@@ -2,10 +2,7 @@ import {
   loadSubagentRegistryFromDisk,
   saveSubagentRegistryToDisk,
 } from "./subagent-registry.store.js";
-import type {
-  SubagentRunRecord,
-  SubagentSliceBudgetRecord,
-} from "./subagent-registry.types.js";
+import type { SubagentRunRecord, SubagentSliceBudgetRecord } from "./subagent-registry.types.js";
 
 export function persistSubagentRunsToDisk(
   runs: Map<string, SubagentRunRecord>,

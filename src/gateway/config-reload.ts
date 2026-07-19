@@ -100,8 +100,17 @@ export type GatewayConfigReloader = {
 
 export function startGatewayConfigReloader(opts: {
   initialConfig: OpenClawConfig;
+  /** Optional source config used for the first change comparison. */
+  initialCompareConfig?: OpenClawConfig;
   initialInternalWriteHash?: string | null;
   readSnapshot: () => Promise<ConfigFileSnapshot>;
+  recoverSnapshot?: (snapshot: ConfigFileSnapshot, reason: string) => Promise<boolean>;
+  promoteSnapshot?: (snapshot: ConfigFileSnapshot, reason: string) => Promise<boolean>;
+  onRecovered?: (params: {
+    reason: string;
+    snapshot: ConfigFileSnapshot;
+    recoveredSnapshot: ConfigFileSnapshot;
+  }) => void | Promise<void>;
   onHotReload: (plan: GatewayReloadPlan, nextConfig: OpenClawConfig) => Promise<void>;
   onRestart: (plan: GatewayReloadPlan, nextConfig: OpenClawConfig) => void | Promise<void>;
   subscribeToWrites?: (listener: (event: ConfigWriteNotification) => void) => () => void;
@@ -113,6 +122,7 @@ export function startGatewayConfigReloader(opts: {
   watchPath: string;
 }): GatewayConfigReloader {
   let currentConfig = opts.initialConfig;
+  let currentCompareConfig = opts.initialCompareConfig ?? opts.initialConfig;
   let settings = resolveGatewayReloadSettings(currentConfig);
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let pending = false;
@@ -181,8 +191,9 @@ export function startGatewayConfigReloader(opts: {
   };
 
   const applySnapshot = async (nextConfig: OpenClawConfig) => {
-    const changedPaths = diffConfigPaths(currentConfig, nextConfig);
+    const changedPaths = diffConfigPaths(currentCompareConfig, nextConfig);
     currentConfig = nextConfig;
+    currentCompareConfig = nextConfig;
     settings = resolveGatewayReloadSettings(nextConfig);
     if (changedPaths.length === 0) {
       return;
@@ -224,6 +235,37 @@ export function startGatewayConfigReloader(opts: {
     await opts.onHotReload(plan, nextConfig);
   };
 
+  const recoverInvalidSnapshot = async (
+    snapshot: ConfigFileSnapshot,
+  ): Promise<ConfigFileSnapshot | null> => {
+    if (!opts.recoverSnapshot) {
+      return null;
+    }
+    const reason = "invalid-config";
+    const recovered = await opts.recoverSnapshot(snapshot, reason);
+    if (!recovered) {
+      return null;
+    }
+    const recoveredSnapshot = await opts.readSnapshot();
+    if (!recoveredSnapshot.exists || !recoveredSnapshot.valid) {
+      opts.log.warn("config reload recovery did not produce a valid config snapshot");
+      return null;
+    }
+    await opts.onRecovered?.({ reason, snapshot, recoveredSnapshot });
+    return recoveredSnapshot;
+  };
+
+  const promoteAcceptedSnapshot = async (snapshot: ConfigFileSnapshot, reason: string) => {
+    if (!opts.promoteSnapshot || !snapshot.exists || !snapshot.valid) {
+      return;
+    }
+    try {
+      await opts.promoteSnapshot(snapshot, reason);
+    } catch (err) {
+      opts.log.warn(`config reload last-known-good promotion failed: ${String(err)}`);
+    }
+  };
+
   const runReload = async () => {
     if (stopped) {
       return;
@@ -255,10 +297,16 @@ export function startGatewayConfigReloader(opts: {
       if (handleMissingSnapshot(snapshot)) {
         return;
       }
-      if (handleInvalidSnapshot(snapshot)) {
+      const acceptedSnapshot = snapshot.valid ? snapshot : await recoverInvalidSnapshot(snapshot);
+      if (!acceptedSnapshot) {
+        handleInvalidSnapshot(snapshot);
         return;
       }
-      await applySnapshot(snapshot.config);
+      await applySnapshot(acceptedSnapshot.config);
+      await promoteAcceptedSnapshot(
+        acceptedSnapshot,
+        acceptedSnapshot === snapshot ? "reload" : "reload-recovery",
+      );
     } catch (err) {
       opts.log.error(`config reload failed: ${String(err)}`);
     } finally {

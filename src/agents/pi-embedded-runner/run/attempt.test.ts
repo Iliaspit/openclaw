@@ -18,6 +18,7 @@ import {
   resolvePromptBuildHookResult,
   resolvePromptModeForSession,
   shouldWarnOnOrphanedUserRepair,
+  wrapStreamFnNormalizeTextToolTags,
   wrapStreamFnRepairMalformedToolCallArguments,
   wrapStreamFnSanitizeMalformedToolCalls,
   wrapStreamFnTrimToolCallNames,
@@ -196,8 +197,8 @@ describe("composeSystemPromptWithHookContext", () => {
     expect(turns[0]?.prompt.startsWith("hello")).toBe(true);
     expect(turns[1]?.prompt).toBe("hello again");
     expect(turns[2]?.prompt.startsWith("hello once more")).toBe(true);
-    expect(turns[0]?.prompt).toContain("[Bootstrap truncation warning]");
-    expect(turns[2]?.prompt).toContain("[Bootstrap truncation warning]");
+    expect(turns[0]?.prompt).toContain("[Bootstrap context budget warning]");
+    expect(turns[2]?.prompt).toContain("[Bootstrap context budget warning]");
   });
 });
 
@@ -1318,6 +1319,107 @@ describe("wrapStreamFnTrimToolCallNames", () => {
     expect(finalToolCallB.name).toBe("write");
     expect(finalToolCallA.id).toBe("edit:22");
     expect(finalToolCallB.id).toBe("call_auto_1");
+  });
+});
+
+describe("wrapStreamFnNormalizeTextToolTags", () => {
+  async function invokeWrappedStream(baseFn: (...args: never[]) => unknown) {
+    return await invokeWrappedTestStream(
+      (innerBaseFn) =>
+        wrapStreamFnNormalizeTextToolTags(
+          innerBaseFn as never,
+          new Set(["sessions_spawn", "sessions_yield", "exec"]),
+        ),
+      baseFn,
+    );
+  }
+
+  it("converts leading OpenClaw text tool tags into real tool calls", async () => {
+    const finalMessage = {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "I need a helper." },
+        {
+          type: "text",
+          text:
+            '<sessions_spawn agentId="planner-helper" label="helper-contract-v2-gap-audit-1" ' +
+            'lightContext="false" prompt="Line one\\nAudit \\"Contract V2\\"" />',
+        },
+        { type: "text", text: "Current status: waiting on helper-contract-v2-gap-audit-1." },
+      ],
+      stopReason: "stop",
+    };
+    const baseFn = vi.fn(() =>
+      createFakeStream({
+        events: [],
+        resultMessage: finalMessage,
+      }),
+    );
+
+    const stream = await invokeWrappedStream(baseFn);
+    const result = (await stream.result()) as typeof finalMessage;
+
+    expect(result.stopReason).toBe("toolUse");
+    expect(result.content).toEqual([
+      { type: "thinking", thinking: "I need a helper." },
+      {
+        type: "toolCall",
+        id: expect.stringMatching(/^call_text_sessions_spawn_/),
+        name: "sessions_spawn",
+        arguments: {
+          agentId: "planner-helper",
+          label: "helper-contract-v2-gap-audit-1",
+          lightContext: false,
+          task: 'Line one\nAudit "Contract V2"',
+        },
+      },
+    ]);
+  });
+
+  it("maps sessions_yield status text to the real message parameter", async () => {
+    const finalMessage = {
+      role: "assistant",
+      content: [
+        {
+          type: "text",
+          text: '<sessions_yield status="awaiting helper-contract-v2-gap-audit-1 result" />',
+        },
+      ],
+      stopReason: "stop",
+    };
+    const baseFn = vi.fn(() => createFakeStream({ events: [], resultMessage: finalMessage }));
+
+    const stream = await invokeWrappedStream(baseFn);
+    const result = (await stream.result()) as typeof finalMessage;
+
+    expect(result).toMatchObject({
+      stopReason: "toolUse",
+      content: [
+        {
+          type: "toolCall",
+          name: "sessions_yield",
+          arguments: { message: "awaiting helper-contract-v2-gap-audit-1 result" },
+        },
+      ],
+    });
+  });
+
+  it("does not convert tool-looking text after visible prose", async () => {
+    const finalMessage = {
+      role: "assistant",
+      content: [
+        { type: "text", text: "I would call a tool like this:" },
+        { type: "text", text: '<exec cmd="pwd" />' },
+      ],
+      stopReason: "stop",
+    };
+    const baseFn = vi.fn(() => createFakeStream({ events: [], resultMessage: finalMessage }));
+
+    const stream = await invokeWrappedStream(baseFn);
+    const result = await stream.result();
+
+    expect(result).toBe(finalMessage);
+    expect(finalMessage.stopReason).toBe("stop");
   });
 });
 

@@ -39,6 +39,25 @@ export type PluginManifestModelSupport = {
   modelPatterns?: string[];
 };
 
+export type PluginManifestProviderEndpoint = {
+  endpointClass: string;
+  hosts?: string[];
+  hostSuffixes?: string[];
+  baseUrls?: string[];
+  googleVertexRegion?: string;
+  googleVertexRegionHostSuffix?: string;
+};
+
+type PluginManifestMediaUnderstandingCapability = "image" | "audio" | "video";
+
+export type PluginManifestMediaUnderstandingProviderMetadata = {
+  capabilities?: PluginManifestMediaUnderstandingCapability[];
+  defaultModels?: Partial<Record<PluginManifestMediaUnderstandingCapability, string>>;
+  autoPriority?: Partial<Record<PluginManifestMediaUnderstandingCapability, number>>;
+  nativeDocumentInputs?: Array<"pdf">;
+  documentModels?: Partial<Record<"pdf", { textExtraction?: string; image?: string | false }>>;
+};
+
 export type PluginManifestActivationCapability = "provider" | "channel" | "tool" | "hook";
 
 export type PluginManifestActivation = {
@@ -161,8 +180,14 @@ export type PluginManifest = {
    * Use this for shorthand model refs that omit an explicit provider prefix.
    */
   modelSupport?: PluginManifestModelSupport;
+  /** Cheap provider endpoint metadata used before plugin runtime loads. */
+  providerEndpoints?: PluginManifestProviderEndpoint[];
   /** Cheap startup activation lookup for plugin-owned CLI inference backends. */
   cliBackends?: string[];
+  /** Provider/CLI refs whose plugin owns synthetic auth resolution. */
+  syntheticAuthRefs?: string[];
+  /** Bundled-plugin placeholder auth values that are not secrets. */
+  nonSecretAuthMarkers?: string[];
   /**
    * Plugin-owned command aliases that should resolve to this plugin during
    * config diagnostics before runtime loads.
@@ -195,12 +220,19 @@ export type PluginManifest = {
    * compat wiring, and contract coverage without importing plugin runtime.
    */
   contracts?: PluginManifestContracts;
+  /** Cheap media-understanding defaults exposed before plugin runtime loads. */
+  mediaUnderstandingProviderMetadata?: Record<
+    string,
+    PluginManifestMediaUnderstandingProviderMetadata
+  >;
   /** Manifest-owned config behavior consumed by generic core helpers. */
   configContracts?: PluginManifestConfigContracts;
   channelConfigs?: Record<string, PluginManifestChannelConfig>;
 };
 
 export type PluginManifestContracts = {
+  embeddedExtensionFactories?: string[];
+  externalAuthProviders?: string[];
   memoryEmbeddingProviders?: string[];
   speechProviders?: string[];
   realtimeTranscriptionProviders?: string[];
@@ -287,11 +319,119 @@ function normalizeStringRecord(value: unknown): Record<string, string> | undefin
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
+function normalizeManifestProviderEndpoints(
+  value: unknown,
+): PluginManifestProviderEndpoint[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const endpoints: PluginManifestProviderEndpoint[] = [];
+  for (const rawEndpoint of value) {
+    if (!isRecord(rawEndpoint)) {
+      continue;
+    }
+    const endpointClass = normalizeOptionalString(rawEndpoint.endpointClass);
+    if (!endpointClass) {
+      continue;
+    }
+    const hosts = normalizeTrimmedStringList(rawEndpoint.hosts).map((host) => host.toLowerCase());
+    const hostSuffixes = normalizeTrimmedStringList(rawEndpoint.hostSuffixes).map((host) =>
+      host.toLowerCase(),
+    );
+    const baseUrls = normalizeTrimmedStringList(rawEndpoint.baseUrls);
+    if (hosts.length === 0 && hostSuffixes.length === 0 && baseUrls.length === 0) {
+      continue;
+    }
+    const googleVertexRegion = normalizeOptionalString(rawEndpoint.googleVertexRegion);
+    const googleVertexRegionHostSuffix = normalizeOptionalString(
+      rawEndpoint.googleVertexRegionHostSuffix,
+    )?.toLowerCase();
+    endpoints.push({
+      endpointClass,
+      ...(hosts.length > 0 ? { hosts } : {}),
+      ...(hostSuffixes.length > 0 ? { hostSuffixes } : {}),
+      ...(baseUrls.length > 0 ? { baseUrls } : {}),
+      ...(googleVertexRegion ? { googleVertexRegion } : {}),
+      ...(googleVertexRegionHostSuffix ? { googleVertexRegionHostSuffix } : {}),
+    });
+  }
+  return endpoints.length > 0 ? endpoints : undefined;
+}
+
+const MEDIA_UNDERSTANDING_CAPABILITIES = new Set(["image", "audio", "video"]);
+
+function normalizeMediaUnderstandingProviderMetadata(
+  value: unknown,
+): Record<string, PluginManifestMediaUnderstandingProviderMetadata> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const normalized: Record<string, PluginManifestMediaUnderstandingProviderMetadata> = {};
+  for (const [providerId, rawMetadata] of Object.entries(value)) {
+    if (!providerId.trim() || !isRecord(rawMetadata)) {
+      continue;
+    }
+    const capabilities = normalizeTrimmedStringList(rawMetadata.capabilities).filter((entry) =>
+      MEDIA_UNDERSTANDING_CAPABILITIES.has(entry),
+    ) as PluginManifestMediaUnderstandingCapability[];
+    const defaultModels: Partial<Record<PluginManifestMediaUnderstandingCapability, string>> = {};
+    const autoPriority: Partial<Record<PluginManifestMediaUnderstandingCapability, number>> = {};
+    for (const capability of MEDIA_UNDERSTANDING_CAPABILITIES) {
+      const typedCapability = capability as PluginManifestMediaUnderstandingCapability;
+      const rawDefaultModels = isRecord(rawMetadata.defaultModels)
+        ? rawMetadata.defaultModels
+        : undefined;
+      const model = normalizeOptionalString(rawDefaultModels?.[capability]);
+      if (model) {
+        defaultModels[typedCapability] = model;
+      }
+      const rawAutoPriority = isRecord(rawMetadata.autoPriority)
+        ? rawMetadata.autoPriority
+        : undefined;
+      const priority = rawAutoPriority?.[capability];
+      if (typeof priority === "number" && Number.isFinite(priority)) {
+        autoPriority[typedCapability] = priority;
+      }
+    }
+    const nativeDocumentInputs = normalizeTrimmedStringList(
+      rawMetadata.nativeDocumentInputs,
+    ).filter((entry): entry is "pdf" => entry === "pdf");
+    const rawPdf = isRecord(rawMetadata.documentModels)
+      ? rawMetadata.documentModels.pdf
+      : undefined;
+    const pdf = isRecord(rawPdf)
+      ? {
+          ...(normalizeOptionalString(rawPdf.textExtraction)
+            ? { textExtraction: normalizeOptionalString(rawPdf.textExtraction) }
+            : {}),
+          ...(rawPdf.image === false
+            ? { image: false as const }
+            : normalizeOptionalString(rawPdf.image)
+              ? { image: normalizeOptionalString(rawPdf.image) }
+              : {}),
+        }
+      : undefined;
+    const metadata: PluginManifestMediaUnderstandingProviderMetadata = {
+      ...(capabilities.length > 0 ? { capabilities } : {}),
+      ...(Object.keys(defaultModels).length > 0 ? { defaultModels } : {}),
+      ...(Object.keys(autoPriority).length > 0 ? { autoPriority } : {}),
+      ...(nativeDocumentInputs.length > 0 ? { nativeDocumentInputs } : {}),
+      ...(pdf && Object.keys(pdf).length > 0 ? { documentModels: { pdf } } : {}),
+    };
+    if (Object.keys(metadata).length > 0) {
+      normalized[providerId.trim()] = metadata;
+    }
+  }
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
 function normalizeManifestContracts(value: unknown): PluginManifestContracts | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
 
+  const embeddedExtensionFactories = normalizeTrimmedStringList(value.embeddedExtensionFactories);
+  const externalAuthProviders = normalizeTrimmedStringList(value.externalAuthProviders);
   const memoryEmbeddingProviders = normalizeTrimmedStringList(value.memoryEmbeddingProviders);
   const speechProviders = normalizeTrimmedStringList(value.speechProviders);
   const realtimeTranscriptionProviders = normalizeTrimmedStringList(
@@ -306,6 +446,8 @@ function normalizeManifestContracts(value: unknown): PluginManifestContracts | u
   const webSearchProviders = normalizeTrimmedStringList(value.webSearchProviders);
   const tools = normalizeTrimmedStringList(value.tools);
   const contracts = {
+    ...(embeddedExtensionFactories.length > 0 ? { embeddedExtensionFactories } : {}),
+    ...(externalAuthProviders.length > 0 ? { externalAuthProviders } : {}),
     ...(memoryEmbeddingProviders.length > 0 ? { memoryEmbeddingProviders } : {}),
     ...(speechProviders.length > 0 ? { speechProviders } : {}),
     ...(realtimeTranscriptionProviders.length > 0 ? { realtimeTranscriptionProviders } : {}),
@@ -700,7 +842,10 @@ export function loadPluginManifest(
   const providers = normalizeTrimmedStringList(raw.providers);
   const providerDiscoveryEntry = normalizeOptionalString(raw.providerDiscoveryEntry);
   const modelSupport = normalizeManifestModelSupport(raw.modelSupport);
+  const providerEndpoints = normalizeManifestProviderEndpoints(raw.providerEndpoints);
   const cliBackends = normalizeTrimmedStringList(raw.cliBackends);
+  const syntheticAuthRefs = normalizeTrimmedStringList(raw.syntheticAuthRefs);
+  const nonSecretAuthMarkers = normalizeTrimmedStringList(raw.nonSecretAuthMarkers);
   const commandAliases = normalizeManifestCommandAliases(raw.commandAliases);
   const providerAuthEnvVars = normalizeStringListRecord(raw.providerAuthEnvVars);
   const providerAuthAliases = normalizeStringRecord(raw.providerAuthAliases);
@@ -711,6 +856,9 @@ export function loadPluginManifest(
   const qaRunners = normalizeManifestQaRunners(raw.qaRunners);
   const skills = normalizeTrimmedStringList(raw.skills);
   const contracts = normalizeManifestContracts(raw.contracts);
+  const mediaUnderstandingProviderMetadata = normalizeMediaUnderstandingProviderMetadata(
+    raw.mediaUnderstandingProviderMetadata,
+  );
   const configContracts = normalizeManifestConfigContracts(raw.configContracts);
   const channelConfigs = normalizeChannelConfigs(raw.channelConfigs);
 
@@ -734,7 +882,10 @@ export function loadPluginManifest(
       providers,
       providerDiscoveryEntry,
       modelSupport,
+      providerEndpoints,
       cliBackends,
+      syntheticAuthRefs,
+      nonSecretAuthMarkers,
       commandAliases,
       providerAuthEnvVars,
       providerAuthAliases,
@@ -749,6 +900,7 @@ export function loadPluginManifest(
       version,
       uiHints,
       contracts,
+      mediaUnderstandingProviderMetadata,
       configContracts,
       channelConfigs,
     },
@@ -791,6 +943,21 @@ export type PluginPackageChannel = {
     specifier?: string;
     exportName?: string;
   };
+  doctorCapabilities?: PluginPackageChannelDoctorCapabilities;
+  cliAddOptions?: readonly PluginPackageChannelCliOption[];
+};
+
+export type PluginPackageChannelDoctorCapabilities = {
+  dmAllowFromMode?: "topOnly" | "topOrNested" | "nestedOnly";
+  groupModel?: "sender" | "route" | "hybrid";
+  groupAllowFromFallbackToAllowFrom?: boolean;
+  warnOnEmptyGroupSenderAllowlist?: boolean;
+};
+
+export type PluginPackageChannelCliOption = {
+  flags: string;
+  description: string;
+  defaultValue?: boolean | string;
 };
 
 export type PluginPackageInstall = {
@@ -798,6 +965,7 @@ export type PluginPackageInstall = {
   localPath?: string;
   defaultChoice?: "npm" | "local";
   minHostVersion?: string;
+  expectedIntegrity?: string;
   allowInvalidConfigRecovery?: boolean;
 };
 
@@ -809,9 +977,17 @@ export type OpenClawPackageStartup = {
   deferConfiguredChannelFullLoadUntilAfterListen?: boolean;
 };
 
+export type OpenClawPackageSetupFeatures = Partial<
+  Record<"configPromotion" | "legacyStateMigrations" | "legacySessionSurfaces", boolean>
+> &
+  Record<string, boolean | undefined>;
+
 export type OpenClawPackageManifest = {
   extensions?: string[];
+  runtimeExtensions?: string[];
   setupEntry?: string;
+  runtimeSetupEntry?: string;
+  setupFeatures?: OpenClawPackageSetupFeatures;
   channel?: PluginPackageChannel;
   install?: PluginPackageInstall;
   startup?: OpenClawPackageStartup;

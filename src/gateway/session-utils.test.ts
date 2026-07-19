@@ -966,6 +966,30 @@ describe("listSessionsFromStore selected model display", () => {
     expect(result.sessions[0]?.modelProvider).toBe("anthropic");
     expect(result.sessions[0]?.model).toBe("claude-opus-4-6");
   });
+
+  test("includes an agent's configured thinking default in its session options", () => {
+    const cfg = {
+      agents: {
+        defaults: { model: { primary: "openai-codex/gpt-5.6-sol" } },
+        list: [{ id: "planner", default: true, thinkingDefault: "xhigh" }],
+      },
+    } as OpenClawConfig;
+
+    const result = listSessionsFromStore({
+      cfg,
+      storePath: "/tmp/sessions.json",
+      store: {
+        "agent:planner:main": {
+          sessionId: "sess-planner",
+          updatedAt: Date.now(),
+        } as SessionEntry,
+      },
+      opts: {},
+    });
+
+    expect(result.sessions[0]?.thinkingDefault).toBe("xhigh");
+    expect(result.sessions[0]?.thinkingOptions).toContain("xhigh");
+  });
 });
 
 describe("resolveSessionModelIdentityRef", () => {

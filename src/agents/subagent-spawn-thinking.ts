@@ -1,6 +1,6 @@
 import { normalizeThinkLevel } from "../auto-reply/thinking.shared.js";
-import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { DelegationGuardThinkingLevel } from "../config/types.agents.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;

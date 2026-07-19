@@ -1371,6 +1371,37 @@ describe("child route health", () => {
     ).resolves.toEqual({ ok: true });
   });
 
+  it("recovers a complete route-health store with trailing garbage", async () => {
+    const childSessionKey = "agent:main:subagent:trailing-garbage";
+    const healthPath = resolveChildRouteHealthPath();
+    const recorded = await recordChildRouteHealthEvent({
+      code: "agent_lifecycle_error",
+      status: "success",
+      source: "agent_lifecycle",
+      childSessionKey,
+      runId: "run-trailing-garbage",
+      reason: "ordinary execution completed successfully",
+    });
+    expect(recorded).toEqual(expect.objectContaining({ ok: true }));
+    await fs.appendFile(healthPath, "\ntrailing-garbage", "utf8");
+
+    await expect(guardFreshChildSpawnAuth({ providerId: "openai-codex" })).resolves.toEqual({
+      ok: true,
+    });
+    await expect(
+      registerChildRoutePendingSpawn({
+        childSessionKey,
+        requesterSessionKey: "agent:main:main",
+        childTargetKind: "subagent",
+        idempotencyKey: "idem-trailing-garbage",
+        runId: "run-trailing-garbage",
+      }),
+    ).resolves.toEqual(expect.objectContaining({ ok: true }));
+    await expect(fs.readFile(healthPath, "utf8").then((raw) => JSON.parse(raw))).resolves.toEqual(
+      expect.objectContaining({ version: 1 }),
+    );
+  });
+
   it("fails closed with a tombstone when reset-style repair clears cannot be persisted", async () => {
     const childSessionKey = "agent:main:subagent:reset-tombstone";
     const healthPath = resolveChildRouteHealthPath();

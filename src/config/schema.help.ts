@@ -192,6 +192,24 @@ export const FIELD_HELP: Record<string, string> = {
     "Optional allowlist of skills for this agent. If omitted, the agent inherits agents.defaults.skills when set; otherwise skills stay unrestricted. Set [] for no skills. An explicit list fully replaces inherited defaults instead of merging with them.",
   agents:
     "Agent runtime configuration root covering defaults and explicit agent entries used for routing and execution context. Keep this section explicit so model/tool behavior stays predictable across multi-agent workflows.",
+  "agents.delegationGuard":
+    "Optional gateway-owned delegation authority. When enabled, guarded controllers and workers use immutable assignments, exact thinking requirements, protected evidence, and one-use route tokens.",
+  "agents.delegationGuard.enabled":
+    "Enables the delegation guard. Leave disabled or omit this block to preserve legacy unguarded delegation behavior.",
+  "agents.delegationGuard.mode":
+    "Audit records guarded delegation decisions without rejecting them; enforce rejects unauthorized or stale operations.",
+  "agents.delegationGuard.controllers":
+    "Controller agents allowed to create slices, issue assignments, freeze waves, validate completion, consolidate remediation, and roll back. Controllers require exact xhigh thinking.",
+  "agents.delegationGuard.workers":
+    "One agent per guarded helper, implementer, tester, reviewer, and QA role, including its exact thinking requirement and read-only or read-write workspace policy.",
+  "agents.delegationGuard.validator":
+    "Digest-pinned, operator-installed validator metadata. The entrypoint must remain outside agent workspaces and validator updates require a new runtime epoch.",
+  "agents.delegationGuard.validator.sha256":
+    "Lowercase SHA-256 digest used to pin the installed validator artifact.",
+  "agents.delegationGuard.validator.entrypoint":
+    "Operator-controlled validator entrypoint outside guarded agent workspaces.",
+  "agents.delegationGuard.validator.maxOutputBytes":
+    "Maximum validator output accepted by the gateway. Larger or malformed output is rejected fail closed.",
   "agents.defaults":
     "Shared default settings inherited by agents unless overridden per entry in agents.list. Use defaults to enforce consistent baseline behavior and reduce duplicated per-agent configuration.",
   "agents.defaults.skills":

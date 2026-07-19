@@ -377,6 +377,79 @@
         "plan.0.step"
       ]
     },
+    "delegation_guard": {
+      "emoji": "🛡️",
+      "title": "Delegation Guard",
+      "actions": {
+        "create_slice": {
+          "label": "create slice",
+          "detailKeys": [
+            "manifest.kind"
+          ]
+        },
+        "issue_assignment": {
+          "label": "issue assignment",
+          "detailKeys": [
+            "sliceId",
+            "workerAgentId",
+            "purpose"
+          ]
+        },
+        "freeze_wave": {
+          "label": "freeze wave",
+          "detailKeys": [
+            "sliceId",
+            "requiredRoles"
+          ]
+        },
+        "issue_route_token": {
+          "label": "issue route token",
+          "detailKeys": [
+            "assignmentId",
+            "routeKind",
+            "targetSessionKey"
+          ]
+        },
+        "validate_completion": {
+          "label": "validate completion",
+          "detailKeys": [
+            "assignmentId"
+          ]
+        },
+        "format_correction": {
+          "label": "format correction",
+          "detailKeys": [
+            "assignmentId",
+            "originalReceiptId"
+          ]
+        },
+        "consolidated_remediation": {
+          "label": "consolidate remediation",
+          "detailKeys": [
+            "sliceId",
+            "sourceWaveId"
+          ]
+        },
+        "rollback": {
+          "label": "rollback",
+          "detailKeys": [
+            "reason"
+          ]
+        },
+        "status": {
+          "label": "status"
+        }
+      }
+    },
+    "delegation_report": {
+      "emoji": "🧾",
+      "title": "Delegation Report",
+      "detailKeys": [
+        "report.status",
+        "report.coverage",
+        "report.conclusionScope"
+      ]
+    },
     "gateway": {
       "emoji": "🔌",
       "title": "Gateway",

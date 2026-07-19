@@ -6,8 +6,11 @@ import type {
 } from "./detached-task-runtime-contract.js";
 import { getRegisteredDetachedTaskLifecycleRuntime } from "./detached-task-runtime-state.js";
 import {
+  assertTaskRegistryDurableLookupReady,
   cancelTaskById,
   createTaskRecord,
+  findTaskByExactRunScope,
+  findTaskByRunId,
   findLatestTaskForFlowId,
   getTaskById,
   isParentFlowLinkError,
@@ -18,6 +21,7 @@ import {
   markTaskTerminalByRunId,
   reassignTaskRunByRunId as reassignTaskRunByRunIdInternal,
   recordTaskProgressByRunId,
+  releaseTaskCleanupHoldById,
   setTaskRunDeliveryStatusByRunId,
 } from "./runtime-internal.js";
 import { getTaskFlowByIdForOwner } from "./task-flow-owner-access.js";
@@ -90,6 +94,26 @@ function ensureSingleTaskFlow(params: {
 
 type TaskRunCreateParams = DetachedTaskCreateParams;
 type RunningTaskRunCreateParams = DetachedRunningTaskCreateParams;
+
+export function assertDurableTaskLookupReady(): void {
+  assertTaskRegistryDurableLookupReady();
+}
+
+export function findTaskRunByRunId(runId: string): TaskRecord | undefined {
+  return findTaskByRunId(runId);
+}
+
+export function findTaskRunByExactScope(params: {
+  runId: string;
+  runtime: TaskRuntime;
+  childSessionKey: string;
+}): TaskRecord | undefined {
+  return findTaskByExactRunScope(params);
+}
+
+export function releaseTaskRunCleanupHold(taskId: string): TaskRecord | null {
+  return releaseTaskCleanupHoldById(taskId);
+}
 
 export function createQueuedTaskRun(params: TaskRunCreateParams): TaskRecord {
   const task = createTaskRecord({
@@ -168,6 +192,7 @@ export function completeTaskRunByRunId(params: {
   progressSummary?: string | null;
   terminalSummary?: string | null;
   terminalOutcome?: TaskTerminalOutcome | null;
+  cleanupAfter?: number;
 }) {
   return markTaskTerminalByRunId({
     runId: params.runId,
@@ -179,6 +204,7 @@ export function completeTaskRunByRunId(params: {
     progressSummary: params.progressSummary,
     terminalSummary: params.terminalSummary,
     terminalOutcome: params.terminalOutcome,
+    cleanupAfter: params.cleanupAfter,
   });
 }
 
@@ -192,6 +218,7 @@ export function failTaskRunByRunId(params: {
   error?: string;
   progressSummary?: string | null;
   terminalSummary?: string | null;
+  cleanupAfter?: number;
 }) {
   return markTaskTerminalByRunId({
     runId: params.runId,
@@ -203,6 +230,7 @@ export function failTaskRunByRunId(params: {
     error: params.error,
     progressSummary: params.progressSummary,
     terminalSummary: params.terminalSummary,
+    cleanupAfter: params.cleanupAfter,
   });
 }
 

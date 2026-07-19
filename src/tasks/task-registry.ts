@@ -60,7 +60,18 @@ const taskIdsByRelatedSessionKey = new Map<string, Set<string>>();
 const tasksWithPendingDelivery = new Set<string>();
 let listenerStarted = false;
 let listenerStop: (() => void) | null = null;
-let restoreAttempted = false;
+// "pending" retries on a cooldown so a corrupt-DB restore failure at startup
+// can recover once the DB is repaired without a full gateway restart. Once
+// anything settles the in-memory registry (a successful restore, or a task
+// created while restore is still down) we stop retrying: merging a
+// since-repaired snapshot on top of live state at that point risks clobbering
+// data that only exists in memory.
+type TaskRegistryRestoreOutcome = "pending" | "settled";
+let restoreOutcome: TaskRegistryRestoreOutcome = "pending";
+let nextRestoreRetryAt = 0;
+let lastRestoreError: unknown;
+let lastPersistenceError: unknown;
+const RESTORE_RETRY_COOLDOWN_MS = 30_000;
 type TaskRegistryDeliveryRuntime = Pick<
   typeof import("./task-registry-delivery-runtime.js"),
   "sendMessage"
@@ -227,6 +238,24 @@ function persistTaskUpsert(task: TaskRecord) {
     store.upsertTask(task);
     return;
   }
+  store.saveSnapshot({
+    tasks,
+    deliveryStates: taskDeliveryStates,
+  });
+}
+
+function persistTaskCreate(task: TaskRecord) {
+  const store = getTaskRegistryStore();
+  const deliveryState = taskDeliveryStates.get(task.taskId);
+  if (store.upsertTaskWithDeliveryState) {
+    store.upsertTaskWithDeliveryState({
+      task,
+      ...(deliveryState ? { deliveryState } : {}),
+    });
+    return;
+  }
+  // Creation publishes the task and its delivery owner as one durable unit.
+  // Stores without the incremental transaction must use their snapshot write.
   store.saveSnapshot({
     tasks,
     deliveryStates: taskDeliveryStates,
@@ -851,12 +880,26 @@ function syncManagedFlowCancellationFromTask(task: TaskRecord): void {
 }
 
 function restoreTaskRegistryOnce() {
-  if (restoreAttempted) {
+  if (restoreOutcome === "settled") {
     return;
   }
-  restoreAttempted = true;
+  if (tasks.size > 0 || taskDeliveryStates.size > 0) {
+    // Something has already populated the in-memory registry (either an
+    // earlier successful restore, or a task created directly while restore
+    // was still failing). Loading a snapshot now could stomp on state that
+    // only exists in memory, so treat the registry as settled and stop
+    // retrying; recovering an external repair from here on requires a
+    // restart, same as before this cooldown was added.
+    restoreOutcome = "settled";
+    return;
+  }
+  if (Date.now() < nextRestoreRetryAt) {
+    return;
+  }
   try {
     const restored = getTaskRegistryStore().loadSnapshot();
+    restoreOutcome = "settled";
+    lastRestoreError = undefined;
     if (restored.tasks.size === 0 && restored.deliveryStates.size === 0) {
       return;
     }
@@ -875,6 +918,8 @@ function restoreTaskRegistryOnce() {
       tasks: snapshotTaskRecords(tasks),
     }));
   } catch (error) {
+    lastRestoreError = error;
+    nextRestoreRetryAt = Date.now() + RESTORE_RETRY_COOLDOWN_MS;
     log.warn("Failed to restore task registry", { error });
   }
 }
@@ -882,6 +927,20 @@ function restoreTaskRegistryOnce() {
 export function ensureTaskRegistryReady() {
   restoreTaskRegistryOnce();
   ensureListener();
+}
+
+export function assertTaskRegistryDurableLookupReady(): void {
+  restoreTaskRegistryOnce();
+  ensureListener();
+  if (
+    restoreOutcome !== "settled" ||
+    lastRestoreError !== undefined ||
+    lastPersistenceError !== undefined
+  ) {
+    throw new Error("Task registry durable state is unavailable for restart reconciliation.", {
+      cause: lastRestoreError ?? lastPersistenceError,
+    });
+  }
 }
 
 function updateTask(taskId: string, patch: Partial<TaskRecord>): TaskRecord | null {
@@ -913,7 +972,20 @@ function updateTask(taskId: string, patch: Partial<TaskRecord>): TaskRecord | nu
     deleteParentFlowIdIndex(taskId, current);
     addParentFlowIdIndex(taskId, next);
   }
-  persistTaskUpsert(next);
+  try {
+    persistTaskUpsert(next);
+  } catch (error) {
+    // A failed terminal write must not leave memory ahead of durable state.
+    // Rebuild every derived index from the restored record and latch the
+    // persistence failure so restart reconciliation remains fail closed.
+    tasks.set(taskId, current);
+    rebuildRunIdIndex();
+    rebuildOwnerKeyIndex();
+    rebuildParentFlowIdIndex();
+    rebuildRelatedSessionKeyIndex();
+    lastPersistenceError = error;
+    throw error;
+  }
   try {
     syncFlowFromTask(next);
   } catch (error) {
@@ -1248,6 +1320,13 @@ export function setTaskCleanupAfterById(params: {
   });
 }
 
+export function releaseTaskCleanupHoldById(taskId: string): TaskRecord | null {
+  ensureTaskRegistryReady();
+  // Clearing the explicit hold lets updateTask stamp the normal terminal
+  // retention deadline from the task's authoritative terminal timestamp.
+  return updateTask(taskId, { cleanupAfter: undefined });
+}
+
 export function markTaskTerminalById(params: {
   taskId: string;
   status: Extract<TaskStatus, "succeeded" | "failed" | "timed_out" | "cancelled">;
@@ -1487,15 +1566,27 @@ export function createTaskRecord(params: {
       (record.endedAt ?? record.lastEventAt ?? record.createdAt) + DEFAULT_TASK_RETENTION_MS;
   }
   tasks.set(taskId, record);
-  upsertTaskDeliveryState({
-    taskId,
-    requesterOrigin: normalizeDeliveryContext(params.requesterOrigin),
-  });
+  const requesterOrigin = normalizeDeliveryContext(params.requesterOrigin);
+  if (requesterOrigin) {
+    taskDeliveryStates.set(taskId, { taskId, requesterOrigin });
+  }
   addRunIdIndex(taskId, record.runId);
   addOwnerKeyIndex(taskId, record);
   addParentFlowIdIndex(taskId, record);
   addRelatedSessionKeyIndex(taskId, record);
-  persistTaskUpsert(record);
+  try {
+    persistTaskCreate(record);
+  } catch (error) {
+    // Do not expose a phantom task after either half of durable creation fails.
+    tasks.delete(taskId);
+    taskDeliveryStates.delete(taskId);
+    rebuildRunIdIndex();
+    rebuildOwnerKeyIndex();
+    rebuildParentFlowIdIndex();
+    rebuildRelatedSessionKeyIndex();
+    lastPersistenceError = error;
+    throw error;
+  }
   try {
     syncFlowFromTask(record);
   } catch (error) {
@@ -1528,6 +1619,7 @@ function updateTaskStateByRunId(params: {
   terminalSummary?: string | null;
   terminalOutcome?: TaskTerminalOutcome | null;
   eventSummary?: string | null;
+  cleanupAfter?: number;
 }) {
   ensureTaskRegistryReady();
   const matches = getTasksByRunScope(params);
@@ -1565,6 +1657,9 @@ function updateTaskStateByRunId(params: {
         status: nextStatus,
         terminalOutcome: params.terminalOutcome,
       });
+    }
+    if (params.cleanupAfter !== undefined) {
+      patch.cleanupAfter = params.cleanupAfter;
     }
     const eventSummary =
       normalizeTaskSummary(params.eventSummary) ??
@@ -1664,6 +1759,7 @@ export function markTaskTerminalByRunId(params: {
   progressSummary?: string | null;
   terminalSummary?: string | null;
   terminalOutcome?: TaskTerminalOutcome | null;
+  cleanupAfter?: number;
 }) {
   return updateTaskStateByRunId({
     runId: params.runId,
@@ -1677,6 +1773,7 @@ export function markTaskTerminalByRunId(params: {
     progressSummary: params.progressSummary,
     terminalSummary: params.terminalSummary,
     terminalOutcome: params.terminalOutcome,
+    cleanupAfter: params.cleanupAfter,
   });
 }
 
@@ -1922,6 +2019,26 @@ export function findTaskByRunId(runId: string): TaskRecord | undefined {
   return task ? cloneTaskRecord(task) : undefined;
 }
 
+export function findTaskByExactRunScope(params: {
+  runId: string;
+  runtime: TaskRuntime;
+  childSessionKey: string;
+}): TaskRecord | undefined {
+  ensureTaskRegistryReady();
+  const childSessionKey = normalizeOptionalString(params.childSessionKey);
+  if (!childSessionKey) {
+    return undefined;
+  }
+  const task = pickPreferredRunIdTask(
+    getTasksByRunId(params.runId).filter(
+      (candidate) =>
+        candidate.runtime === params.runtime &&
+        normalizeOptionalString(candidate.childSessionKey) === childSessionKey,
+    ),
+  );
+  return task ? cloneTaskRecord(task) : undefined;
+}
+
 function listTasksFromIndex(index: Map<string, Set<string>>, key: string): TaskRecord[] {
   const ids = index.get(key);
   if (!ids || ids.size === 0) {
@@ -2050,7 +2167,10 @@ export function resetTaskRegistryForTests(opts?: { persist?: boolean }) {
   taskIdsByParentFlowId.clear();
   taskIdsByRelatedSessionKey.clear();
   tasksWithPendingDelivery.clear();
-  restoreAttempted = false;
+  restoreOutcome = "pending";
+  nextRestoreRetryAt = 0;
+  lastRestoreError = undefined;
+  lastPersistenceError = undefined;
   resetTaskRegistryRuntimeForTests();
   if (listenerStop) {
     listenerStop();

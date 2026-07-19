@@ -1296,6 +1296,32 @@ describe("model-selection", () => {
   });
 
   describe("resolveThinkingDefault", () => {
+    it("prefers an explicit per-agent thinking default for agent-scoped runs", () => {
+      const cfg = {
+        agents: {
+          defaults: {
+            thinkingDefault: "low",
+            models: {
+              "anthropic/claude-opus-4-6": {
+                params: { thinking: "high" },
+              },
+            },
+          },
+          list: [{ id: "planner", thinkingDefault: "xhigh" }],
+        },
+      } as OpenClawConfig;
+
+      expect(
+        resolveThinkingDefault({
+          cfg,
+          provider: "anthropic",
+          model: "claude-opus-4-6",
+          catalog: ANTHROPIC_OPUS_CATALOG,
+          agentId: "planner",
+        }),
+      ).toBe("xhigh");
+    });
+
     it("prefers per-model params.thinking over global thinkingDefault", () => {
       const cfg = {
         agents: {

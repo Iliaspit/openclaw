@@ -34,6 +34,10 @@ import {
   resolveStoredSessionKeyForSessionId,
 } from "../command/session.js";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../defaults.js";
+import {
+  rejectGuardedThinkingFallback,
+  resolveGuardedDelegationExecution,
+} from "../delegation/execution.js";
 import { isStrictAgenticExecutionContractActive } from "../execution-contract.js";
 import {
   coerceToFailoverError,
@@ -528,6 +532,15 @@ export async function runEmbeddedPiAgent(
         sessionKey: params.sessionKey,
         config: params.config,
         agentId: params.agentId,
+      });
+      const guardedDelegationAssignment = resolveGuardedDelegationExecution({
+        config: params.config,
+        sessionKey: params.sessionKey,
+        agentId: sessionAgentId,
+        provider,
+        model: modelId,
+        thinking: thinkLevel,
+        workspaceDir: resolvedWorkspace,
       });
       const configuredExecutionContract =
         resolveAgentExecutionContract(params.config, sessionAgentId) ?? "default";
@@ -1491,6 +1504,7 @@ export async function runEmbeddedPiAgent(
               attempted: attemptedThinking,
             });
             if (fallbackThinking) {
+              rejectGuardedThinkingFallback(guardedDelegationAssignment);
               log.warn(
                 `unsupported thinking level for ${provider}/${modelId}; retrying with ${fallbackThinking}`,
               );
@@ -1543,6 +1557,7 @@ export async function runEmbeddedPiAgent(
             attempted: attemptedThinking,
           });
           if (fallbackThinking && !aborted) {
+            rejectGuardedThinkingFallback(guardedDelegationAssignment);
             log.warn(
               `unsupported thinking level for ${provider}/${modelId}; retrying with ${fallbackThinking}`,
             );
@@ -1847,7 +1862,7 @@ export async function runEmbeddedPiAgent(
                   source: "planning_only_retry",
                 },
               });
-              void params.onAgentEvent?.({
+              params.onAgentEvent?.({
                 stream: "plan",
                 data: {
                   phase: "update",

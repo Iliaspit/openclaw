@@ -360,6 +360,36 @@ describe("agentCommand ACP runtime routing", () => {
         userContent: "  ping\n",
         assistantText: "  ACP_OK\n",
       });
+      expect(
+        attemptExecutionMocks.persistAcpTurnTranscript.mock.invocationCallOrder[0],
+      ).toBeLessThan(attemptExecutionMocks.emitAcpLifecycleEnd.mock.invocationCallOrder[0]);
+    });
+  });
+
+  it("fails ACP turns that complete without a visible assistant reply", async () => {
+    await withAcpSessionEnv(async () => {
+      const runTurn = createRunTurnFromTextDeltas([]);
+      mockAcpManager({
+        runTurn: (input: unknown) => runTurn(input),
+      });
+
+      await expect(
+        agentCommand({ message: "ping", sessionKey: "agent:codex:acp:test" }, runtime),
+      ).rejects.toThrow("visible assistant reply");
+
+      expect(runTurn).toHaveBeenCalled();
+      expect(attemptExecutionMocks.persistAcpTurnTranscript).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: "ping",
+          finalText: "",
+        }),
+      );
+      expect(attemptExecutionMocks.emitAcpLifecycleError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining("visible assistant reply"),
+        }),
+      );
+      expect(attemptExecutionMocks.emitAcpLifecycleEnd).not.toHaveBeenCalled();
     });
   });
 
@@ -458,7 +488,7 @@ describe("agentCommand ACP runtime routing", () => {
         allowedAgents: ["kimi"],
       });
 
-      const runTurn = vi.fn(async (_params: unknown) => {});
+      const runTurn = createRunTurnFromTextDeltas(["kimi ok"]);
       mockAcpManager({
         runTurn: (params: unknown) => runTurn(params),
         resolveSession: ({ sessionKey }) => resolveReadySession(sessionKey, "kimi"),

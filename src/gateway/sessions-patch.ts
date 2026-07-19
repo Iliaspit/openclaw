@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { resolveDefaultAgentId } from "../agents/agent-scope.js";
+import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
+import { openConfiguredDelegationLedger } from "../agents/delegation/gateway-task-reconciliation.js";
+import {
+  resolveDelegationGuardConfig,
+  resolveDelegationGuardPrincipal,
+  resolveDelegationPolicyDigest,
+} from "../agents/delegation/policy.js";
 import type { ModelCatalogEntry } from "../agents/model-catalog.js";
 import {
   resolveAllowedModelRef,
@@ -46,6 +52,15 @@ import {
   type SessionsPatchParams,
 } from "./protocol/index.js";
 
+type ProviderThinkingRuntime = typeof import("../agents/provider-thinking.runtime.js");
+
+let providerThinkingRuntimePromise: Promise<ProviderThinkingRuntime> | undefined;
+
+function loadProviderThinkingRuntime(): Promise<ProviderThinkingRuntime> {
+  providerThinkingRuntimePromise ??= import("../agents/provider-thinking.runtime.js");
+  return providerThinkingRuntimePromise;
+}
+
 function invalid(message: string): { ok: false; error: ErrorShape } {
   return { ok: false, error: errorShape(ErrorCodes.INVALID_REQUEST, message) };
 }
@@ -86,6 +101,10 @@ function normalizeSubagentControlScope(raw: string): "children" | "none" | undef
   return undefined;
 }
 
+function isTerminalSessionStatus(status: SessionEntry["status"] | undefined): boolean {
+  return status === "done" || status === "failed" || status === "killed" || status === "timeout";
+}
+
 export async function applySessionsPatchToStore(params: {
   cfg: OpenClawConfig;
   store: Record<string, SessionEntry>;
@@ -97,6 +116,45 @@ export async function applySessionsPatchToStore(params: {
   const now = Date.now();
   const parsedAgent = parseAgentSessionKey(storeKey);
   const sessionAgentId = normalizeAgentId(parsedAgent?.agentId ?? resolveDefaultAgentId(cfg));
+  const delegationGuard = resolveDelegationGuardConfig(cfg);
+  const delegationPrincipal = delegationGuard
+    ? resolveDelegationGuardPrincipal(delegationGuard, sessionAgentId)
+    : undefined;
+  const guardedOverrideFields = (
+    ["thinkingLevel", "reasoningLevel", "fastMode", "model"] as const
+  ).filter((field) => Object.hasOwn(patch, field));
+  if (delegationGuard && delegationPrincipal && guardedOverrideFields.length > 0) {
+    const ledger = openConfiguredDelegationLedger({
+      guard: delegationGuard,
+      policyDigest: resolveDelegationPolicyDigest(delegationGuard),
+    });
+    if (delegationGuard.mode === "audit") {
+      ledger.appendAuditEvent({
+        kind: "guarded_session_override_attempt",
+        payload: {
+          agentId: sessionAgentId,
+          sessionKey: storeKey,
+          fields: guardedOverrideFields,
+          decision: "allow-audit",
+        },
+      });
+    } else {
+      const normalizedRequiredThinking = normalizeThinkLevel(delegationPrincipal.requiredThinking);
+      const normalizedPatchedThinking = normalizeThinkLevel(patch.thinkingLevel);
+      const conflictingFields = guardedOverrideFields.filter(
+        (field) =>
+          field !== "thinkingLevel" || normalizedPatchedThinking !== normalizedRequiredThinking,
+      );
+      // A guarded principal may explicitly restore its immutable required
+      // thinking level. Compare canonical values so cached clients using a
+      // supported spelling cannot be mistaken for a conflicting override.
+      if (conflictingFields.length > 0) {
+        return invalid(
+          `guarded ${delegationPrincipal.kind} sessions reject conflicting model and reasoning overrides (${conflictingFields.join(", ")}); required thinking is ${delegationPrincipal.requiredThinking}`,
+        );
+      }
+    }
+  }
   const resolvedDefault = resolveDefaultModelForAgent({ cfg, agentId: sessionAgentId });
   const subagentModelHint = isSubagentSessionKey(storeKey)
     ? resolveSubagentConfiguredModelSelection({ cfg, agentId: sessionAgentId })
@@ -229,7 +287,7 @@ export async function applySessionsPatchToStore(params: {
         if (key === storeKey) {
           continue;
         }
-        if (entry?.label === parsed.label) {
+        if (entry?.label === parsed.label && !isTerminalSessionStatus(entry.status)) {
           return invalid(`label already in use: ${parsed.label}`);
         }
       }
@@ -438,18 +496,38 @@ export async function applySessionsPatchToStore(params: {
     const effectiveProvider = next.providerOverride ?? resolvedDefault.provider;
     const effectiveModel = next.modelOverride ?? resolvedDefault.model;
     const thinkingLevel = normalizeThinkLevel(next.thinkingLevel);
+    const runtimeThinkingParams = {
+      provider: effectiveProvider,
+      model: effectiveModel,
+      config: cfg,
+      workspaceDir: resolveAgentWorkspaceDir(cfg, sessionAgentId),
+    };
+    const providerThinkingRuntime = await loadProviderThinkingRuntime();
+    const runtimeThinkingSupport = thinkingLevel
+      ? providerThinkingRuntime.resolveRuntimeProviderThinkingLevelSupport({
+          ...runtimeThinkingParams,
+          level: thinkingLevel,
+        })
+      : undefined;
     if (!thinkingLevel) {
       delete next.thinkingLevel;
     } else if (
-      !isThinkingLevelSupported({
-        provider: effectiveProvider,
-        model: effectiveModel,
-        level: thinkingLevel,
-      })
+      !(
+        runtimeThinkingSupport ??
+        isThinkingLevelSupported({
+          provider: effectiveProvider,
+          model: effectiveModel,
+          level: thinkingLevel,
+        })
+      )
     ) {
       if ("thinkingLevel" in patch) {
+        const supportedLevels =
+          providerThinkingRuntime
+            .resolveRuntimeProviderThinkingLevelLabels(runtimeThinkingParams)
+            ?.join("|") ?? formatThinkingLevels(effectiveProvider, effectiveModel, "|");
         return invalid(
-          `thinkingLevel "${thinkingLevel}" is not supported for ${effectiveProvider}/${effectiveModel} (use ${formatThinkingLevels(effectiveProvider, effectiveModel, "|")})`,
+          `thinkingLevel "${thinkingLevel}" is not supported for ${effectiveProvider}/${effectiveModel} (use ${supportedLevels})`,
         );
       }
       next.thinkingLevel = resolveSupportedThinkingLevel({

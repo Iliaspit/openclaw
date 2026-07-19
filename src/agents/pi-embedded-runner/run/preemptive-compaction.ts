@@ -91,7 +91,7 @@ export function shouldPreemptivelyCompactBeforePrompt(params: {
   effectiveReserveTokens: number;
 } {
   const estimatedPromptTokens = estimatePrePromptTokens(params);
-  const { contextTokenBudget, promptBudgetBeforeReserve, effectiveReserveTokens } =
+  const { promptBudgetBeforeReserve, effectiveReserveTokens } =
     calculatePreemptivePromptBudgetBeforeReserve(params);
   const promptOverflowTokens = Math.max(0, estimatedPromptTokens - promptBudgetBeforeReserve);
   const toolResultPotential = estimateToolResultReductionPotential({

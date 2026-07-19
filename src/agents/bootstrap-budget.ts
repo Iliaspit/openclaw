@@ -3,7 +3,7 @@ import { normalizeOptionalString } from "../shared/string-coerce.js";
 import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
 import type { WorkspaceBootstrapFile } from "./workspace.js";
 
-export const DEFAULT_BOOTSTRAP_NEAR_LIMIT_RATIO = 0.85;
+export const DEFAULT_BOOTSTRAP_NEAR_LIMIT_RATIO = 0.8;
 export const DEFAULT_BOOTSTRAP_PROMPT_WARNING_MAX_FILES = 3;
 export const DEFAULT_BOOTSTRAP_PROMPT_WARNING_SIGNATURE_HISTORY_MAX = 32;
 
@@ -22,6 +22,8 @@ export type BootstrapInjectionStat = {
 export type BootstrapAnalyzedFile = BootstrapInjectionStat & {
   nearLimit: boolean;
   causes: BootstrapTruncationCause[];
+  limitChars: number;
+  limitCause: BootstrapTruncationCause;
 };
 
 export type BootstrapBudgetAnalysis = {
@@ -66,6 +68,10 @@ function normalizePositiveLimit(value: number): number {
 
 function formatWarningCause(cause: BootstrapTruncationCause): string {
   return cause === "per-file-limit" ? "max/file" : "max/total";
+}
+
+function isPolicyBootstrapFile(name: string): boolean {
+  return name.toLowerCase() === "agents.md";
 }
 
 function normalizeSeenSignatures(signatures?: string[]): string[] {
@@ -184,21 +190,26 @@ export function analyzeBootstrapBudget(params: {
   const totalOverLimit = injectedChars >= bootstrapTotalMaxChars;
 
   const files = params.files.map((file) => {
+    // AGENTS.md bypasses max/file and is constrained only by the fail-closed total budget.
+    const limitCause: BootstrapTruncationCause = isPolicyBootstrapFile(file.name)
+      ? "total-limit"
+      : "per-file-limit";
+    const limitChars = limitCause === "total-limit" ? bootstrapTotalMaxChars : bootstrapMaxChars;
     if (file.missing) {
-      return { ...file, nearLimit: false, causes: [] };
+      return { ...file, nearLimit: false, causes: [], limitChars, limitCause };
     }
-    const perFileOverLimit = file.rawChars > bootstrapMaxChars;
-    const nearLimit = file.rawChars >= Math.ceil(bootstrapMaxChars * nearLimitRatio);
+    const fileOverLimit = file.rawChars > limitChars;
+    const nearLimit = file.rawChars >= Math.ceil(limitChars * nearLimitRatio);
     const causes: BootstrapTruncationCause[] = [];
     if (file.truncated) {
-      if (perFileOverLimit) {
-        causes.push("per-file-limit");
+      if (fileOverLimit) {
+        causes.push(limitCause);
       }
-      if (totalOverLimit) {
+      if (totalOverLimit && !causes.includes("total-limit")) {
         causes.push("total-limit");
       }
     }
-    return { ...file, nearLimit, causes };
+    return { ...file, nearLimit, causes, limitChars, limitCause };
   });
 
   const truncatedFiles = files.filter((file) => file.truncated);
@@ -224,14 +235,18 @@ export function analyzeBootstrapBudget(params: {
 export function buildBootstrapTruncationSignature(
   analysis: BootstrapBudgetAnalysis,
 ): string | undefined {
-  if (!analysis.hasTruncation) {
+  if (!analysis.hasTruncation && analysis.nearLimitFiles.length === 0 && !analysis.totalNearLimit) {
     return undefined;
   }
-  const files = analysis.truncatedFiles
+  const files = analysis.files
+    .filter((file) => file.truncated || file.nearLimit)
     .map((file) => ({
       path: file.path || file.name,
       rawChars: file.rawChars,
       injectedChars: file.injectedChars,
+      nearLimit: file.nearLimit,
+      limitChars: file.limitChars,
+      limitCause: file.limitCause,
       causes: [...file.causes].toSorted(),
     }))
     .toSorted((a, b) => {
@@ -250,6 +265,7 @@ export function buildBootstrapTruncationSignature(
   return JSON.stringify({
     bootstrapMaxChars: analysis.totals.bootstrapMaxChars,
     bootstrapTotalMaxChars: analysis.totals.bootstrapTotalMaxChars,
+    totalNearLimit: analysis.totalNearLimit,
     files,
   });
 }
@@ -258,7 +274,8 @@ export function formatBootstrapTruncationWarningLines(params: {
   analysis: BootstrapBudgetAnalysis;
   maxFiles?: number;
 }): string[] {
-  if (!params.analysis.hasTruncation) {
+  const warningFiles = params.analysis.files.filter((file) => file.truncated || file.nearLimit);
+  if (warningFiles.length === 0 && !params.analysis.totalNearLimit) {
     return [];
   }
   const maxFiles =
@@ -266,36 +283,55 @@ export function formatBootstrapTruncationWarningLines(params: {
       ? Math.floor(params.maxFiles)
       : DEFAULT_BOOTSTRAP_PROMPT_WARNING_MAX_FILES;
   const lines: string[] = [];
-  const duplicateNameCounts = params.analysis.truncatedFiles.reduce((acc, file) => {
+  const duplicateNameCounts = warningFiles.reduce((acc, file) => {
     acc.set(file.name, (acc.get(file.name) ?? 0) + 1);
     return acc;
   }, new Map<string, number>());
-  const topFiles = params.analysis.truncatedFiles.slice(0, maxFiles);
+  const topFiles = warningFiles.slice(0, maxFiles);
   for (const file of topFiles) {
-    const pct =
-      file.rawChars > 0
-        ? Math.round(((file.rawChars - file.injectedChars) / file.rawChars) * 100)
-        : 0;
-    const causeText =
-      file.causes.length > 0
-        ? file.causes.map((cause) => formatWarningCause(cause)).join(", ")
-        : "";
     const nameLabel =
       (duplicateNameCounts.get(file.name) ?? 0) > 1 && file.path.trim().length > 0
         ? `${file.name} (${file.path})`
         : file.name;
+    if (file.truncated) {
+      const pct =
+        file.rawChars > 0
+          ? Math.round(((file.rawChars - file.injectedChars) / file.rawChars) * 100)
+          : 0;
+      const causeText =
+        file.causes.length > 0
+          ? file.causes.map((cause) => formatWarningCause(cause)).join(", ")
+          : "";
+      lines.push(
+        `${nameLabel}: ${file.rawChars} raw -> ${file.injectedChars} injected (~${Math.max(0, pct)}% removed${causeText ? `; ${causeText}` : ""}).`,
+      );
+      continue;
+    }
+    const pct = file.limitChars > 0 ? Math.round((file.rawChars / file.limitChars) * 100) : 0;
     lines.push(
-      `${nameLabel}: ${file.rawChars} raw -> ${file.injectedChars} injected (~${Math.max(0, pct)}% removed${causeText ? `; ${causeText}` : ""}).`,
+      `${nameLabel}: ${file.rawChars} chars (${pct}% of ${formatWarningCause(file.limitCause)} ${file.limitChars}; near limit).`,
     );
   }
-  if (params.analysis.truncatedFiles.length > topFiles.length) {
+  if (warningFiles.length > topFiles.length) {
+    lines.push(`+${warningFiles.length - topFiles.length} more near/over-limit file(s).`);
+  }
+  if (params.analysis.totalNearLimit) {
+    const totalPct = Math.round(
+      (params.analysis.totals.injectedChars / params.analysis.totals.bootstrapTotalMaxChars) * 100,
+    );
     lines.push(
-      `+${params.analysis.truncatedFiles.length - topFiles.length} more truncated file(s).`,
+      `Bootstrap total: ${params.analysis.totals.injectedChars} injected chars (${totalPct}% of max/total ${params.analysis.totals.bootstrapTotalMaxChars}; near limit).`,
     );
   }
-  lines.push(
-    "If unintentional, raise agents.defaults.bootstrapMaxChars and/or agents.defaults.bootstrapTotalMaxChars.",
-  );
+  if (params.analysis.hasTruncation) {
+    lines.push(
+      "If unintentional, raise agents.defaults.bootstrapMaxChars and/or agents.defaults.bootstrapTotalMaxChars.",
+    );
+  } else {
+    lines.push(
+      "Bootstrap context is near configured limits; shorten files or raise the matching limit before truncation occurs.",
+    );
+  }
   return lines;
 }
 
@@ -346,9 +382,9 @@ export function appendBootstrapPromptWarning(
     return prompt;
   }
   const warningBlock = [
-    "[Bootstrap truncation warning]",
-    "Some workspace bootstrap files were truncated before injection.",
-    "Treat Project Context as partial and read the relevant files directly if details seem missing.",
+    "[Bootstrap context budget warning]",
+    "Workspace bootstrap context is near or over configured limits.",
+    "If a file was truncated, treat Project Context as partial and read that file directly.",
     ...normalizedLines.map((line) => `- ${line}`),
   ].join("\n");
   return prompt ? `${prompt}\n\n${warningBlock}` : warningBlock;

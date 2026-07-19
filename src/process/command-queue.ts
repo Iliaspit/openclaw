@@ -521,7 +521,7 @@ export function getCommandQueueSnapshot(opts?: { lane?: string }): CommandQueueS
   );
   return {
     ts: now,
-    gatewayDraining: Boolean(queueState.gatewayDraining),
+    gatewayDraining: queueState.gatewayDraining,
     totalQueued: lanes.reduce((sum, lane) => sum + lane.queued, 0),
     totalActive: lanes.reduce((sum, lane) => sum + lane.active, 0),
     totalDepth: lanes.reduce((sum, lane) => sum + lane.depth, 0),

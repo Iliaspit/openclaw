@@ -13,7 +13,7 @@ const BUNDLED_MEDIA_PROVIDER_DEFAULTS: Record<string, BundledMediaProviderDefaul
     autoPriority: { image: 10, audio: 10 },
   },
   "openai-codex": {
-    defaultModels: { image: "gpt-5.4" },
+    defaultModels: { image: "gpt-5.5" },
   },
   anthropic: {
     defaultModels: { image: "claude-opus-4-7" },
@@ -58,7 +58,7 @@ const BUNDLED_MEDIA_PROVIDER_DEFAULTS: Record<string, BundledMediaProviderDefaul
     autoPriority: { video: 15 },
   },
   moonshot: {
-    defaultModels: { image: "kimi-k2.5", video: "kimi-k2.5" },
+    defaultModels: { image: "kimi-k2.6", video: "kimi-k2.6" },
     autoPriority: { video: 20 },
   },
   openrouter: {

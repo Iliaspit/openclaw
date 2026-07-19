@@ -220,6 +220,128 @@
 }
 
 /* ===========================================
+   Planner Completion Toast
+   =========================================== */
+
+.planner-completion-toast {
+  position: fixed;
+  right: max(18px, env(safe-area-inset-right));
+  bottom: max(18px, env(safe-area-inset-bottom));
+  z-index: 90;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 28px;
+  align-items: start;
+  gap: 12px;
+  width: min(360px, calc(100vw - 32px));
+  padding: 14px;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--card) 94%, var(--bg-elevated) 6%);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border-strong));
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+  animation: planner-toast-in 180ms var(--ease-out);
+}
+
+.planner-completion-toast--warn {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border-strong));
+}
+
+.planner-completion-toast__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  color: var(--accent);
+  background: var(--accent-subtle);
+  border-radius: 8px;
+}
+
+.planner-completion-toast--warn .planner-completion-toast__icon {
+  color: var(--danger);
+  background: var(--danger-subtle);
+}
+
+.planner-completion-toast__icon svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.planner-completion-toast__copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.planner-completion-toast__title {
+  overflow-wrap: anywhere;
+  color: var(--text-strong);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.planner-completion-toast__body {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.planner-completion-toast__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.planner-completion-toast__close:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+
+.planner-completion-toast__close svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+@keyframes planner-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 640px) {
+  .planner-completion-toast {
+    right: 16px;
+    bottom: 16px;
+    left: 16px;
+    width: auto;
+  }
+}
+
+/* ===========================================
    Cards - Refined with depth
    =========================================== */
 

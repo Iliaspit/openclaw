@@ -23,7 +23,10 @@ import {
   wrapOllamaCompatNumCtx,
 } from "../../../plugin-sdk/ollama-runtime.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
-import { resolveToolCallArgumentsEncoding } from "../../../plugins/provider-model-compat.js";
+import {
+  extractModelCompat,
+  resolveToolCallArgumentsEncoding,
+} from "../../../plugins/provider-model-compat.js";
 import {
   resolveProviderSystemPromptContribution,
   resolveProviderTextTransforms,
@@ -63,6 +66,7 @@ import {
 } from "../../channel-tools.js";
 import { recordChildRouteContextHeadroomSnapshot } from "../../child-route-health.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../defaults.js";
+import { resolveGuardedDelegationExecution } from "../../delegation/execution.js";
 import { resolveOpenClawDocsPath } from "../../docs-path.js";
 import { isTimeoutError } from "../../failover-error.js";
 import { resolveHeartbeatPromptForSystemPrompt } from "../../heartbeat-system-prompt.js";
@@ -165,7 +169,11 @@ import {
   createSystemPromptOverride,
 } from "../system-prompt.js";
 import { dropThinkingBlocks } from "../thinking.js";
-import { collectAllowedToolNames } from "../tool-name-allowlist.js";
+import {
+  collectAllowedToolNames,
+  collectRegisteredToolNames,
+  toSessionToolAllowlist,
+} from "../tool-name-allowlist.js";
 import {
   PREEMPTIVE_CONTEXT_OVERFLOW_MESSAGE,
   installContextEngineLoopHook,
@@ -223,12 +231,13 @@ import {
   shouldUseOpenAIWebSocketTransport,
 } from "./attempt.thread-helpers.js";
 import {
-  shouldRepairMalformedAnthropicToolCallArguments,
+  shouldRepairMalformedToolCallArguments,
   wrapStreamFnDecodeXaiToolCallArguments,
   wrapStreamFnRepairMalformedToolCallArguments,
 } from "./attempt.tool-call-argument-repair.js";
 import {
   sanitizeReplayToolCallIdsForStream,
+  wrapStreamFnNormalizeTextToolTags,
   wrapStreamFnSanitizeMalformedToolCalls,
   wrapStreamFnTrimToolCallNames,
 } from "./attempt.tool-call-normalization.js";
@@ -285,6 +294,7 @@ export {
   wrapStreamFnRepairMalformedToolCallArguments,
 } from "./attempt.tool-call-argument-repair.js";
 export {
+  wrapStreamFnNormalizeTextToolTags,
   wrapStreamFnSanitizeMalformedToolCalls,
   wrapStreamFnTrimToolCallNames,
 } from "./attempt.tool-call-normalization.js";
@@ -411,6 +421,15 @@ export async function runEmbeddedAttempt(
     sessionKey: params.sessionKey,
     config: params.config,
     agentId: params.agentId,
+  });
+  resolveGuardedDelegationExecution({
+    config: params.config,
+    sessionKey: params.sessionKey,
+    agentId: sessionAgentId,
+    provider: params.provider,
+    model: params.modelId,
+    thinking: params.thinkLevel,
+    workspaceDir: resolvedWorkspace,
   });
 
   let restoreSkillEnv: (() => void) | undefined;
@@ -555,7 +574,8 @@ export async function runEmbeddedAttempt(
             abortSignal: runAbortController.signal,
             modelProvider: params.model.provider,
             modelId: params.modelId,
-            modelCompat: params.model.compat,
+            effectiveThinking: params.thinkLevel,
+            modelCompat: extractModelCompat({ compat: params.model.compat }),
             modelApi: params.model.api,
             modelContextWindowTokens: params.model.contextWindow,
             modelAuthMode: resolveModelAuthMode(params.model.provider, params.config),
@@ -972,9 +992,14 @@ export async function runEmbeddedAttempt(
       // Get hook runner early so it's available when creating tools
       const hookRunner = getGlobalHookRunner();
 
-      const { builtInTools, customTools } = splitSdkTools({
+      const { customTools } = splitSdkTools({
         tools: effectiveTools,
         sandboxEnabled: !!sandbox?.enabled,
+        liveToolResultMaxChars: resolveLiveToolResultMaxChars({
+          contextWindowTokens: params.contextTokenBudget ?? DEFAULT_CONTEXT_TOKENS,
+          cfg: params.config,
+          agentId: sessionAgentId,
+        }),
       });
 
       // Add client tools (OpenResponses hosted tools) to customTools
@@ -1031,6 +1056,11 @@ export async function runEmbeddedAttempt(
         : [];
 
       const allCustomTools = [...customTools, ...clientToolDefs];
+      // Pi treats `tools` as a name allowlist during session creation. Pass the
+      // exact OpenClaw-managed registrations so custom tools survive startup.
+      const sessionToolAllowlist = toSessionToolAllowlist(
+        collectRegisteredToolNames(allCustomTools),
+      );
 
       ({ session } = await createAgentSession({
         cwd: resolvedWorkspace,
@@ -1039,7 +1069,7 @@ export async function runEmbeddedAttempt(
         modelRegistry: params.modelRegistry,
         model: params.model,
         thinkingLevel: mapThinkingLevel(params.thinkLevel),
-        tools: builtInTools,
+        tools: sessionToolAllowlist,
         customTools: allCustomTools,
         sessionManager,
         settingsManager,
@@ -1049,6 +1079,7 @@ export async function runEmbeddedAttempt(
       if (!session) {
         throw new Error("Embedded agent session missing");
       }
+      session.setActiveToolsByName(sessionToolAllowlist);
       const activeSession = session;
       let prePromptMessageCount = activeSession.messages.length;
       abortSessionForYield = () => {
@@ -1214,10 +1245,9 @@ export async function runEmbeddedAttempt(
       }
 
       const cacheObservabilityEnabled = Boolean(cacheTrace) || log.isEnabled("debug");
-      const promptCacheToolNames = collectPromptCacheToolNames([
-        ...builtInTools,
-        ...allCustomTools,
-      ] as Array<{ name?: string }>);
+      const promptCacheToolNames = collectPromptCacheToolNames(
+        allCustomTools as Array<{ name?: string }>,
+      );
       let promptCacheChangesForTurn: PromptCacheChange[] | null = null;
 
       if (cacheTrace) {
@@ -1337,6 +1367,10 @@ export async function runEmbeddedAttempt(
         allowedToolNames,
         transcriptPolicy,
       );
+      activeSession.agent.streamFn = wrapStreamFnNormalizeTextToolTags(
+        activeSession.agent.streamFn,
+        allowedToolNames,
+      );
       activeSession.agent.streamFn = wrapStreamFnTrimToolCallNames(
         activeSession.agent.streamFn,
         allowedToolNames,
@@ -1346,8 +1380,10 @@ export async function runEmbeddedAttempt(
       );
 
       if (
-        params.model.api === "anthropic-messages" &&
-        shouldRepairMalformedAnthropicToolCallArguments(params.provider)
+        shouldRepairMalformedToolCallArguments({
+          provider: params.provider,
+          modelApi: params.model.api,
+        })
       ) {
         activeSession.agent.streamFn = wrapStreamFnRepairMalformedToolCallArguments(
           activeSession.agent.streamFn,

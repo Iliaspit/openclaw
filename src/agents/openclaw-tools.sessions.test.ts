@@ -1621,9 +1621,8 @@ describe("sessions tools", () => {
           call.params.bootstrapContextMode === "lightweight",
       ),
     ).toHaveLength(1);
-    const taskMessage = String(
-      calls.find((call) => call.method === "agent")?.params?.message ?? "",
-    );
+    const rawTaskMessage = calls.find((call) => call.method === "agent")?.params?.message;
+    const taskMessage = typeof rawTaskMessage === "string" ? rawTaskMessage : "";
     expect(taskMessage).toContain("agent_lifecycle_abandoned");
     expect(taskMessage).toContain("child_route_preflight");
     expect(getLatestSubagentRunByChildSessionKey(oldChildKey)?.suppressAnnounceReason).toBe(
@@ -1808,9 +1807,8 @@ describe("sessions tools", () => {
     });
     expect(freshChildKey).toMatch(/^agent:main:subagent:/);
     expect(freshChildKey).not.toBe(oldChildKey);
-    const taskMessage = String(
-      calls.find((call) => call.method === "agent")?.params?.message ?? "",
-    );
+    const rawTaskMessage = calls.find((call) => call.method === "agent")?.params?.message;
+    const taskMessage = typeof rawTaskMessage === "string" ? rawTaskMessage : "";
     expect(taskMessage).toContain("context_overflow");
     expect(taskMessage).toContain("child_route_preflight");
     expect(

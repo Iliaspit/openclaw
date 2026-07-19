@@ -17,6 +17,7 @@ import {
   resolveConfiguredModelRef,
   resolveDefaultModelForAgent,
   resolvePersistedSelectedModelRef,
+  resolveThinkingDefault,
 } from "../agents/model-selection.js";
 import {
   getSessionDisplaySubagentRunByChildSessionKey,
@@ -25,7 +26,11 @@ import {
   listSubagentRunsForController,
   resolveSubagentSessionStatus,
 } from "../agents/subagent-registry-read.js";
-import { listThinkingLevelLabels, resolveThinkingDefaultForModel } from "../auto-reply/thinking.js";
+import {
+  listThinkingLevelLabels,
+  normalizeThinkLevel,
+} from "../auto-reply/thinking.js";
+import { THINKING_LEVEL_RANKS } from "../auto-reply/thinking.shared.js";
 import { loadConfig } from "../config/config.js";
 import { resolveAgentModelFallbackValues } from "../config/model-input.js";
 import { resolveStateDir } from "../config/paths.js";
@@ -90,11 +95,13 @@ export {
   readFirstUserMessageFromTranscript,
   readLastMessagePreviewFromTranscript,
   readLatestSessionUsageFromTranscript,
+  readLatestSessionsYieldStatusFromTranscript,
   readRecentSessionMessages,
   readSessionTitleFieldsFromTranscript,
   readSessionPreviewItemsFromTranscript,
   readSessionMessages,
   resolveSessionTranscriptCandidates,
+  sessionTranscriptHasAssistantMessage,
 } from "./session-utils.fs.js";
 export { canonicalizeSpawnedByForAgent, resolveSessionStoreKey } from "./session-store-key.js";
 export type {
@@ -716,7 +723,7 @@ function listConfiguredAgentIds(cfg: OpenClawConfig): string[] {
 
   const remainder = Array.from(ids)
     .filter((id) => !seen.has(id))
-    .sort((a, b) => a.localeCompare(b));
+    .toSorted((a, b) => a.localeCompare(b));
   for (const id of remainder) {
     pushId(id);
   }
@@ -1462,6 +1469,20 @@ export function buildGatewaySessionRow(params: {
   const rowModel = selectedModel?.model ?? model;
   const thinkingProvider = rowModelProvider ?? DEFAULT_PROVIDER;
   const thinkingModel = rowModel ?? DEFAULT_MODEL;
+  const thinkingDefault = resolveThinkingDefault({
+    cfg,
+    provider: thinkingProvider,
+    model: thinkingModel,
+    agentId: sessionAgentId,
+  });
+  const thinkingOptions = listThinkingLevelLabels(thinkingProvider, thinkingModel);
+  if (!thinkingOptions.some((option) => normalizeThinkLevel(option) === thinkingDefault)) {
+    const insertAt = thinkingOptions.findIndex((option) => {
+      const level = normalizeThinkLevel(option);
+      return level ? THINKING_LEVEL_RANKS[level] > THINKING_LEVEL_RANKS[thinkingDefault] : false;
+    });
+    thinkingOptions.splice(insertAt < 0 ? thinkingOptions.length : insertAt, 0, thinkingDefault);
+  }
 
   return {
     key,
@@ -1489,11 +1510,8 @@ export function buildGatewaySessionRow(params: {
     systemSent: entry?.systemSent,
     abortedLastRun: entry?.abortedLastRun,
     thinkingLevel: entry?.thinkingLevel,
-    thinkingOptions: listThinkingLevelLabels(thinkingProvider, thinkingModel),
-    thinkingDefault: resolveThinkingDefaultForModel({
-      provider: thinkingProvider,
-      model: thinkingModel,
-    }),
+    thinkingOptions,
+    thinkingDefault,
     fastMode: entry?.fastMode,
     verboseLevel: entry?.verboseLevel,
     traceLevel: entry?.traceLevel,

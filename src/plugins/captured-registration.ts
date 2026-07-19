@@ -9,6 +9,7 @@ import type {
   AgentHarness,
   CliBackendPlugin,
   OpenClawPluginApi,
+  OpenClawGatewayDiscoveryService,
   ImageGenerationProviderPlugin,
   MediaUnderstandingProviderPlugin,
   MusicGenerationProviderPlugin,
@@ -49,6 +50,7 @@ export type CapturedPluginRegistration = {
   webFetchProviders: WebFetchProviderPlugin[];
   webSearchProviders: WebSearchProviderPlugin[];
   memoryEmbeddingProviders: MemoryEmbeddingProviderAdapter[];
+  gatewayDiscoveryServices: OpenClawGatewayDiscoveryService[];
   tools: AnyAgentTool[];
 };
 
@@ -73,6 +75,7 @@ export function createCapturedPluginRegistration(params?: {
   const webFetchProviders: WebFetchProviderPlugin[] = [];
   const webSearchProviders: WebSearchProviderPlugin[] = [];
   const memoryEmbeddingProviders: MemoryEmbeddingProviderAdapter[] = [];
+  const gatewayDiscoveryServices: OpenClawGatewayDiscoveryService[] = [];
   const tools: AnyAgentTool[] = [];
   const noopLogger = {
     info() {},
@@ -99,6 +102,7 @@ export function createCapturedPluginRegistration(params?: {
     webFetchProviders,
     webSearchProviders,
     memoryEmbeddingProviders,
+    gatewayDiscoveryServices,
     tools,
     api: buildPluginApi({
       id: "captured-plugin-registration",
@@ -180,6 +184,9 @@ export function createCapturedPluginRegistration(params?: {
         },
         registerMemoryEmbeddingProvider(adapter: MemoryEmbeddingProviderAdapter) {
           memoryEmbeddingProviders.push(adapter);
+        },
+        registerGatewayDiscoveryService(service: OpenClawGatewayDiscoveryService) {
+          gatewayDiscoveryServices.push(service);
         },
         registerTool(tool) {
           if (typeof tool !== "function") {

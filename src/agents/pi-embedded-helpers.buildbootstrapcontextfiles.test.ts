@@ -140,6 +140,77 @@ describe("buildBootstrapContextFiles", () => {
     expect(result?.content).not.toContain("[...truncated, read AGENTS.md for full content...]");
   });
 
+  it("keeps AGENTS.md complete when it exceeds max/file but fits max/total", () => {
+    const content = "policy\n".repeat(100);
+    expect(content.length).toBeGreaterThan(200);
+    const [result] = buildBootstrapContextFiles([makeFile({ content })], {
+      maxChars: 200,
+      totalMaxChars: 1_000,
+    });
+    expect(result?.content).toBe(content.trimEnd());
+    expect(result?.content).not.toContain("truncated");
+  });
+
+  it("reserves enough total budget for AGENTS.md even when hooks place it later", () => {
+    const policy = "p".repeat(300);
+    const result = buildBootstrapContextFiles(
+      [
+        makeFile({
+          name: "SOUL.md",
+          path: "/tmp/SOUL.md",
+          content: "s".repeat(400),
+        }),
+        makeFile({ content: policy }),
+      ],
+      {
+        maxChars: 400,
+        totalMaxChars: 500,
+      },
+    );
+    expect(result).toHaveLength(2);
+    expect(result[0]?.content).toContain("[...truncated, read SOUL.md for full content...]");
+    expect(result[1]?.content).toBe(policy);
+    expect(result.reduce((sum, entry) => sum + entry.content.length, 0)).toBeLessThanOrEqual(500);
+  });
+
+  it("keeps the repository AGENTS.md fully injectable under the default total budget", async () => {
+    const repoAgentsPath = path.resolve(import.meta.dirname, "../..", "AGENTS.md");
+    const content = (await fs.readFile(repoAgentsPath, "utf8")).trimEnd();
+    expect(
+      content.length,
+      "Repository AGENTS.md outgrew the default total bootstrap budget; raise the budget or shorten the policy before landing.",
+    ).toBeLessThanOrEqual(DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS);
+
+    const warnings: string[] = [];
+    const [result] = buildBootstrapContextFiles([makeFile({ path: repoAgentsPath, content })], {
+      warn: (warning) => warnings.push(warning),
+    });
+    expect(result?.content).toBe(content);
+    expect(warnings).toEqual([]);
+  });
+
+  it("fails closed when AGENTS.md cannot fit within max/total", () => {
+    expect(() =>
+      buildBootstrapContextFiles([makeFile({ content: "a".repeat(201) })], {
+        maxChars: 100,
+        totalMaxChars: 200,
+      }),
+    ).toThrow(/refuses to inject partial policy/);
+  });
+
+  it("allows doctor diagnostics to measure an over-limit AGENTS.md without running it", () => {
+    const [result] = buildBootstrapContextFiles(
+      [makeFile({ content: "a".repeat(201) })],
+      {
+        maxChars: 100,
+        totalMaxChars: 200,
+        allowPolicyTruncationForDiagnostics: true,
+      },
+    );
+    expect(result?.content).toContain("[...truncated, read AGENTS.md for full content...]");
+    expect(result?.content.length).toBeLessThanOrEqual(200);
+  });
+
   it("keeps total injected bootstrap characters under the new default total cap", () => {
     const files = createLargeBootstrapFiles();
     const result = buildBootstrapContextFiles(files);
@@ -160,7 +231,7 @@ describe("buildBootstrapContextFiles", () => {
 
   it("enforces strict total cap even when truncation markers are present", () => {
     const files = [
-      makeFile({ name: "AGENTS.md", content: "a".repeat(1_000) }),
+      makeFile({ name: "TOOLS.md", content: "a".repeat(1_000) }),
       makeFile({ name: "SOUL.md", path: "/tmp/SOUL.md", content: "b".repeat(1_000) }),
     ];
     const result = buildBootstrapContextFiles(files, {
@@ -172,7 +243,7 @@ describe("buildBootstrapContextFiles", () => {
   });
 
   it("skips bootstrap injection when remaining total budget is too small", () => {
-    const files = [makeFile({ name: "AGENTS.md", content: "a".repeat(1_000) })];
+    const files = [makeFile({ name: "TOOLS.md", content: "a".repeat(1_000) })];
     const result = buildBootstrapContextFiles(files, {
       maxChars: 200,
       totalMaxChars: 40,

@@ -89,6 +89,7 @@ type ConnectFrame = {
   method?: string;
   params?: {
     auth?: { token?: string; password?: string; deviceToken?: string };
+    caps?: string[];
     scopes?: string[];
   };
 };
@@ -147,6 +148,22 @@ async function expectSocketClosed(ws: MockWebSocket) {
 async function startConnect(client: InstanceType<typeof GatewayBrowserClient>, nonce = "nonce-1") {
   client.start();
   return await continueConnect(getLatestWebSocket(), nonce);
+}
+
+function emitConnectOk(ws: MockWebSocket, connectId: string | undefined) {
+  ws.emitMessage({
+    type: "res",
+    id: connectId,
+    ok: true,
+    payload: {
+      type: "hello-ok",
+      protocol: 3,
+    },
+  });
+}
+
+function getPendingCount(client: InstanceType<typeof GatewayBrowserClient>): number {
+  return (client as unknown as { pending: Map<string, unknown> }).pending.size;
 }
 
 function emitRetryableTokenMismatch(ws: MockWebSocket, connectId: string | undefined) {
@@ -232,6 +249,83 @@ describe("GatewayBrowserClient", () => {
 
     expect(connectFrame.method).toBe("connect");
     expect(connectFrame.params?.scopes).toEqual([...CONTROL_UI_OPERATOR_SCOPES]);
+  });
+
+  it("requests tool and orchestration event streams on connect", async () => {
+    const client = new GatewayBrowserClient({
+      url: "ws://127.0.0.1:18789",
+      token: "shared-auth-token",
+    });
+
+    const { connectFrame } = await startConnect(client);
+
+    expect(connectFrame.params?.caps).toEqual(["tool-events", "orchestration-events"]);
+  });
+
+  it("does not report connected or send normal RPCs before hello-ok", async () => {
+    const client = new GatewayBrowserClient({
+      url: "ws://127.0.0.1:18789",
+      token: "shared-auth-token",
+    });
+
+    const { ws, connectFrame } = await startConnect(client);
+
+    expect(client.connected).toBe(false);
+    await expect(client.request("chat.send", { message: "hello" })).rejects.toThrow(
+      "gateway not connected",
+    );
+    expect(ws.sent).toHaveLength(1);
+
+    emitConnectOk(ws, connectFrame.id);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(client.connected).toBe(true);
+    const listPromise = client.request("sessions.list", {});
+    const listFrame = parseLatestConnectFrame(ws);
+    expect(listFrame.method).toBe("sessions.list");
+    ws.emitMessage({
+      type: "res",
+      id: listFrame.id,
+      ok: true,
+      payload: { sessions: [] },
+    });
+    await expect(listPromise).resolves.toEqual({ sessions: [] });
+  });
+
+  it("times out unresolved normal RPCs when a timeout is supplied", async () => {
+    vi.useFakeTimers();
+
+    const client = new GatewayBrowserClient({
+      url: "ws://127.0.0.1:18789",
+      token: "shared-auth-token",
+    });
+
+    const { ws, connectFrame } = await startConnect(client);
+    emitConnectOk(ws, connectFrame.id);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const requestPromise = client.request("chat.send", { message: "hello" }, { timeoutMs: 25 });
+    const requestExpectation = expect(requestPromise).rejects.toThrow(
+      "gateway request timeout for chat.send",
+    );
+    const requestFrame = parseLatestConnectFrame(ws);
+    expect(requestFrame.method).toBe("chat.send");
+    expect(getPendingCount(client)).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(25);
+
+    await requestExpectation;
+    expect(getPendingCount(client)).toBe(0);
+
+    ws.emitMessage({
+      type: "res",
+      id: requestFrame.id,
+      ok: true,
+      payload: { runId: "late-run", status: "started" },
+    });
+    expect(getPendingCount(client)).toBe(0);
+
+    client.stop();
   });
 
   it("prefers explicit shared auth over cached device tokens", async () => {

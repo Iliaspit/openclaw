@@ -22,6 +22,8 @@ export type EmbeddedRunTrigger = "cron" | "heartbeat" | "manual" | "memory" | "o
 export type RunEmbeddedPiAgentParams = {
   sessionId: string;
   sessionKey?: string;
+  /** Session key used for sandbox policy resolution when it differs from transcript identity. */
+  sandboxSessionKey?: string;
   agentId?: string;
   messageChannel?: string;
   messageProvider?: string;
@@ -64,6 +66,8 @@ export type RunEmbeddedPiAgentParams = {
   requireExplicitMessageTarget?: boolean;
   /** If true, omit the message tool from the tool list. */
   disableMessageTool?: boolean;
+  /** Force the message tool into the runtime profile when a caller explicitly requires it. */
+  forceMessageTool?: boolean;
   /** Allow runtime plugins for this run to late-bind the gateway subagent. */
   allowGatewaySubagentBinding?: boolean;
   sessionFile: string;

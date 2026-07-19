@@ -100,7 +100,7 @@ Full breakdown: [System Prompt](/concepts/system-prompt).
 
 ## Injected workspace files (Project Context)
 
-By default, OpenClaw injects a fixed set of workspace files (if present):
+By default, OpenClaw injects a fixed set of substantive workspace files:
 
 - `AGENTS.md`
 - `SOUL.md`
@@ -110,7 +110,7 @@ By default, OpenClaw injects a fixed set of workspace files (if present):
 - `HEARTBEAT.md`
 - `BOOTSTRAP.md` (first-run only)
 
-Large files are truncated per-file using `agents.defaults.bootstrapMaxChars` (default `12000` chars). OpenClaw also enforces a total bootstrap injection cap across files with `agents.defaults.bootstrapTotalMaxChars` (default `60000` chars). `/context` shows **raw vs injected** sizes and whether truncation happened.
+Missing, blank, header-only, and template-only bootstrap files are skipped before model injection. Large files are truncated per-file using `agents.defaults.bootstrapMaxChars` (default `12000` chars). OpenClaw also enforces a total bootstrap injection cap across files with `agents.defaults.bootstrapTotalMaxChars` (default `60000` chars). `/context` shows **raw vs injected** sizes and whether truncation happened.
 
 When truncation occurs, the runtime can inject an in-prompt warning block under Project Context. Configure this with `agents.defaults.bootstrapPromptTruncationWarning` (`off`, `once`, `always`; default `once`).
 

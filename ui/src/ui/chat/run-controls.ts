@@ -16,11 +16,11 @@ export type ChatRunControlsProps = {
 };
 
 export function renderChatRunControls(props: ChatRunControlsProps) {
+  const showNewSession = !props.canAbort && !props.draft.trim();
   return html`
     <div class="agent-chat__toolbar-right">
-      ${props.canAbort
-        ? nothing
-        : html`
+      ${showNewSession
+        ? html`
             <button
               class="btn btn--ghost"
               @click=${props.onNewSession}
@@ -29,7 +29,8 @@ export function renderChatRunControls(props: ChatRunControlsProps) {
             >
               ${icons.plus}
             </button>
-          `}
+          `
+        : nothing}
       <button
         class="btn btn--ghost"
         @click=${props.onExport}

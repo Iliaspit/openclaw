@@ -66,19 +66,28 @@ describe("chat run controls", () => {
       container,
     );
 
-    const newSessionButton = container.querySelector<HTMLButtonElement>(
-      'button[title="New session"]',
-    );
-    expect(newSessionButton).not.toBeNull();
-    newSessionButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    expect(onNewSession).toHaveBeenCalledTimes(1);
+    expect(container.querySelector<HTMLButtonElement>('button[title="New session"]')).toBeNull();
 
     const sendButton = container.querySelector<HTMLButtonElement>('button[title="Send"]');
     expect(sendButton).not.toBeNull();
     sendButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(onStoreDraft).toHaveBeenCalledWith(" run this ");
     expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onNewSession).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain("Stop");
+  });
+
+  it("shows new session only when idle draft is empty", () => {
+    const container = document.createElement("div");
+    const onNewSession = vi.fn();
+    render(renderChatRunControls(createProps({ draft: "", onNewSession })), container);
+
+    const newSessionButton = container.querySelector<HTMLButtonElement>(
+      'button[title="New session"]',
+    );
+    expect(newSessionButton).not.toBeNull();
+    newSessionButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(onNewSession).toHaveBeenCalledTimes(1);
   });
 
   it("queues draft text while an active run is abortable", () => {

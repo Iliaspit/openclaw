@@ -17,6 +17,7 @@ import {
 import {
   applyLegacyAuthStore,
   buildPersistedAuthProfileSecretsStore,
+  inheritUsableMainOAuthProfiles,
   loadLegacyAuthProfileStore,
   loadPersistedAuthProfileStore,
   mergeAuthProfileStores,
@@ -167,6 +168,30 @@ export function loadAuthProfileStore(): AuthProfileStore {
   return overlayExternalAuthProfiles(store);
 }
 
+function maybePersistInheritedMainOAuthProfiles(params: {
+  agentDir?: string;
+  store: AuthProfileStore;
+  mainStore: AuthProfileStore;
+  readOnly?: boolean;
+}): AuthProfileStore {
+  if (!params.agentDir || params.readOnly || process.env.OPENCLAW_AUTH_STORE_READONLY === "1") {
+    return params.store;
+  }
+  const authPath = resolveAuthStorePath(params.agentDir);
+  const mainAuthPath = resolveAuthStorePath();
+  if (authPath === mainAuthPath) {
+    return params.store;
+  }
+
+  const inherited = inheritUsableMainOAuthProfiles(params.mainStore, params.store);
+  if (inherited === params.store) {
+    return params.store;
+  }
+  saveAuthProfileStore(inherited, params.agentDir);
+  log.info("inherited newer OAuth credentials from main agent", { agentDir: params.agentDir });
+  return inherited;
+}
+
 function loadAuthProfileStoreForAgent(
   agentDir?: string,
   options?: LoadAuthProfileStoreOptions,
@@ -273,7 +298,13 @@ export function loadAuthProfileStoreForRuntime(
   }
 
   const mainStore = loadAuthProfileStoreForAgent(undefined, options);
-  return overlayExternalAuthProfiles(mergeAuthProfileStores(mainStore, store), {
+  const inheritedStore = maybePersistInheritedMainOAuthProfiles({
+    agentDir,
+    store,
+    mainStore,
+    readOnly: options?.readOnly,
+  });
+  return overlayExternalAuthProfiles(mergeAuthProfileStores(mainStore, inheritedStore), {
     agentDir,
   });
 }
@@ -292,7 +323,13 @@ export function loadAuthProfileStoreWithoutExternalProfiles(agentDir?: string): 
   }
 
   const mainStore = loadAuthProfileStoreForAgent(undefined, options);
-  return mergeAuthProfileStores(mainStore, store);
+  const inheritedStore = maybePersistInheritedMainOAuthProfiles({
+    agentDir,
+    store,
+    mainStore,
+    readOnly: options.readOnly,
+  });
+  return mergeAuthProfileStores(mainStore, inheritedStore);
 }
 
 export function ensureAuthProfileStore(
@@ -321,7 +358,12 @@ export function ensureAuthProfileStoreWithoutExternalProfiles(
   }
 
   const mainStore = loadAuthProfileStoreForAgent(undefined, options);
-  return mergeAuthProfileStores(mainStore, store);
+  const inheritedStore = maybePersistInheritedMainOAuthProfiles({
+    agentDir,
+    store,
+    mainStore,
+  });
+  return mergeAuthProfileStores(mainStore, inheritedStore);
 }
 
 export function findPersistedAuthProfileCredential(params: {

@@ -270,6 +270,7 @@ export function loadFacadeModuleAtLocationSync<T extends object>(params: {
   return sentinel;
 }
 
+// oxlint-disable-next-line typescript/no-unnecessary-type-parameters -- Synchronous facade loading lets callers ascribe the expected module surface.
 export function loadBundledPluginPublicSurfaceModuleSync<T extends object>(params: {
   dirName: string;
   artifactBasename: string;

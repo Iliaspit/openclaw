@@ -1,4 +1,8 @@
 import type {
+  SilentReplyPolicyShape,
+  SilentReplyRewriteShape,
+} from "../shared/silent-reply-policy.js";
+import type {
   AgentEmbeddedHarnessConfig,
   AgentModelConfig,
   AgentSandboxConfig,
@@ -76,6 +80,12 @@ export type AgentContextLimitsConfig = {
   postCompactionMaxChars?: number;
 };
 
+export type PromptOverlaysConfig = {
+  gpt5?: {
+    personality?: "friendly" | "off";
+  };
+};
+
 export type CliBackendConfig = {
   /** CLI command to execute (absolute path or on PATH). */
   command: string;
@@ -87,6 +97,8 @@ export type CliBackendConfig = {
   resumeOutput?: "json" | "text" | "jsonl";
   /** JSONL event dialect for CLIs with provider-specific stream formats. */
   jsonlDialect?: "claude-stream-json";
+  /** Long-lived CLI process mode. */
+  liveSession?: "claude-stdio";
   /** Prompt input mode (default: arg). */
   input?: "arg" | "stdin";
   /** Max prompt length for arg mode (if exceeded, stdin is used). */
@@ -191,8 +203,14 @@ export type AgentDefaultsConfig = {
   workspace?: string;
   /** Optional default allowlist of skills for agents that do not set agents.list[].skills. */
   skills?: string[];
+  /** Silent-reply policy by conversation type. */
+  silentReply?: SilentReplyPolicyShape;
+  /** Whether silent replies should be rewritten for the active conversation type. */
+  silentReplyRewrite?: SilentReplyRewriteShape;
   /** Optional repository root for system prompt runtime line (overrides auto-detect). */
   repoRoot?: string;
+  /** Provider-independent prompt overlays applied by model family. */
+  promptOverlays?: PromptOverlaysConfig;
   /** Optional full system prompt replacement. Primarily for prompt debugging and controlled experiments. */
   systemPromptOverride?: string;
   /** Skip bootstrap (BOOTSTRAP.md creation, etc.) for pre-configured deployments. */
@@ -273,7 +291,7 @@ export type AgentDefaultsConfig = {
   /** Vector memory search configuration (per-agent overrides supported). */
   memorySearch?: MemorySearchConfig;
   /** Default thinking level when no /think directive is present. */
-  thinkingDefault?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "adaptive";
+  thinkingDefault?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "adaptive" | "max";
   /** Default verbose level when no /verbose directive is present. */
   verboseDefault?: "off" | "on" | "full";
   /** Default elevated level when no /elevated directive is present. */

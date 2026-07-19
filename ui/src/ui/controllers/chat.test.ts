@@ -654,7 +654,9 @@ describe("loadChatHistory", () => {
     expect(state.chatLoading).toBe(true);
 
     state.chatRunId = "run-2";
-    deferred.resolve({ messages: [{ role: "assistant", content: [{ type: "text", text: "only" }] }] });
+    deferred.resolve({
+      messages: [{ role: "assistant", content: [{ type: "text", text: "only" }] }],
+    });
     await load;
 
     expect(state.chatMessages).toEqual([
@@ -666,6 +668,46 @@ describe("loadChatHistory", () => {
 });
 
 describe("sendChatMessage", () => {
+  it("does not show a sent user message or active run before chat.send is acknowledged", async () => {
+    const deferred = createDeferred<{ runId: string; status: string }>();
+    const request = vi.fn().mockReturnValue(deferred.promise);
+    const state = createState({
+      connected: true,
+      client: { request } as unknown as ChatState["client"],
+    });
+
+    const send = sendChatMessage(state, "hello");
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    expect(request).toHaveBeenCalledWith(
+      "chat.send",
+      expect.objectContaining({
+        sessionKey: "main",
+        message: "hello",
+        idempotencyKey: expect.any(String),
+      }),
+      { timeoutMs: 15_000 },
+    );
+
+    expect(state.chatSending).toBe(true);
+    expect(state.chatRunId).toBeNull();
+    expect(state.chatStream).toBeNull();
+    expect(state.chatMessages).toEqual([]);
+
+    deferred.resolve({ runId: "server-run", status: "started" });
+
+    await expect(send).resolves.toBe("server-run");
+    expect(state.chatRunId).toBe("server-run");
+    expect(state.chatStream).toBe("");
+    expect(state.chatSending).toBe(false);
+    expect(state.chatMessages).toEqual([
+      expect.objectContaining({
+        role: "user",
+        content: [{ type: "text", text: "hello" }],
+      }),
+    ]);
+    expect(request.mock.calls.map(([method]) => method)).toEqual(["chat.send"]);
+  });
+
   it("formats structured non-auth connect failures for chat send", async () => {
     const request = vi.fn().mockRejectedValue(
       new GatewayRequestError({
@@ -683,15 +725,17 @@ describe("sendChatMessage", () => {
 
     expect(result).toBeNull();
     expect(state.lastError).toContain("origin not allowed");
-    expect(state.chatMessages.at(-1)).toMatchObject({
-      role: "assistant",
-      content: [
-        {
-          type: "text",
-          text: expect.stringContaining("origin not allowed"),
-        },
-      ],
-    });
+    expect(state.chatMessages).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: expect.stringContaining("origin not allowed"),
+          },
+        ],
+      }),
+    ]);
   });
 });
 

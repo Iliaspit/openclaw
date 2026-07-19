@@ -427,10 +427,10 @@ export function discoverBundledPluginRuntimeDeps(params = {}) {
   }
 
   return [...deps.values()]
-    .map((dep) => ({
-      ...dep,
-      pluginIds: [...dep.pluginIds].toSorted((a, b) => a.localeCompare(b)),
-    }))
+    .map((dep) => {
+      dep.pluginIds = [...dep.pluginIds].toSorted((a, b) => a.localeCompare(b));
+      return dep;
+    })
     .toSorted((a, b) => a.name.localeCompare(b.name));
 }
 

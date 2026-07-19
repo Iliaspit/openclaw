@@ -172,7 +172,7 @@ describe("handleCommands reset hooks", () => {
     }
   });
 
-  it("uses gateway session reset for bound ACP sessions", async () => {
+  it("continues bare bound ACP resets into the agent startup turn", async () => {
     resetMocks.resolveBoundAcpThreadSessionKey.mockReturnValue(
       "agent:claude:acp:binding:discord:default:9373ab192b2317f4",
     );
@@ -197,10 +197,7 @@ describe("handleCommands reset hooks", () => {
       reason: "reset",
       commandSource: "discord:native",
     });
-    expect(result).toEqual({
-      shouldContinue: false,
-      reply: { text: "✅ ACP session reset in place." },
-    });
+    expect(result).toBeNull();
     expect(triggerInternalHookMock).not.toHaveBeenCalled();
     expect(params.command.resetHookTriggered).toBe(true);
   });

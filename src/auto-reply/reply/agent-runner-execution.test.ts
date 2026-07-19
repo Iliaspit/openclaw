@@ -12,6 +12,7 @@ import type { TypingSignaler } from "./typing-mode.js";
 const state = vi.hoisted(() => ({
   runEmbeddedPiAgentMock: vi.fn(),
   runCliAgentMock: vi.fn(),
+  persistCliTurnTranscriptMock: vi.fn(),
   runWithModelFallbackMock: vi.fn(),
   isCliProviderMock: vi.fn((_: unknown) => false),
   isInternalMessageChannelMock: vi.fn((_: unknown) => false),
@@ -24,6 +25,10 @@ vi.mock("../../agents/pi-embedded.js", () => ({
 
 vi.mock("../../agents/cli-runner.js", () => ({
   runCliAgent: (params: unknown) => state.runCliAgentMock(params),
+}));
+
+vi.mock("../../agents/command/attempt-execution.runtime.js", () => ({
+  persistCliTurnTranscript: (params: unknown) => state.persistCliTurnTranscriptMock(params),
 }));
 
 vi.mock("../../agents/model-fallback.js", () => ({
@@ -290,6 +295,8 @@ describe("runAgentTurnWithFallback", () => {
   beforeEach(() => {
     state.runEmbeddedPiAgentMock.mockReset();
     state.runCliAgentMock.mockReset();
+    state.persistCliTurnTranscriptMock.mockReset();
+    state.persistCliTurnTranscriptMock.mockResolvedValue(undefined);
     state.runWithModelFallbackMock.mockReset();
     state.isCliProviderMock.mockReset();
     state.isCliProviderMock.mockReturnValue(false);
@@ -362,6 +369,18 @@ describe("runAgentTurnWithFallback", () => {
         trigger: "user",
         messageChannel: "telegram",
         messageProvider: "telegram",
+      }),
+    );
+    expect(state.persistCliTurnTranscriptMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: "hello",
+        result: expect.objectContaining({
+          payloads: [{ text: "final" }],
+        }),
+        sessionId: followupRun.run.sessionId,
+        sessionKey: "main",
+        sessionAgentId: followupRun.run.agentId,
+        sessionCwd: followupRun.run.workspaceDir,
       }),
     );
   });

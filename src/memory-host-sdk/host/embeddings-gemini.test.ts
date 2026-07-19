@@ -56,7 +56,11 @@ afterEach(() => {
 
 async function createProviderWithFetch(
   fetchMock: JsonFetchMock,
-  options: Partial<Parameters<typeof createGeminiEmbeddingProvider>[0]> & { model: string },
+  options: {
+    model: string;
+    outputDimensionality?: number;
+    taskType?: string;
+  },
 ) {
   installFetchMock(fetchMock as unknown as typeof globalThis.fetch);
   mockPublicPinnedHostname();

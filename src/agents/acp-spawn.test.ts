@@ -754,7 +754,8 @@ describe("spawnAcpDirect", () => {
 
     expectAcceptedSpawn(result);
     const agentCall = findAgentGatewayCall();
-    const message = String(agentCall?.params?.message ?? "");
+    const rawMessage = agentCall?.params?.message;
+    const message = typeof rawMessage === "string" ? rawMessage : "";
     expect(message).toContain("[Child Slice Role]: full_gate");
     expect(message).toContain("report the first failing spec, test id, artifact, and command");
     expect(message).toContain("do not repair");

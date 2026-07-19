@@ -240,6 +240,7 @@ function buildFacadeActivationCheckParams(
   };
 }
 
+// oxlint-disable-next-line typescript/no-unnecessary-type-parameters -- Runtime facade loading lets callers ascribe the expected module surface.
 export function loadBundledPluginPublicSurfaceModuleSync<T extends object>(
   params: BundledPluginPublicSurfaceParams,
 ): T {
@@ -270,22 +271,20 @@ export function canLoadActivatedBundledPluginPublicSurface(params: {
   ).allowed;
 }
 
-export function loadActivatedBundledPluginPublicSurfaceModuleSync<T extends object>(params: {
-  dirName: string;
-  artifactBasename: string;
-  env?: NodeJS.ProcessEnv;
-}): T {
+// oxlint-disable-next-line typescript/no-unnecessary-type-parameters -- Activated facade loading preserves the caller-selected module surface.
+export function loadActivatedBundledPluginPublicSurfaceModuleSync<T extends object>(
+  params: BundledPluginPublicSurfaceParams,
+): T {
   loadFacadeActivationCheckRuntime().resolveActivatedBundledPluginPublicSurfaceAccessOrThrow(
     buildFacadeActivationCheckParams(params),
   );
   return loadBundledPluginPublicSurfaceModuleSync<T>(params);
 }
 
-export function tryLoadActivatedBundledPluginPublicSurfaceModuleSync<T extends object>(params: {
-  dirName: string;
-  artifactBasename: string;
-  env?: NodeJS.ProcessEnv;
-}): T | null {
+// oxlint-disable-next-line typescript/no-unnecessary-type-parameters -- Optional activated facade loading preserves the caller-selected module surface.
+export function tryLoadActivatedBundledPluginPublicSurfaceModuleSync<T extends object>(
+  params: BundledPluginPublicSurfaceParams,
+): T | null {
   const access = loadFacadeActivationCheckRuntime().resolveBundledPluginPublicSurfaceAccess(
     buildFacadeActivationCheckParams(params),
   );

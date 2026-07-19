@@ -349,6 +349,44 @@ describe("runPreparedReply media-only handling", () => {
     expect(vi.mocked(routeReply)).not.toHaveBeenCalled();
   });
 
+  it("runs bare /new turns with the session startup prompt", async () => {
+    await runPreparedReply(
+      baseParams({
+        ctx: {
+          Body: "/new",
+          RawBody: "/new",
+          CommandBody: "/new",
+        },
+        sessionCtx: {
+          Body: "",
+          BodyStripped: "",
+          Provider: "webchat",
+          OriginatingChannel: "webchat",
+          OriginatingTo: "control-ui",
+          ChatType: "direct",
+        },
+        command: {
+          surface: "webchat",
+          channel: "webchat",
+          isAuthorizedSender: true,
+          abortKey: "agent:planner:main",
+          ownerList: [],
+          senderIsOwner: true,
+          rawBodyNormalized: "/new",
+          commandBodyNormalized: "/new",
+        } as never,
+        commandSource: "/new",
+        sessionKey: "agent:planner:main",
+        resetTriggered: true,
+      }),
+    );
+
+    const call = vi.mocked(runReplyAgent).mock.calls[0]?.[0];
+    expect(call?.commandBody).toContain("A new session was started via /new or /reset");
+    expect(call?.commandBody).toContain("Execute your Session Startup sequence now");
+    expect(call?.resetTriggered).toBe(true);
+  });
+
   it("does not emit a reset notice when /new is attempted during gateway drain", async () => {
     vi.mocked(runReplyAgent).mockRejectedValueOnce(createGatewayDrainingError());
 

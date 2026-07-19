@@ -21,6 +21,15 @@ type UnknownToolLoopGuardState = {
   countedMessages: WeakSet<object>;
 };
 
+type TextToolTag = {
+  name: string;
+  arguments: Record<string, unknown>;
+};
+
+const TEXT_TOOL_TAG_PATTERN = /^<([A-Za-z_][\w.-]*)\s*([^<>]*?)\/>$/s;
+const TEXT_TOOL_TAG_ATTR_PATTERN =
+  /([A-Za-z_][\w.-]*)\s*=\s*(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)')/y;
+
 function resolveCaseInsensitiveAllowedToolName(
   rawName: string,
   allowedToolNames?: Set<string>,
@@ -60,6 +69,222 @@ function resolveExactAllowedToolName(
     resolveCaseInsensitiveAllowedToolName(rawName, allowedToolNames) ??
     resolveCaseInsensitiveAllowedToolName(normalized, allowedToolNames)
   );
+}
+
+function decodeTextToolTagAttribute(value: string): string {
+  const xmlDecoded = value
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&#x([0-9a-f]+);/gi, (_match, hex: string) =>
+      String.fromCodePoint(Number.parseInt(hex, 16)),
+    )
+    .replace(/&#([0-9]+);/g, (_match, decimal: string) =>
+      String.fromCodePoint(Number.parseInt(decimal, 10)),
+    );
+  return xmlDecoded.replace(/\\(["'\\nrt])/g, (_match, escaped: string) => {
+    if (escaped === "n") {
+      return "\n";
+    }
+    if (escaped === "r") {
+      return "\r";
+    }
+    if (escaped === "t") {
+      return "\t";
+    }
+    return escaped;
+  });
+}
+
+function coerceTextToolTagAttribute(value: string): unknown {
+  const trimmed = value.trim();
+  if (trimmed === "true") {
+    return true;
+  }
+  if (trimmed === "false") {
+    return false;
+  }
+  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+    const numeric = Number(trimmed);
+    if (Number.isFinite(numeric)) {
+      return numeric;
+    }
+  }
+  return value;
+}
+
+function parseTextToolTagAttributes(rawAttributes: string): Record<string, unknown> | null {
+  const attributes: Record<string, unknown> = {};
+  let cursor = 0;
+  while (cursor < rawAttributes.length) {
+    while (cursor < rawAttributes.length && /\s/.test(rawAttributes[cursor] ?? "")) {
+      cursor += 1;
+    }
+    if (cursor >= rawAttributes.length) {
+      break;
+    }
+    TEXT_TOOL_TAG_ATTR_PATTERN.lastIndex = cursor;
+    const match = TEXT_TOOL_TAG_ATTR_PATTERN.exec(rawAttributes);
+    if (!match) {
+      return null;
+    }
+    const rawValue = match[2] ?? match[3] ?? "";
+    attributes[match[1]] = coerceTextToolTagAttribute(decodeTextToolTagAttribute(rawValue));
+    cursor = TEXT_TOOL_TAG_ATTR_PATTERN.lastIndex;
+  }
+  return attributes;
+}
+
+function normalizeTextToolTagArguments(name: string, args: Record<string, unknown>) {
+  if (name === "sessions_spawn" && typeof args.prompt === "string" && args.task === undefined) {
+    args.task = args.prompt;
+    delete args.prompt;
+  }
+  if (name === "sessions_yield" && typeof args.status === "string" && args.message === undefined) {
+    args.message = args.status;
+    delete args.status;
+  }
+}
+
+function hashTextToolTag(value: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+export function parseOpenClawTextToolTag(
+  text: string,
+  allowedToolNames?: Set<string>,
+): TextToolTag | null {
+  const trimmed = text.trim();
+  const match = TEXT_TOOL_TAG_PATTERN.exec(trimmed);
+  if (!match) {
+    return null;
+  }
+  const name = resolveExactAllowedToolName(match[1], allowedToolNames);
+  if (!name) {
+    return null;
+  }
+  const args = parseTextToolTagAttributes(match[2] ?? "");
+  if (!args) {
+    return null;
+  }
+  normalizeTextToolTagArguments(name, args);
+  return { name, arguments: args };
+}
+
+function isTextBlock(block: unknown): block is { type: "text"; text?: unknown } {
+  return !!block && typeof block === "object" && (block as { type?: unknown }).type === "text";
+}
+
+function isThinkingBlock(block: unknown): boolean {
+  if (!block || typeof block !== "object") {
+    return false;
+  }
+  const type = (block as { type?: unknown }).type;
+  return type === "thinking" || type === "reasoning";
+}
+
+export function normalizeTextToolTagsInMessage(
+  message: unknown,
+  allowedToolNames?: Set<string>,
+): boolean {
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+  const record = message as { content?: unknown; stopReason?: unknown };
+  if (!Array.isArray(record.content)) {
+    return false;
+  }
+
+  const prefix: unknown[] = [];
+  for (const block of record.content) {
+    if (isTextBlock(block)) {
+      const text = typeof block.text === "string" ? block.text : "";
+      const parsed = parseOpenClawTextToolTag(text, allowedToolNames);
+      if (parsed) {
+        record.content = [
+          ...prefix,
+          {
+            type: "toolCall",
+            id: `call_text_${parsed.name}_${hashTextToolTag(text)}`,
+            name: parsed.name,
+            arguments: parsed.arguments,
+          },
+        ];
+        record.stopReason = "toolUse";
+        return true;
+      }
+      if (text.trim().length === 0) {
+        prefix.push(block);
+        continue;
+      }
+      return false;
+    }
+    if (isThinkingBlock(block)) {
+      prefix.push(block);
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
+function wrapStreamNormalizeTextToolTags(
+  stream: ReturnType<typeof streamSimple>,
+  allowedToolNames?: Set<string>,
+): ReturnType<typeof streamSimple> {
+  const originalResult = stream.result.bind(stream);
+  stream.result = async () => {
+    const message = await originalResult();
+    normalizeTextToolTagsInMessage(message, allowedToolNames);
+    return message;
+  };
+
+  const originalAsyncIterator = stream[Symbol.asyncIterator].bind(stream);
+  (stream as { [Symbol.asyncIterator]: typeof originalAsyncIterator })[Symbol.asyncIterator] =
+    function () {
+      const iterator = originalAsyncIterator();
+      return {
+        async next() {
+          const result = await iterator.next();
+          if (!result.done && result.value && typeof result.value === "object") {
+            const event = result.value as { partial?: unknown; message?: unknown };
+            normalizeTextToolTagsInMessage(event.partial, allowedToolNames);
+            normalizeTextToolTagsInMessage(event.message, allowedToolNames);
+          }
+          return result;
+        },
+        async return(value?: unknown) {
+          return iterator.return?.(value) ?? { done: true as const, value: undefined };
+        },
+        async throw(error?: unknown) {
+          return iterator.throw?.(error) ?? { done: true as const, value: undefined };
+        },
+      };
+    };
+
+  return stream;
+}
+
+export function wrapStreamFnNormalizeTextToolTags(
+  baseFn: StreamFn,
+  allowedToolNames?: Set<string>,
+): StreamFn {
+  return (model, context, streamOptions) => {
+    const maybeStream = baseFn(model, context, streamOptions);
+    if (maybeStream && typeof maybeStream === "object" && "then" in maybeStream) {
+      return Promise.resolve(maybeStream).then((stream) =>
+        wrapStreamNormalizeTextToolTags(stream, allowedToolNames),
+      );
+    }
+    return wrapStreamNormalizeTextToolTags(maybeStream, allowedToolNames);
+  };
 }
 
 function buildStructuredToolNameCandidates(rawName: string): string[] {

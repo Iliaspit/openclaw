@@ -132,7 +132,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
             type: "boolean",
             title: "Diagnostics Enabled",
             description:
-              "Master toggle for diagnostics instrumentation output in logs and telemetry wiring paths. Defaults to enabled; set false only in tightly constrained environments.",
+              "Master toggle for diagnostics instrumentation output in logs and telemetry wiring paths. Keep enabled for normal observability, and disable only in tightly constrained environments.",
           },
           flags: {
             type: "array",
@@ -671,7 +671,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                   type: "string",
                   title: "Browser Profile User Data Dir",
                   description:
-                    "Per-profile Chromium user data directory for existing-session attachment through Chrome DevTools MCP. Use this for Brave, Edge, Chromium, or non-default Chrome profiles when the built-in auto-connect path would pick the wrong browser data directory on the selected host or browser node.",
+                    "Per-profile Chromium user data directory for existing-session attachment through Chrome DevTools MCP. Use this for host-local Brave, Edge, Chromium, or non-default Chrome profiles when the built-in auto-connect path would pick the wrong browser data directory.",
                 },
                 driver: {
                   anyOf: [
@@ -690,7 +690,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                   ],
                   title: "Browser Profile Driver",
                   description:
-                    'Per-profile browser driver mode. Use "openclaw" (or legacy "clawd") for CDP-based profiles, or use "existing-session" for Chrome DevTools MCP attachment on the selected host or browser node.',
+                    'Per-profile browser driver mode. Use "openclaw" (or legacy "clawd") for CDP-based profiles, or use "existing-session" for host-local Chrome DevTools MCP attachment.',
                 },
                 attachOnly: {
                   type: "boolean",
@@ -3034,7 +3034,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                     enum: ["pi", "none"],
                     title: "Default Embedded Harness Fallback",
                     description:
-                      "Embedded harness fallback when no plugin harness matches. Selected plugin harness failures surface directly. Set none to disable automatic PI fallback.",
+                      "Embedded harness fallback when no plugin harness matches or an auto-selected plugin harness fails before side effects. Set none to disable automatic PI fallback.",
                   },
                 },
                 additionalProperties: false,
@@ -3354,20 +3354,14 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                           },
                         ],
                         title: "GPT-5 Personality Overlay",
-                        description:
-                          'Friendly interaction-style layer for GPT-5-family models ("friendly" or "on" enables it; "off" disables only that layer). The tagged behavior contract remains enabled for matching GPT-5 models.',
                       },
                     },
                     additionalProperties: false,
                     title: "GPT-5 Prompt Overlay",
-                    description:
-                      "Shared GPT-5-family prompt overlay applied to matching model ids across providers such as OpenAI, OpenRouter, OpenCode, Codex, and compatible gateways.",
                   },
                 },
                 additionalProperties: false,
                 title: "Prompt Overlays",
-                description:
-                  "Provider-independent prompt overlays applied by model family before provider-specific prompt hooks.",
               },
               skipBootstrap: {
                 type: "boolean",
@@ -3393,7 +3387,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                 maximum: 9007199254740991,
                 title: "Bootstrap Max Chars",
                 description:
-                  "Max characters of each workspace bootstrap file injected into the system prompt before truncation (default: 12000).",
+                  "Max characters of each workspace bootstrap file injected into the system prompt before truncation (default: 20000).",
               },
               bootstrapTotalMaxChars: {
                 type: "integer",
@@ -3401,7 +3395,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                 maximum: 9007199254740991,
                 title: "Bootstrap Total Max Chars",
                 description:
-                  "Max total characters across all injected workspace bootstrap files (default: 60000).",
+                  "Max total characters across all injected workspace bootstrap files (default: 150000).",
               },
               experimental: {
                 type: "object",
@@ -4187,8 +4181,6 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                           },
                         ],
                         title: "Local Embedding Context Size",
-                        description:
-                          'Context window size passed to node-llama-cpp when creating the embedding context (default: 4096). 4096 safely covers typical memory-search chunks (128–512 tokens) while keeping non-weight VRAM bounded. Lower to 1024–2048 on resource-constrained hosts. Set to "auto" to let node-llama-cpp use the model\'s trained maximum — not recommended for large models (e.g. Qwen3-Embedding-8B trained on 40 960 tokens can push VRAM from ~8.8 GB to ~32 GB).',
                       },
                     },
                     additionalProperties: false,
@@ -4766,7 +4758,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                     type: "boolean",
                     title: "Compaction Notify User",
                     description:
-                      "When enabled, sends brief compaction notices to the user when compaction starts and when it completes (for example, '🧹 Compacting context...' and '🧹 Compaction complete'). Disabled by default to keep compaction silent and non-intrusive.",
+                      "When enabled, sends a brief compaction notice to the user (e.g. '🧹 Compacting context...') when compaction starts. Disabled by default to keep compaction silent and non-intrusive.",
                   },
                 },
                 additionalProperties: false,
@@ -5795,7 +5787,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                   additionalProperties: false,
                   title: "Agent Embedded Harness",
                   description:
-                    "Per-agent embedded harness policy override. Use fallback=none to make missing plugin harness selection fail instead of falling back to PI.",
+                    "Per-agent embedded harness policy override. Use fallback=none to make this agent fail instead of falling back to PI.",
                 },
                 model: {
                   anyOf: [
@@ -7513,6 +7505,121 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
             title: "Agent List",
             description:
               "Explicit list of configured agents with IDs and optional overrides for model, tools, identity, and workspace. Keep IDs stable over time so bindings, approvals, and session routing remain deterministic.",
+          },
+          delegationGuard: {
+            type: "object",
+            properties: {
+              enabled: {
+                type: "boolean",
+                title: "Delegation Guard Enabled",
+                description:
+                  "Enables the delegation guard. Leave disabled or omit this block to preserve legacy unguarded delegation behavior.",
+              },
+              mode: {
+                type: "string",
+                enum: ["audit", "enforce"],
+                title: "Delegation Guard Mode",
+                description:
+                  "Audit records guarded delegation decisions without rejecting them; enforce rejects unauthorized or stale operations.",
+              },
+              controllers: {
+                minItems: 1,
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    agentId: {
+                      type: "string",
+                      minLength: 1,
+                    },
+                    requiredThinking: {
+                      type: "string",
+                      const: "xhigh",
+                    },
+                  },
+                  required: ["agentId", "requiredThinking"],
+                  additionalProperties: false,
+                },
+                title: "Delegation Controllers",
+                description:
+                  "Controller agents allowed to create slices, issue assignments, freeze waves, validate completion, consolidate remediation, and roll back. Controllers require exact xhigh thinking.",
+              },
+              workers: {
+                minItems: 5,
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    agentId: {
+                      type: "string",
+                      minLength: 1,
+                    },
+                    role: {
+                      type: "string",
+                      enum: ["helper", "implementer", "tester", "reviewer", "qa"],
+                    },
+                    requiredThinking: {
+                      type: "string",
+                      enum: ["medium", "high", "xhigh"],
+                    },
+                    workspaceAccess: {
+                      type: "string",
+                      enum: ["ro", "rw"],
+                    },
+                  },
+                  required: ["agentId", "role", "requiredThinking", "workspaceAccess"],
+                  additionalProperties: false,
+                },
+                title: "Delegation Workers",
+                description:
+                  "One agent per guarded helper, implementer, tester, reviewer, and QA role, including its exact thinking requirement and read-only or read-write workspace policy.",
+              },
+              validator: {
+                type: "object",
+                properties: {
+                  id: {
+                    type: "string",
+                    minLength: 1,
+                  },
+                  version: {
+                    type: "string",
+                    minLength: 1,
+                  },
+                  sha256: {
+                    type: "string",
+                    pattern: "^[a-f0-9]{64}$",
+                    title: "Delegation Validator SHA-256",
+                    description:
+                      "Lowercase SHA-256 digest used to pin the installed validator artifact.",
+                  },
+                  entrypoint: {
+                    type: "string",
+                    minLength: 1,
+                    title: "Delegation Validator Entrypoint",
+                    description:
+                      "Operator-controlled validator entrypoint outside guarded agent workspaces.",
+                  },
+                  maxOutputBytes: {
+                    type: "integer",
+                    minimum: 1024,
+                    maximum: 1048576,
+                    title: "Delegation Validator Output Limit",
+                    description:
+                      "Maximum validator output accepted by the gateway. Larger or malformed output is rejected fail closed.",
+                  },
+                },
+                required: ["id", "version", "sha256", "entrypoint", "maxOutputBytes"],
+                additionalProperties: false,
+                title: "Delegation Validator",
+                description:
+                  "Digest-pinned, operator-installed validator metadata. The entrypoint must remain outside agent workspaces and validator updates require a new runtime epoch.",
+              },
+            },
+            required: ["enabled", "mode", "controllers", "workers", "validator"],
+            additionalProperties: false,
+            title: "Delegation Guard",
+            description:
+              "Optional gateway-owned delegation authority. When enabled, guarded controllers and workers use immutable assignments, exact thinking requirements, protected evidence, and one-use route tokens.",
           },
         },
         additionalProperties: false,
@@ -18925,8 +19032,6 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
             default: true,
             type: "boolean",
             title: "Allow /models writes",
-            description:
-              "Allow model-management write commands such as `/models add` to register provider/model entries directly into config and make them available without restarting the gateway (default: true).",
           },
           bash: {
             type: "boolean",
@@ -21354,7 +21459,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
             maximum: 9007199254740991,
             title: "Gateway Channel Stale Event Threshold (min)",
             description:
-              "How many minutes a connected channel can go without provider-proven transport activity before the health monitor treats it as a stale socket and triggers a restart. Default: 30.",
+              "How many minutes a connected channel can go without receiving any event before the health monitor treats it as a stale socket and triggers a restart. Default: 30.",
           },
           channelMaxRestartsPerHour: {
             type: "integer",
@@ -23336,7 +23441,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "diagnostics.enabled": {
       label: "Diagnostics Enabled",
-      help: "Master toggle for diagnostics instrumentation output in logs and telemetry wiring paths. Defaults to enabled; set false only in tightly constrained environments.",
+      help: "Master toggle for diagnostics instrumentation output in logs and telemetry wiring paths. Keep enabled for normal observability, and disable only in tightly constrained environments.",
       tags: ["observability"],
     },
     "diagnostics.flags": {
@@ -23484,6 +23589,51 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       help: "Optional per-agent default for fast mode. Applies when no per-message or session fast-mode override is set.",
       tags: ["advanced"],
     },
+    "agents.delegationGuard": {
+      label: "Delegation Guard",
+      help: "Optional gateway-owned delegation authority. When enabled, guarded controllers and workers use immutable assignments, exact thinking requirements, protected evidence, and one-use route tokens.",
+      tags: ["advanced"],
+    },
+    "agents.delegationGuard.enabled": {
+      label: "Delegation Guard Enabled",
+      help: "Enables the delegation guard. Leave disabled or omit this block to preserve legacy unguarded delegation behavior.",
+      tags: ["advanced"],
+    },
+    "agents.delegationGuard.mode": {
+      label: "Delegation Guard Mode",
+      help: "Audit records guarded delegation decisions without rejecting them; enforce rejects unauthorized or stale operations.",
+      tags: ["advanced"],
+    },
+    "agents.delegationGuard.controllers": {
+      label: "Delegation Controllers",
+      help: "Controller agents allowed to create slices, issue assignments, freeze waves, validate completion, consolidate remediation, and roll back. Controllers require exact xhigh thinking.",
+      tags: ["advanced"],
+    },
+    "agents.delegationGuard.workers": {
+      label: "Delegation Workers",
+      help: "One agent per guarded helper, implementer, tester, reviewer, and QA role, including its exact thinking requirement and read-only or read-write workspace policy.",
+      tags: ["advanced"],
+    },
+    "agents.delegationGuard.validator": {
+      label: "Delegation Validator",
+      help: "Digest-pinned, operator-installed validator metadata. The entrypoint must remain outside agent workspaces and validator updates require a new runtime epoch.",
+      tags: ["advanced"],
+    },
+    "agents.delegationGuard.validator.sha256": {
+      label: "Delegation Validator SHA-256",
+      help: "Lowercase SHA-256 digest used to pin the installed validator artifact.",
+      tags: ["advanced"],
+    },
+    "agents.delegationGuard.validator.entrypoint": {
+      label: "Delegation Validator Entrypoint",
+      help: "Operator-controlled validator entrypoint outside guarded agent workspaces.",
+      tags: ["advanced"],
+    },
+    "agents.delegationGuard.validator.maxOutputBytes": {
+      label: "Delegation Validator Output Limit",
+      help: "Maximum validator output accepted by the gateway. Larger or malformed output is rejected fail closed.",
+      tags: ["performance"],
+    },
     "agents.defaults": {
       label: "Agent Defaults",
       help: "Shared default settings inherited by agents unless overridden per entry in agents.list. Use defaults to enforce consistent baseline behavior and reduce duplicated per-agent configuration.",
@@ -23526,7 +23676,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "agents.defaults.embeddedHarness.fallback": {
       label: "Default Embedded Harness Fallback",
-      help: "Embedded harness fallback when no plugin harness matches. Selected plugin harness failures surface directly. Set none to disable automatic PI fallback.",
+      help: "Embedded harness fallback when no plugin harness matches or an auto-selected plugin harness fails before side effects. Set none to disable automatic PI fallback.",
       tags: ["reliability"],
     },
     "agents.list": {
@@ -23571,7 +23721,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "agents.list.*.embeddedHarness": {
       label: "Agent Embedded Harness",
-      help: "Per-agent embedded harness policy override. Use fallback=none to make missing plugin harness selection fail instead of falling back to PI.",
+      help: "Per-agent embedded harness policy override. Use fallback=none to make this agent fail instead of falling back to PI.",
       tags: ["advanced"],
     },
     "agents.list.*.embeddedHarness.runtime": {
@@ -23671,7 +23821,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "gateway.channelStaleEventThresholdMinutes": {
       label: "Gateway Channel Stale Event Threshold (min)",
-      help: "How many minutes a connected channel can go without provider-proven transport activity before the health monitor treats it as a stale socket and triggers a restart. Default: 30.",
+      help: "How many minutes a connected channel can go without receiving any event before the health monitor treats it as a stale socket and triggers a restart. Default: 30.",
       tags: ["network"],
     },
     "gateway.channelMaxRestartsPerHour": {
@@ -23868,12 +24018,12 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "browser.profiles.*.userDataDir": {
       label: "Browser Profile User Data Dir",
-      help: "Per-profile Chromium user data directory for existing-session attachment through Chrome DevTools MCP. Use this for Brave, Edge, Chromium, or non-default Chrome profiles when the built-in auto-connect path would pick the wrong browser data directory on the selected host or browser node.",
+      help: "Per-profile Chromium user data directory for existing-session attachment through Chrome DevTools MCP. Use this for host-local Brave, Edge, Chromium, or non-default Chrome profiles when the built-in auto-connect path would pick the wrong browser data directory.",
       tags: ["storage"],
     },
     "browser.profiles.*.driver": {
       label: "Browser Profile Driver",
-      help: 'Per-profile browser driver mode. Use "openclaw" (or legacy "clawd") for CDP-based profiles, or use "existing-session" for Chrome DevTools MCP attachment on the selected host or browser node.',
+      help: 'Per-profile browser driver mode. Use "openclaw" (or legacy "clawd") for CDP-based profiles, or use "existing-session" for host-local Chrome DevTools MCP attachment.',
       tags: ["storage"],
     },
     "browser.profiles.*.attachOnly": {
@@ -24979,17 +25129,14 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "agents.defaults.promptOverlays": {
       label: "Prompt Overlays",
-      help: "Provider-independent prompt overlays applied by model family before provider-specific prompt hooks.",
       tags: ["advanced"],
     },
     "agents.defaults.promptOverlays.gpt5": {
       label: "GPT-5 Prompt Overlay",
-      help: "Shared GPT-5-family prompt overlay applied to matching model ids across providers such as OpenAI, OpenRouter, OpenCode, Codex, and compatible gateways.",
       tags: ["advanced"],
     },
     "agents.defaults.promptOverlays.gpt5.personality": {
       label: "GPT-5 Personality Overlay",
-      help: 'Friendly interaction-style layer for GPT-5-family models ("friendly" or "on" enables it; "off" disables only that layer). The tagged behavior contract remains enabled for matching GPT-5 models.',
       tags: ["advanced"],
     },
     "agents.defaults.contextInjection": {
@@ -24999,12 +25146,12 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "agents.defaults.bootstrapMaxChars": {
       label: "Bootstrap Max Chars",
-      help: "Max characters of each workspace bootstrap file injected into the system prompt before truncation (default: 12000).",
+      help: "Max characters of each workspace bootstrap file injected into the system prompt before truncation (default: 20000).",
       tags: ["performance"],
     },
     "agents.defaults.bootstrapTotalMaxChars": {
       label: "Bootstrap Total Max Chars",
-      help: "Max total characters across all injected workspace bootstrap files (default: 60000).",
+      help: "Max total characters across all injected workspace bootstrap files (default: 150000).",
       tags: ["performance"],
     },
     "agents.defaults.experimental": {
@@ -25210,7 +25357,6 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "agents.defaults.memorySearch.local.contextSize": {
       label: "Local Embedding Context Size",
-      help: 'Context window size passed to node-llama-cpp when creating the embedding context (default: 4096). 4096 safely covers typical memory-search chunks (128–512 tokens) while keeping non-weight VRAM bounded. Lower to 1024–2048 on resource-constrained hosts. Set to "auto" to let node-llama-cpp use the model\'s trained maximum — not recommended for large models (e.g. Qwen3-Embedding-8B trained on 40 960 tokens can push VRAM from ~8.8 GB to ~32 GB).',
       tags: ["advanced"],
     },
     "agents.defaults.memorySearch.store.path": {
@@ -26031,7 +26177,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "agents.defaults.compaction.notifyUser": {
       label: "Compaction Notify User",
-      help: "When enabled, sends brief compaction notices to the user when compaction starts and when it completes (for example, '🧹 Compacting context...' and '🧹 Compaction complete'). Disabled by default to keep compaction silent and non-intrusive.",
+      help: "When enabled, sends a brief compaction notice to the user (e.g. '🧹 Compacting context...') when compaction starts. Disabled by default to keep compaction silent and non-intrusive.",
       tags: ["advanced"],
     },
     "agents.defaults.compaction.memoryFlush": {
@@ -26159,7 +26305,6 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "commands.modelsWrite": {
       label: "Allow /models writes",
-      help: "Allow model-management write commands such as `/models add` to register provider/model entries directly into config and make them available without restarting the gateway (default: true).",
       tags: ["advanced"],
     },
     "commands.bash": {

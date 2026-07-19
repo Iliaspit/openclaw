@@ -7,6 +7,10 @@ import {
 import { DEFAULT_BROWSER_EVALUATE_ENABLED } from "../../plugin-sdk/browser-profiles.js";
 import { defaultRuntime } from "../../runtime.js";
 import { resolveUserPath } from "../../utils.js";
+import {
+  resolveDelegationGuardConfig,
+  resolveDelegationGuardPrincipal,
+} from "../delegation/policy.js";
 import { DEFAULT_AGENT_WORKSPACE_DIR } from "../workspace.js";
 import { requireSandboxBackendFactory } from "./backend.js";
 import { ensureSandboxBrowser } from "./browser.js";
@@ -17,6 +21,26 @@ import { resolveSandboxRuntimeStatus } from "./runtime-status.js";
 import { resolveSandboxScopeKey, resolveSandboxWorkspaceDir } from "./shared.js";
 import type { SandboxContext, SandboxDockerConfig, SandboxWorkspaceInfo } from "./types.js";
 import { ensureSandboxWorkspace } from "./workspace.js";
+
+export function resolveSandboxPrimaryWorkspaceDir(params: {
+  config?: OpenClawConfig;
+  agentId: string;
+  workspaceAccess: "none" | "ro" | "rw";
+  agentWorkspaceDir: string;
+  sandboxWorkspaceDir: string;
+}): string {
+  if (params.workspaceAccess === "rw") {
+    return params.agentWorkspaceDir;
+  }
+  const guard = params.config ? resolveDelegationGuardConfig(params.config) : undefined;
+  const guardedPrincipal = guard
+    ? resolveDelegationGuardPrincipal(guard, params.agentId)
+    : undefined;
+  if (params.workspaceAccess === "ro" && guardedPrincipal) {
+    return params.agentWorkspaceDir;
+  }
+  return params.sandboxWorkspaceDir;
+}
 
 async function ensureSandboxWorkspaceLayout(params: {
   cfg: ReturnType<typeof resolveSandboxConfigForAgent>;
@@ -39,7 +63,13 @@ async function ensureSandboxWorkspaceLayout(params: {
   const scopeKey = resolveSandboxScopeKey(cfg.scope, rawSessionKey);
   const sandboxWorkspaceDir =
     cfg.scope === "shared" ? workspaceRoot : resolveSandboxWorkspaceDir(workspaceRoot, scopeKey);
-  const workspaceDir = cfg.workspaceAccess === "rw" ? agentWorkspaceDir : sandboxWorkspaceDir;
+  const workspaceDir = resolveSandboxPrimaryWorkspaceDir({
+    config: params.config,
+    agentId: params.agentId,
+    workspaceAccess: cfg.workspaceAccess,
+    agentWorkspaceDir,
+    sandboxWorkspaceDir,
+  });
 
   if (workspaceDir === sandboxWorkspaceDir) {
     await ensureSandboxWorkspace(

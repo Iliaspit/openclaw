@@ -470,7 +470,7 @@ async function createBootstrapWarningScenario(workspaceDir: string): Promise<Pro
       },
     },
   } satisfies OpenClawConfig;
-  const largeAgents = "# AGENTS.md\n\n" + "Rules.\n".repeat(5_000);
+  const largeAgents = "# AGENTS.md\n\nFollow all workspace policy.\n";
   const largeTools = "# TOOLS.md\n\n" + "Notes.\n".repeat(3_000);
   await writeWorkspaceFile({ dir: workspaceDir, name: "AGENTS.md", content: largeAgents });
   await writeWorkspaceFile({ dir: workspaceDir, name: "TOOLS.md", content: largeTools });

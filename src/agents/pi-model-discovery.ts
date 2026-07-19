@@ -136,18 +136,23 @@ function createOpenClawModelRegistry(
   authStorage: PiAuthStorage,
   modelsJsonPath: string,
   agentDir: string,
+  options?: { providerFilter?: string },
 ): PiModelRegistry {
   const registry = instantiatePiModelRegistry(authStorage, modelsJsonPath);
   const getAll = registry.getAll.bind(registry);
   const getAvailable = registry.getAvailable.bind(registry);
   const find = registry.find.bind(registry);
 
-  registry.getAll = () =>
-    getAll().map((entry: Model<Api>) => normalizeDiscoveredPiModel(entry, agentDir));
-  registry.getAvailable = () =>
-    getAvailable().map((entry: Model<Api>) => normalizeDiscoveredPiModel(entry, agentDir));
+  const filterModels = (models: Model<Api>[]) =>
+    models
+      .filter((entry) => !options?.providerFilter || entry.provider === options.providerFilter)
+      .map((entry) => normalizeDiscoveredPiModel(entry, agentDir));
+  registry.getAll = () => filterModels(getAll());
+  registry.getAvailable = () => filterModels(getAvailable());
   registry.find = (provider: string, modelId: string) =>
-    normalizeDiscoveredPiModel(find(provider, modelId), agentDir);
+    options?.providerFilter && provider !== options.providerFilter
+      ? undefined
+      : normalizeDiscoveredPiModel(find(provider, modelId), agentDir);
 
   return registry;
 }
@@ -292,13 +297,27 @@ export function resolvePiCredentialsForDiscovery(agentDir: string): PiCredential
 }
 
 // Compatibility helpers for pi-coding-agent 0.50+ (discover* helpers removed).
-export function discoverAuthStorage(agentDir: string): PiAuthStorage {
+export function discoverAuthStorage(
+  agentDir: string,
+  options?: { readOnly?: boolean },
+): PiAuthStorage {
   const credentials = resolvePiCredentialsForDiscovery(agentDir);
   const authPath = path.join(agentDir, "auth.json");
-  scrubLegacyStaticAuthJsonEntriesForDiscovery(authPath);
+  if (options?.readOnly !== true) {
+    scrubLegacyStaticAuthJsonEntriesForDiscovery(authPath);
+  }
   return createAuthStorage(PiAuthStorageClass, authPath, credentials);
 }
 
-export function discoverModels(authStorage: PiAuthStorage, agentDir: string): PiModelRegistry {
-  return createOpenClawModelRegistry(authStorage, path.join(agentDir, "models.json"), agentDir);
+export function discoverModels(
+  authStorage: PiAuthStorage,
+  agentDir: string,
+  options?: { providerFilter?: string },
+): PiModelRegistry {
+  return createOpenClawModelRegistry(
+    authStorage,
+    path.join(agentDir, "models.json"),
+    agentDir,
+    options,
+  );
 }

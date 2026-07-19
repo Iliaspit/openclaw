@@ -41,6 +41,7 @@ RUN mkdir -p /out && \
 
 # ── Stage 2: Build ──────────────────────────────────────────────
 FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS build
+ARG OPENCLAW_EXTENSIONS
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR
 
 # Install Bun (required for build scripts). Retry the whole bootstrap flow to
@@ -65,7 +66,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY openclaw.mjs ./
 COPY ui/package.json ./ui/package.json
 COPY patches ./patches
-COPY scripts/postinstall-bundled-plugins.mjs scripts/npm-runner.mjs scripts/windows-cmd-helpers.mjs ./scripts/
+COPY scripts/postinstall-bundled-plugins.mjs scripts/preinstall-package-manager-warning.mjs scripts/npm-runner.mjs scripts/windows-cmd-helpers.mjs ./scripts/
 
 COPY --from=ext-deps /out/ ./${OPENCLAW_BUNDLED_PLUGIN_DIR}/
 
@@ -76,7 +77,25 @@ RUN node -e 'const fs = require("node:fs"); const p = JSON.parse(fs.readFileSync
 # Reduce OOM risk on low-memory hosts during dependency installation.
 # Docker builds on small VMs may otherwise fail with "Killed" (exit 137).
 RUN --mount=type=cache,id=openclaw-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
-    NODE_OPTIONS=--max-old-space-size=2048 pnpm install --frozen-lockfile
+     NODE_OPTIONS=--max-old-space-size=2048 pnpm install --frozen-lockfile
+
+# Verify the Matrix native addon without depending on pnpm's virtual-store layout.
+RUN set -eux; \
+    case " $OPENCLAW_EXTENSIONS " in \
+      *" matrix "*) ;; \
+      *) echo "==> matrix not bundled, skipping matrix-sdk-crypto check"; exit 0 ;; \
+    esac; \
+    echo "==> Verifying critical native addons..."; \
+    for attempt in 1 2 3 4 5; do \
+      if find /app/node_modules -name "matrix-sdk-crypto*.node" 2>/dev/null | grep -q .; then \
+        exit 0; \
+      fi; \
+      echo "matrix-sdk-crypto native addon missing; retrying download (${attempt}/5)"; \
+      node /app/node_modules/@matrix-org/matrix-sdk-crypto-nodejs/download-lib.js || true; \
+      sleep $((attempt * 2)); \
+    done; \
+    find /app/node_modules -name "matrix-sdk-crypto*.node" 2>/dev/null | grep -q . || \
+      (echo "ERROR: matrix-sdk-crypto native addon missing after retries" >&2 && exit 1)
 
 # Same flag as the runtime stage: when set, bake Chromium + apt deps into this
 # stage so `docker build --target build` images (e.g. openclaw:local-live) can
@@ -130,12 +149,13 @@ ARG OPENCLAW_BUNDLED_PLUGIN_DIR
 # the root, `ui`, and opted-in plugin manifests into the install layer, so
 # prune must not rediscover unrelated workspaces from the later full source
 # copy.
-RUN printf 'packages:\n  - .\n  - ui\n' > /tmp/pnpm-workspace.runtime.yaml && \
+RUN --mount=type=cache,id=openclaw-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
+    printf 'packages:\n  - .\n  - ui\n' > /tmp/pnpm-workspace.runtime.yaml && \
     for ext in $OPENCLAW_EXTENSIONS; do \
       printf '  - %s/%s\n' "$OPENCLAW_BUNDLED_PLUGIN_DIR" "$ext" >> /tmp/pnpm-workspace.runtime.yaml; \
     done && \
     cp /tmp/pnpm-workspace.runtime.yaml pnpm-workspace.yaml && \
-    CI=true npm prune --omit=dev --omit=optional --ignore-scripts --legacy-peer-deps --no-save --package-lock=false && \
+    CI=true NPM_CONFIG_FROZEN_LOCKFILE=false pnpm prune --prod && \
     NPM_CONFIG_OMIT=optional npm_config_omit=optional node scripts/postinstall-bundled-plugins.mjs && \
     find dist -type f \( -name '*.d.ts' -o -name '*.d.mts' -o -name '*.d.cts' -o -name '*.map' \) -delete
 

@@ -17,6 +17,7 @@ import { withTempDir } from "../test-helpers/temp-dir.js";
 import { createManagedTaskFlow, resetTaskFlowRegistryForTests } from "./task-flow-registry.js";
 import { configureTaskFlowRegistryRuntime } from "./task-flow-registry.store.js";
 import {
+  assertTaskRegistryDurableLookupReady,
   cancelTaskById,
   createTaskRecord,
   findLatestTaskForOwnerKey,
@@ -55,6 +56,10 @@ import {
   sweepTaskRegistry,
 } from "./task-registry.maintenance.js";
 import { configureTaskRegistryRuntime } from "./task-registry.store.js";
+import {
+  loadTaskRegistryStateFromSqlite,
+  setTaskRegistryPermissionRepairForTests,
+} from "./task-registry.store.sqlite.js";
 
 const ORIGINAL_STATE_DIR = process.env.OPENCLAW_STATE_DIR;
 const hoisted = vi.hoisted(() => {
@@ -234,6 +239,7 @@ describe("task-registry", () => {
     resetTaskRegistryControlRuntimeForTests();
     resetTaskRegistryDeliveryRuntimeForTests();
     resetTaskRegistryMaintenanceRuntimeForTests();
+    setTaskRegistryPermissionRepairForTests();
     resetTaskRegistryForTests({ persist: false });
     resetTaskFlowRegistryForTests({ persist: false });
     hoisted.sendMessageMock.mockReset();
@@ -1238,6 +1244,185 @@ describe("task-registry", () => {
         runId: "run-restore",
         task: "Restore me",
       });
+    });
+  });
+
+  it.each(["task row", "delivery state"])(
+    "rolls back an atomic task creation when the %s write fails",
+    async (failedPart) => {
+      await withTaskRegistryTempDir(async (root) => {
+        process.env.OPENCLAW_STATE_DIR = root;
+        resetTaskRegistryForTests({ persist: false });
+        configureTaskRegistryRuntime({
+          store: {
+            loadSnapshot: () => ({ tasks: new Map(), deliveryStates: new Map() }),
+            saveSnapshot: () => {},
+            upsertTaskWithDeliveryState: () => {
+              throw new Error(`${failedPart} persistence failed`);
+            },
+          },
+        });
+
+        expect(() =>
+          createTaskRecord({
+            runtime: "subagent",
+            ownerKey: "agent:planner:main",
+            scopeKind: "session",
+            requesterOrigin: { channel: "notifychat", to: "notifychat:planner" },
+            childSessionKey: "agent:helper:subagent:atomic-create",
+            runId: `run-atomic-create-${failedPart}`,
+            task: "Create atomically",
+            status: "running",
+          }),
+        ).toThrow(`${failedPart} persistence failed`);
+        expect(listTaskRecords()).toEqual([]);
+        expect(findTaskByRunId(`run-atomic-create-${failedPart}`)).toBeUndefined();
+        expect(() => assertTaskRegistryDurableLookupReady()).toThrow(
+          "Task registry durable state is unavailable",
+        );
+      });
+    },
+  );
+
+  it("fails real SQLite task creation before BEGIN when permission repair fails", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryForTests({ persist: false });
+      expect(listTaskRecords()).toEqual([]);
+      setTaskRegistryPermissionRepairForTests(() => {
+        throw new Error("task registry permission repair failed");
+      });
+
+      expect(() =>
+        createTaskRecord({
+          runtime: "subagent",
+          ownerKey: "agent:planner:main",
+          scopeKind: "session",
+          requesterOrigin: { channel: "notifychat", to: "notifychat:planner" },
+          childSessionKey: "agent:helper:subagent:permission-failure",
+          runId: "run-permission-failure",
+          task: "Do not commit a phantom task",
+          status: "running",
+        }),
+      ).toThrow("task registry permission repair failed");
+      expect(listTaskRecords()).toEqual([]);
+      expect(findTaskByRunId("run-permission-failure")).toBeUndefined();
+      expect(() => assertTaskRegistryDurableLookupReady()).toThrow(
+        "Task registry durable state is unavailable",
+      );
+
+      setTaskRegistryPermissionRepairForTests();
+      resetTaskRegistryForTests({ persist: false });
+      const snapshot = loadTaskRegistryStateFromSqlite();
+      expect(snapshot.tasks.size).toBe(0);
+      expect(snapshot.deliveryStates.size).toBe(0);
+    });
+  });
+
+  it("retries a failed restore on a cooldown instead of giving up forever", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryForTests();
+      vi.useFakeTimers();
+      try {
+        const loadSnapshot = vi.fn().mockImplementationOnce(() => {
+          throw new Error("database disk image is malformed");
+        });
+        configureTaskRegistryRuntime({
+          store: {
+            loadSnapshot,
+            saveSnapshot: () => {},
+          },
+        });
+
+        expect(listTaskRecords()).toEqual([]);
+        expect(loadSnapshot).toHaveBeenCalledTimes(1);
+
+        // Still within the cooldown: no retry yet.
+        expect(listTaskRecords()).toEqual([]);
+        expect(loadSnapshot).toHaveBeenCalledTimes(1);
+
+        loadSnapshot.mockImplementation(() => ({
+          tasks: new Map([
+            [
+              "task-recovered",
+              {
+                taskId: "task-recovered",
+                runtime: "acp",
+                requesterSessionKey: "agent:main:main",
+                ownerKey: "agent:main:main",
+                scopeKind: "session",
+                runId: "run-recovered",
+                task: "Recovered after repair",
+                status: "running",
+                deliveryStatus: "pending",
+                notifyPolicy: "done_only",
+                createdAt: Date.now(),
+              },
+            ],
+          ]),
+          deliveryStates: new Map(),
+        }));
+
+        vi.advanceTimersByTime(30_000);
+
+        expect(listTaskRecords().map((entry) => entry.taskId)).toEqual(["task-recovered"]);
+        expect(loadSnapshot).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it("stops retrying a failed restore once a task exists only in memory", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryForTests();
+      const loadSnapshot = vi.fn().mockImplementation(() => {
+        throw new Error("database disk image is malformed");
+      });
+      configureTaskRegistryRuntime({
+        store: {
+          loadSnapshot,
+          saveSnapshot: () => {},
+        },
+      });
+
+      expect(listTaskRecords()).toEqual([]);
+      expect(loadSnapshot).toHaveBeenCalledTimes(1);
+
+      const task = createTaskRecord({
+        runtime: "acp",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        runId: "run-in-memory-only",
+        task: "Created while restore is down",
+      });
+
+      loadSnapshot.mockImplementation(() => ({
+        tasks: new Map([
+          [
+            "task-would-clobber",
+            {
+              taskId: "task-would-clobber",
+              runtime: "acp",
+              requesterSessionKey: "agent:main:main",
+              ownerKey: "agent:main:main",
+              scopeKind: "session",
+              runId: "run-would-clobber",
+              task: "Should not appear",
+              status: "running",
+              deliveryStatus: "pending",
+              notifyPolicy: "done_only",
+              createdAt: Date.now(),
+            },
+          ],
+        ]),
+        deliveryStates: new Map(),
+      }));
+
+      expect(listTaskRecords().map((entry) => entry.taskId)).toEqual([task.taskId]);
+      expect(loadSnapshot).toHaveBeenCalledTimes(1);
     });
   });
 

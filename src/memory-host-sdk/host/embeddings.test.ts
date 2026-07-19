@@ -355,7 +355,7 @@ describe("embedding provider auto selection", () => {
     const cases: Array<{
       name: string;
       expectedProvider: "openai" | "gemini" | "mistral";
-      fetchMockFactory: typeof createFetchMock | typeof createGeminiFetchMock;
+      fetchMockFactory: () => ReturnType<typeof createFetchMock>;
       resolveApiKey: (provider: string) => ResolvedProviderAuth;
       expectedUrl: string;
     }> = [

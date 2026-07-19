@@ -5,6 +5,15 @@
 - Do not edit files covered by security-focused `CODEOWNERS` rules unless a listed owner explicitly asked for the change or is already reviewing it with you. Treat those paths as restricted surfaces, not drive-by cleanup.
 - Before investigating an issue or making a requested change, consult `INCIDENTS.md` when present for prior failure modes and fixes that may affect the approach. Append a concise entry when the work reveals or resolves an incident.
 
+## Scope Control And Repository Boundary
+
+- The approved OpenClaw task or slice is a hard boundary. Never expand into adjacent refactors, cleanup, migrations, test repairs, runtime changes, or other defects without explicit user prioritization and approval.
+- Classify newly discovered work as `current-scope`, `blocking dependency`, or `deferred tangent`. Only current-scope work belongs in the active slice.
+- For every deferred tangent, report a **Deferred Findings / Tangent Ledger** entry with evidence, impact, relationship to the active slice, recommended priority, risk/effort, owning repository, and proposed follow-up slice. Do not implement it until the user prioritizes it.
+- If a blocking dependency prevents implementation or honest verification, name it before changing scope and make only the minimum required unblocker. Do not bundle adjacent improvements.
+- An agent launched from the OpenClaw workspace must not read, search, modify, test, build, or run commands in `/Users/iliaspittas/astino` or any other Astino source checkout without explicit user approval. This remains true even when Astino supplied the reproducer or is blocked by the defect.
+- When an Astino defect or requested behavior is outside the approved OpenClaw scope, stop at the repository boundary and prepare a bounded handoff for the Astino owner. Interacting with an approved Astino runtime or consuming a supplied failure trace does not authorize access to the Astino source checkout.
+
 ## Project Structure & Module Organization
 
 - Source code: `src/` (CLI wiring in `src/cli`, commands in `src/commands`, web provider in `src/provider-web.ts`, infra in `src/infra`, media pipeline in `src/media`).
@@ -174,6 +183,9 @@
 - Default rule: do not land changes with failing format, lint, type, build, or required test checks when those failures are caused by the change or plausibly related to the touched surface. Fast-commit mode changes how verification is sequenced; it does not lower the requirement to validate and clean up the touched surface before final landing.
 - For narrowly scoped changes, if unrelated failures already exist on latest `origin/main`, state that clearly, report the scoped tests you ran, and ask before broadening scope into unrelated fixes or landing despite those failures.
 - Do not use scoped tests as permission to ignore plausibly related failures.
+- Reviewers must continue after the first defect and exhaust the finite changed surface, directly related callers, contracts, state transitions, cleanup paths, and tests. Perform a second sweep for distinct failure modes related to the active changes.
+- Review does not authorize unrelated exploration or repair. Put unrelated observations in the Deferred Findings / Tangent Ledger for user prioritization.
+- Wait until the scoped review is complete, then deduplicate and batch all related findings into one implementer remediation request. Do not drip-feed findings or start remediation while another required review lane is still active.
 
 ## Prompt Cache Stability
 

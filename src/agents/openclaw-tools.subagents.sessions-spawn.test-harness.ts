@@ -175,6 +175,15 @@ export function resetSessionsSpawnAnnounceFlowOverride(): void {
   hoisted.state.runSubagentAnnounceFlowOverride = hoisted.state.defaultRunSubagentAnnounceFlow;
 }
 
+export function resetSessionsSpawnCaptureReplyOverride(): void {
+  hoisted.state.captureSubagentCompletionReplyOverride =
+    hoisted.state.defaultCaptureSubagentCompletionReply;
+}
+
+export function setSessionsSpawnCaptureReplyOverride(next: CaptureSubagentCompletionReply): void {
+  hoisted.state.captureSubagentCompletionReplyOverride = next;
+}
+
 export function resetSessionsSpawnHookRunnerOverride(): void {
   hoisted.state.hookRunnerOverride = null;
 }

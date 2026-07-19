@@ -34,9 +34,18 @@ import {
   resolveChildTargetKind,
   type ChildRouteActiveAuthBlockerSummary,
   type ChildRouteAssignmentKind,
+  type ChildRouteHealthContext,
 } from "../child-route-health.js";
 import { resolveChildRouteProviderContextFromSession } from "../child-route-provider-context.js";
 import { authBlockersPreventFreshSpawn } from "../child-route-spawn-preflight.js";
+import {
+  appendDelegationObservationEvent,
+  appendDelegationRouteEvent,
+  authorizeDelegationRoute,
+  bindDelegationRoute,
+  issueDelegationGatewayDispatch,
+  type AuthorizedDelegationRoute,
+} from "../delegation/runtime.js";
 import { AGENT_LANE_NESTED } from "../lanes.js";
 import {
   readLatestAssistantReplySnapshot,
@@ -77,6 +86,12 @@ const SessionsSendToolSchema = Type.Object({
   agentId: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
   message: Type.String(),
   timeoutSeconds: Type.Optional(Type.Number({ minimum: 0 })),
+  delegationToken: Type.Optional(
+    Type.String({
+      minLength: 1,
+      description: "One-use runtime token issued by delegation_guard for guarded workers.",
+    }),
+  ),
   assignmentKind: Type.Optional(
     Type.Union([
       Type.Literal("small_clarification"),
@@ -101,6 +116,30 @@ const SessionsSendToolSchema = Type.Object({
     }),
   ),
 });
+
+export function shouldRejectSessionSendVisibility(params: {
+  accessAllowed: boolean;
+  controlledChild: boolean;
+  guardedRoute: boolean;
+}): boolean {
+  return !params.accessAllowed && !params.controlledChild && !params.guardedRoute;
+}
+
+export function resolveSessionsSendRouteRegistryRecord(params: {
+  registryRecord?: ChildRouteHealthContext["registryRecord"];
+  childSessionKey: string;
+  guardedRoute: boolean;
+}): ChildRouteHealthContext["registryRecord"] {
+  if (params.registryRecord) {
+    return params.registryRecord;
+  }
+  // The in-memory subagent registry is intentionally ephemeral. After a
+  // gateway restart, the protected ledger remains authoritative for the exact
+  // controller, worker, assignment, and child session, so use that authority
+  // only to restore route ownership. Persistent route-health blockers still
+  // run normally below.
+  return params.guardedRoute ? { childSessionKey: params.childSessionKey } : undefined;
+}
 
 type GatewayCaller = typeof callGateway;
 const SESSIONS_SEND_REPLY_HISTORY_LIMIT = 50;
@@ -1076,6 +1115,8 @@ export function createSessionsSendTool(opts?: {
   sandboxed?: boolean;
   config?: OpenClawConfig;
   callGateway?: GatewayCaller;
+  effectiveThinking?: string;
+  requesterAgentIdOverride?: string;
 }): AnyAgentTool {
   return {
     label: "Session Send",
@@ -1087,6 +1128,7 @@ export function createSessionsSendTool(opts?: {
       const params = args as Record<string, unknown>;
       const gatewayCall = opts?.callGateway ?? callGateway;
       const message = readStringParam(params, "message", { required: true });
+      const delegationToken = readStringParam(params, "delegationToken");
       const { cfg, mainKey, alias, effectiveRequesterKey, restrictToSpawned } =
         resolveSessionToolContext(opts);
 
@@ -1234,14 +1276,6 @@ export function createSessionsSendTool(opts?: {
       const access = visibilityGuard.check(resolvedKey);
       // A controlled child is already scoped by the subagent registry, so parent
       // follow-ups should not depend on the broader cross-agent allowlist.
-      if (!access.allowed && !controlledChildRun) {
-        return jsonResult({
-          runId: crypto.randomUUID(),
-          status: access.status,
-          error: access.error,
-          sessionKey: displayKey,
-        });
-      }
       const childTargetKind = resolveChildTargetKind(resolvedKey);
       const requesterGeneration =
         getLatestSubagentRunByChildSessionKey(effectiveRequesterKey)?.runId;
@@ -1256,9 +1290,71 @@ export function createSessionsSendTool(opts?: {
         requesterSessionKey: effectiveRequesterKey,
       });
       const targetProvider = targetSessionContext.provider;
+      const targetModel =
+        targetProvider.providerId && targetProvider.modelId
+          ? `${targetProvider.providerId}/${targetProvider.modelId}`
+          : undefined;
       const runtimeReplay = buildSessionRuntimeReplay(targetSessionContext.entry);
+      let guardedRoute: AuthorizedDelegationRoute | undefined;
+      try {
+        guardedRoute = authorizeDelegationRoute({
+          config: cfg,
+          agentSessionKey: effectiveRequesterKey,
+          requesterAgentIdOverride: opts?.requesterAgentIdOverride,
+          effectiveThinking: opts?.effectiveThinking,
+          targetAgentId: resolveAgentIdFromSessionKey(resolvedKey),
+          targetThinking: targetSessionContext.entry?.thinkingLevel,
+          targetModel,
+          targetSessionKey: resolvedKey,
+          delegationToken,
+          idempotencyKey,
+          routeKind: "send",
+        });
+      } catch (error) {
+        return jsonResult({
+          runId: crypto.randomUUID(),
+          status: "forbidden",
+          error: error instanceof Error ? error.message : "Guarded send authorization failed.",
+          sessionKey: displayKey,
+        });
+      }
+      // A protected delegation token is the narrower runtime authority for this
+      // exact controller, worker, assignment, and route. Generic session
+      // visibility must not reject that route before the guard can authorize and
+      // record it; unguarded sends retain the existing visibility behavior.
+      if (
+        !access.allowed &&
+        shouldRejectSessionSendVisibility({
+          accessAllowed: false,
+          controlledChild: Boolean(controlledChildRun),
+          guardedRoute: Boolean(guardedRoute),
+        })
+      ) {
+        return jsonResult({
+          runId: crypto.randomUUID(),
+          status: access.status,
+          error: access.error,
+          sessionKey: displayKey,
+        });
+      }
       if (childTargetKind) {
         if (registryRecord?.suppressAnnounceReason === "fresh-reroute") {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            childSessionKey: resolvedKey,
+            runId: registryRecord.runId,
+            reason: "target child generation was already superseded",
+          });
+          if (guardedRoute) {
+            return jsonResult({
+              status: "no_delivery",
+              code: "child_session_unhealthy",
+              error:
+                "Guarded child generation was superseded; issue an explicit recovery assignment instead.",
+              sessionKey: displayKey,
+            });
+          }
           pruneFreshChildReroutes();
           const existingReroute = findFreshChildRerouteForOldGeneration({
             oldChildSessionKey: resolvedKey,
@@ -1327,26 +1423,55 @@ export function createSessionsSendTool(opts?: {
             },
           });
         }
-        const routeGuard = await guardChildRouteForDelivery({
-          childSessionKey: resolvedKey,
-          context: {
-            routeIntent: "followup_reuse",
-            targetMethod: "sessions_send",
-            idempotencyKey,
-            requesterSessionKey: effectiveRequesterKey,
-            requesterGeneration,
-            childTargetKind,
-            registryRecord,
-            provider: targetProvider,
-          },
-          payloadForHash: {
-            method: "sessions_send",
-            message: message.trim(),
-            timeoutSeconds,
-          },
-        });
+        let routeGuard: Awaited<ReturnType<typeof guardChildRouteForDelivery>>;
+        try {
+          routeGuard = await guardChildRouteForDelivery({
+            childSessionKey: resolvedKey,
+            context: {
+              routeIntent: "followup_reuse",
+              targetMethod: "sessions_send",
+              idempotencyKey,
+              requesterSessionKey: effectiveRequesterKey,
+              requesterGeneration,
+              childTargetKind,
+              registryRecord: resolveSessionsSendRouteRegistryRecord({
+                registryRecord,
+                childSessionKey: resolvedKey,
+                guardedRoute: Boolean(guardedRoute),
+              }),
+              provider: targetProvider,
+            },
+            payloadForHash: {
+              method: "sessions_send",
+              message: message.trim(),
+              timeoutSeconds,
+            },
+          });
+        } catch (error) {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            childSessionKey: resolvedKey,
+            runId: registryRecord?.runId,
+            reason: `child route guard failed before dispatch: ${formatErrorMessage(error)}`,
+          });
+          return jsonResult({
+            runId,
+            status: "error",
+            error: formatErrorMessage(error),
+            sessionKey: displayKey,
+          });
+        }
         if (!routeGuard.ok) {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            childSessionKey: resolvedKey,
+            runId: registryRecord?.runId,
+            reason: routeGuard.code,
+          });
           if (
+            !guardedRoute &&
             routeGuard.details.kind === "child_route_unhealthy" &&
             routeGuard.details.recommendedAction === "spawn_fresh"
           ) {
@@ -1390,23 +1515,56 @@ export function createSessionsSendTool(opts?: {
       // completion instead of the best-effort A2A announce loop.
       if (controlledRegistryRecord) {
         const latestLifecycleOutcome = resolvePreflightLifecycleOutcome(controlledRegistryRecord);
-        const preflight = await preflightChildRouteAssignment({
-          childSessionKey: resolvedKey,
-          assignmentKind,
-          context: {
-            routeIntent: "followup_reuse",
-            targetMethod: "sessions_send",
-            idempotencyKey,
-            requesterSessionKey: effectiveRequesterKey,
-            requesterGeneration,
-            childTargetKind: resolveChildTargetKind(resolvedKey) ?? "subagent",
-            registryRecord: controlledRegistryRecord,
-            provider: targetProvider,
-          },
-          latestLifecycleOutcome,
-          hardHeadroomPercentThreshold: SESSIONS_SEND_HARD_HEADROOM_PERCENT_THRESHOLD,
-        });
+        let preflight: Awaited<ReturnType<typeof preflightChildRouteAssignment>>;
+        try {
+          preflight = await preflightChildRouteAssignment({
+            childSessionKey: resolvedKey,
+            assignmentKind,
+            context: {
+              routeIntent: "followup_reuse",
+              targetMethod: "sessions_send",
+              idempotencyKey,
+              requesterSessionKey: effectiveRequesterKey,
+              requesterGeneration,
+              childTargetKind: resolveChildTargetKind(resolvedKey) ?? "subagent",
+              registryRecord: controlledRegistryRecord,
+              provider: targetProvider,
+            },
+            latestLifecycleOutcome,
+            hardHeadroomPercentThreshold: SESSIONS_SEND_HARD_HEADROOM_PERCENT_THRESHOLD,
+          });
+        } catch (error) {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            childSessionKey: resolvedKey,
+            runId: controlledRegistryRecord.runId,
+            reason: `child route preflight failed before dispatch: ${formatErrorMessage(error)}`,
+          });
+          return jsonResult({
+            runId,
+            status: "error",
+            error: formatErrorMessage(error),
+            sessionKey: displayKey,
+          });
+        }
         if (preflight.status === "reroute" && preflight.recommendedAction === "spawn_fresh") {
+          if (guardedRoute) {
+            appendDelegationRouteEvent({
+              authorized: guardedRoute,
+              kind: "route_rejected",
+              childSessionKey: resolvedKey,
+              runId: controlledRegistryRecord.runId,
+              reason: "guarded child requires an explicit recovery assignment",
+            });
+            return jsonResult({
+              status: "no_delivery",
+              code: "child_route_assignment_blocked",
+              error:
+                "Guarded child recovery requires a fresh runtime assignment and delegation token.",
+              sessionKey: displayKey,
+            });
+          }
           return rerouteToFreshChild({
             code: "child_route_assignment_blocked",
             deliveryMode: "child_route_preflight",
@@ -1436,6 +1594,13 @@ export function createSessionsSendTool(opts?: {
           });
         }
         if (preflight.status !== "reuse") {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            childSessionKey: resolvedKey,
+            runId: controlledRegistryRecord.runId,
+            reason: `child route preflight ${preflight.status}`,
+          });
           return jsonResult({
             ok: false,
             status: "no_delivery",
@@ -1468,21 +1633,89 @@ export function createSessionsSendTool(opts?: {
       const controlledTrackedRun = controlledRegistryRecord;
       if (controlledTrackedRun) {
         const trackedDelivery = { status: "tracked", mode: "completion_event" as const };
-        const baselineReply =
-          timeoutSeconds === 0
-            ? undefined
-            : await readLatestAssistantReplySnapshot({
-                sessionKey: resolvedKey,
-                limit: SESSIONS_SEND_REPLY_HISTORY_LIMIT,
-                callGateway: gatewayCall,
-              });
-        const restart = await steerControlledSubagentRun({
-          cfg,
-          controller: subagentController,
-          entry: controlledTrackedRun,
-          message,
-        });
+        let baselineReply: Awaited<ReturnType<typeof readLatestAssistantReplySnapshot>> | undefined;
+        try {
+          baselineReply =
+            timeoutSeconds === 0
+              ? undefined
+              : await readLatestAssistantReplySnapshot({
+                  sessionKey: resolvedKey,
+                  limit: SESSIONS_SEND_REPLY_HISTORY_LIMIT,
+                  callGateway: gatewayCall,
+                });
+        } catch (error) {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            childSessionKey: resolvedKey,
+            runId: controlledTrackedRun.runId,
+            reason: `baseline history read failed before dispatch: ${formatErrorMessage(error)}`,
+          });
+          return jsonResult({
+            runId,
+            status: "error",
+            error: formatErrorMessage(error),
+            sessionKey: displayKey,
+          });
+        }
+        let delegationGatewayDispatch: string | undefined;
+        try {
+          delegationGatewayDispatch = issueDelegationGatewayDispatch({
+            authorized: guardedRoute,
+            targetSessionKey: resolvedKey,
+            idempotencyKey,
+          });
+        } catch (error) {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            childSessionKey: resolvedKey,
+            runId: controlledTrackedRun.runId,
+            reason: "gateway dispatch capability issuance failed",
+          });
+          return jsonResult({
+            status: "forbidden",
+            error:
+              error instanceof Error
+                ? error.message
+                : "Guarded Gateway dispatch authorization failed.",
+            sessionKey: displayKey,
+          });
+        }
+        let restart: Awaited<ReturnType<typeof steerControlledSubagentRun>>;
+        try {
+          restart = await steerControlledSubagentRun({
+            cfg,
+            controller: subagentController,
+            entry: controlledTrackedRun,
+            message,
+            delegationAssignmentId: guardedRoute?.assignment.assignmentId,
+            delegationGatewayDispatch,
+            idempotencyKey,
+          });
+        } catch (error) {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            childSessionKey: resolvedKey,
+            runId: controlledTrackedRun.runId,
+            reason: `tracked child dispatch failed: ${formatErrorMessage(error)}`,
+          });
+          return jsonResult({
+            runId,
+            status: "error",
+            error: formatErrorMessage(error),
+            sessionKey: displayKey,
+          });
+        }
         if (restart.status !== "accepted") {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            childSessionKey: resolvedKey,
+            runId: restart.runId,
+            reason: restart.error ?? restart.text ?? "tracked child restart rejected",
+          });
           return jsonResult({
             runId: restart.runId ?? crypto.randomUUID(),
             status: "error",
@@ -1490,6 +1723,17 @@ export function createSessionsSendTool(opts?: {
             sessionKey: displayKey,
           });
         }
+        bindDelegationRoute({
+          authorized: guardedRoute,
+          childSessionKey: resolvedKey,
+          runId: restart.runId,
+        });
+        appendDelegationRouteEvent({
+          authorized: guardedRoute,
+          kind: "accepted",
+          childSessionKey: resolvedKey,
+          runId: restart.runId,
+        });
         if (timeoutSeconds === 0) {
           return jsonResult({
             runId: restart.runId,
@@ -1511,11 +1755,20 @@ export function createSessionsSendTool(opts?: {
           baseline: baselineReply,
           callGateway: gatewayCall,
         });
+        const completionMetadata = resolveSessionsSendCompletionMetadata(result);
         if (result.status === "timeout") {
+          appendDelegationObservationEvent({
+            authorized: guardedRoute,
+            kind: "wait_timeout",
+            childSessionKey: resolvedKey,
+            runId: restart.runId,
+            reason: result.error,
+          });
           return jsonResult({
             runId: restart.runId,
             status: "timeout",
             error: result.error,
+            ...completionMetadata,
             sessionKey: displayKey,
             delivery: trackedDelivery,
           });
@@ -1525,6 +1778,7 @@ export function createSessionsSendTool(opts?: {
             runId: restart.runId,
             status: "error",
             error: result.error ?? "agent error",
+            ...completionMetadata,
             sessionKey: displayKey,
           });
         }
@@ -1532,6 +1786,7 @@ export function createSessionsSendTool(opts?: {
           runId: restart.runId,
           status: "ok",
           reply: result.replyText,
+          ...completionMetadata,
           sessionKey: displayKey,
           delivery: trackedDelivery,
         });
@@ -1541,20 +1796,62 @@ export function createSessionsSendTool(opts?: {
       // Fast in-process test doubles and short-circuit agent paths can finish
       // before we reach the post-run read, which would otherwise make the new
       // reply look like the baseline and hide it from the caller.
-      const baselineReply =
-        timeoutSeconds === 0
-          ? undefined
-          : await readLatestAssistantReplySnapshot({
-              sessionKey: resolvedKey,
-              limit: SESSIONS_SEND_REPLY_HISTORY_LIMIT,
-              callGateway: gatewayCall,
-            });
+      let baselineReply: Awaited<ReturnType<typeof readLatestAssistantReplySnapshot>> | undefined;
+      try {
+        baselineReply =
+          timeoutSeconds === 0
+            ? undefined
+            : await readLatestAssistantReplySnapshot({
+                sessionKey: resolvedKey,
+                limit: SESSIONS_SEND_REPLY_HISTORY_LIMIT,
+                callGateway: gatewayCall,
+              });
+      } catch (error) {
+        appendDelegationRouteEvent({
+          authorized: guardedRoute,
+          kind: "route_rejected",
+          childSessionKey: resolvedKey,
+          runId,
+          reason: `baseline history read failed before dispatch: ${formatErrorMessage(error)}`,
+        });
+        return jsonResult({
+          runId,
+          status: "error",
+          error: formatErrorMessage(error),
+          sessionKey: displayKey,
+        });
+      }
 
       const agentMessageContext = buildAgentToAgentMessageContext({
         requesterSessionKey: opts?.agentSessionKey,
         requesterChannel: opts?.agentChannel,
         targetSessionKey: displayKey,
       });
+      let delegationGatewayDispatch: string | undefined;
+      try {
+        delegationGatewayDispatch = issueDelegationGatewayDispatch({
+          authorized: guardedRoute,
+          targetSessionKey: resolvedKey,
+          idempotencyKey,
+        });
+      } catch (error) {
+        appendDelegationRouteEvent({
+          authorized: guardedRoute,
+          kind: "route_rejected",
+          childSessionKey: resolvedKey,
+          runId,
+          reason: "gateway dispatch capability issuance failed",
+        });
+        return jsonResult({
+          runId,
+          status: "forbidden",
+          error:
+            error instanceof Error
+              ? error.message
+              : "Guarded Gateway dispatch authorization failed.",
+          sessionKey: displayKey,
+        });
+      }
       const sendParams = {
         message,
         sessionKey: resolvedKey,
@@ -1569,6 +1866,7 @@ export function createSessionsSendTool(opts?: {
           sourceChannel: opts?.agentChannel,
           sourceTool: "sessions_send",
         },
+        ...(delegationGatewayDispatch ? { delegationGatewayDispatch } : {}),
       };
       const requesterSessionKey = opts?.agentSessionKey;
       const requesterChannel = opts?.agentChannel;
@@ -1601,9 +1899,27 @@ export function createSessionsSendTool(opts?: {
           sessionKey: displayKey,
         });
         if (!start.ok) {
+          appendDelegationRouteEvent({
+            authorized: guardedRoute,
+            kind: "route_rejected",
+            childSessionKey: resolvedKey,
+            runId,
+            reason: "nested agent start failed",
+          });
           return start.result;
         }
         runId = start.runId;
+        bindDelegationRoute({
+          authorized: guardedRoute,
+          childSessionKey: resolvedKey,
+          runId,
+        });
+        appendDelegationRouteEvent({
+          authorized: guardedRoute,
+          kind: "accepted",
+          childSessionKey: resolvedKey,
+          runId,
+        });
         startA2AFlow(undefined, runId);
         return jsonResult({
           runId,
@@ -1620,9 +1936,27 @@ export function createSessionsSendTool(opts?: {
         sessionKey: displayKey,
       });
       if (!start.ok) {
+        appendDelegationRouteEvent({
+          authorized: guardedRoute,
+          kind: "route_rejected",
+          childSessionKey: resolvedKey,
+          runId,
+          reason: "nested agent start failed",
+        });
         return start.result;
       }
       runId = start.runId;
+      bindDelegationRoute({
+        authorized: guardedRoute,
+        childSessionKey: resolvedKey,
+        runId,
+      });
+      appendDelegationRouteEvent({
+        authorized: guardedRoute,
+        kind: "accepted",
+        childSessionKey: resolvedKey,
+        runId,
+      });
       const result = await waitForAgentRunAndReadUpdatedAssistantReply({
         runId,
         sessionKey: resolvedKey,
@@ -1631,8 +1965,16 @@ export function createSessionsSendTool(opts?: {
         baseline: baselineReply,
         callGateway: gatewayCall,
       });
+      const completionMetadata = resolveSessionsSendCompletionMetadata(result);
 
       if (result.status === "timeout") {
+        appendDelegationObservationEvent({
+          authorized: guardedRoute,
+          kind: "wait_timeout",
+          childSessionKey: resolvedKey,
+          runId,
+          reason: result.error,
+        });
         startA2AFlow(undefined, runId, {
           waitTimeoutMs: Math.max(announceTimeoutMs, SESSIONS_SEND_LATE_ANNOUNCE_WAIT_MS),
         });
@@ -1640,6 +1982,7 @@ export function createSessionsSendTool(opts?: {
           runId,
           status: "timeout",
           error: result.error,
+          ...completionMetadata,
           sessionKey: displayKey,
           delivery,
         });
@@ -1649,6 +1992,7 @@ export function createSessionsSendTool(opts?: {
           runId,
           status: "error",
           error: result.error ?? "agent error",
+          ...completionMetadata,
           sessionKey: displayKey,
         });
       }
@@ -1659,6 +2003,7 @@ export function createSessionsSendTool(opts?: {
         runId,
         status: "ok",
         reply,
+        ...completionMetadata,
         sessionKey: displayKey,
         delivery,
       });

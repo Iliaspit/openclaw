@@ -33,6 +33,7 @@ import {
   resolveLmstudioInferenceBase,
   resolveLmstudioRequestContext,
 } from "../../plugin-sdk/lmstudio-runtime.js";
+import { extractModelCompat } from "../../plugins/provider-model-compat.js";
 import type { ProviderRuntimeModel } from "../../plugins/provider-runtime-model.types.js";
 import { isLoopbackIpAddress } from "../../shared/net/ip.js";
 import {
@@ -170,7 +171,9 @@ function buildOpenAICodexModelDefinition(modelId: string): ModelDefinitionConfig
       ...(dynamicModel.contextTokens ? { contextTokens: dynamicModel.contextTokens } : {}),
       maxTokens: dynamicModel.maxTokens,
       ...(dynamicModel.headers ? { headers: dynamicModel.headers } : {}),
-      ...(dynamicModel.compat ? { compat: dynamicModel.compat } : {}),
+      ...(dynamicModel.compat
+        ? { compat: extractModelCompat({ compat: dynamicModel.compat }) }
+        : {}),
       metadataSource: "models-add",
     };
   }

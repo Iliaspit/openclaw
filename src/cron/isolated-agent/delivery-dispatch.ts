@@ -1,3 +1,4 @@
+import { retireSessionMcpRuntime } from "../../agents/pi-bundle-mcp-tools.js";
 import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
 import {
   isSilentReplyText,
@@ -102,7 +103,7 @@ type DispatchCronDeliveryParams = {
   job: CronJob;
   agentId: string;
   agentSessionKey: string;
-  runSessionId: string;
+  sessionId: string;
   runStartedAt: number;
   runEndedAt: number;
   timeoutMs: number;
@@ -110,6 +111,7 @@ type DispatchCronDeliveryParams = {
   deliveryRequested: boolean;
   skipHeartbeatDelivery: boolean;
   skipMessagingToolDelivery?: boolean;
+  unverifiedMessagingToolDelivery?: boolean;
   deliveryBestEffort: boolean;
   deliveryPayloadHasStructuredContent: boolean;
   deliveryPayloads: ReplyPayload[];
@@ -299,7 +301,8 @@ function getCompletedDirectCronDelivery(
 }
 
 function buildDirectCronDeliveryIdempotencyKey(params: {
-  runSessionId: string;
+  jobId: string;
+  runStartedAt: number;
   delivery: SuccessfulDeliveryTarget;
 }): string {
   const threadId =
@@ -308,7 +311,7 @@ function buildDirectCronDeliveryIdempotencyKey(params: {
       : String(params.delivery.threadId);
   const accountId = params.delivery.accountId?.trim() ?? "";
   const normalizedTo = normalizeDeliveryTarget(params.delivery.channel, params.delivery.to);
-  return `cron-direct-delivery:v1:${params.runSessionId}:${params.delivery.channel}:${accountId}:${normalizedTo}:${threadId}`;
+  return `cron-direct-delivery:v1:cron:${params.jobId}:${params.runStartedAt}:${params.delivery.channel}:${accountId}:${normalizedTo}:${threadId}`;
 }
 
 function shouldQueueCronAwareness(job: CronJob, deliveryBestEffort: boolean): boolean {
@@ -351,6 +354,7 @@ async function queueCronAwarenessSystemEvent(params: {
         agentId: params.agentId,
       }),
       contextKey: params.deliveryIdempotencyKey,
+      trusted: false,
     });
   } catch (err) {
     await logCronDeliveryWarn(
@@ -467,12 +471,14 @@ export async function dispatchCronDelivery(
         timeoutMs: 10_000,
       });
     } catch {
-      // Best-effort; direct delivery result should still be returned.
+      await retireSessionMcpRuntime({
+        sessionId: params.sessionId,
+        reason: "cron-delete-after-run-fallback",
+      });
     }
   };
   const finishSilentReplyDelivery = async (): Promise<RunCronAgentTurnResult> => {
     deliveryAttempted = true;
-    await cleanupDirectCronSessionIfNeeded();
     return params.withRunSession({
       status: "ok",
       summary,
@@ -495,7 +501,8 @@ export async function dispatchCronDelivery(
     } = await loadDeliveryOutboundRuntime();
     const identity = resolveAgentOutboundIdentity(params.cfgWithAgentDefaults, params.agentId);
     const deliveryIdempotencyKey = buildDirectCronDeliveryIdempotencyKey({
-      runSessionId: params.runSessionId,
+      jobId: params.job.id,
+      runStartedAt: params.runStartedAt,
       delivery,
     });
     try {
@@ -511,10 +518,9 @@ export async function dispatchCronDelivery(
             return p;
           }
           const normalized = normalizeSilentReplyText(p.text);
-          return {
-            ...p,
+          return Object.assign({}, p, {
             text: normalized.strippedTrailingSilentToken ? undefined : normalized.text,
-          };
+          });
         })
         .filter((p) => hasReplyPayloadContent(p, { trimText: true }));
       if (payloadsForDelivery.length === 0) {
@@ -746,6 +752,7 @@ export async function dispatchCronDelivery(
       normalizedSynthesizedText.text === undefined ||
       normalizedSynthesizedText.strippedTrailingSilentToken
     ) {
+      await cleanupDirectCronSessionIfNeeded();
       return await finishSilentReplyDelivery();
     }
     synthesizedText = normalizedSynthesizedText.text;
@@ -768,8 +775,11 @@ export async function dispatchCronDelivery(
   if (params.deliveryRequested && !params.skipHeartbeatDelivery && !skipMessagingToolDelivery) {
     if (!params.resolvedDelivery.ok) {
       if (!params.deliveryBestEffort) {
+        const deliveryTargetError = params.unverifiedMessagingToolDelivery
+          ? `${params.resolvedDelivery.error.message}; the agent used the message tool, but OpenClaw could not verify that the send matched this job's delivery target`
+          : params.resolvedDelivery.error.message;
         return {
-          result: failDeliveryTarget(params.resolvedDelivery.error.message),
+          result: failDeliveryTarget(deliveryTargetError),
           delivered,
           deliveryAttempted,
           summary,
@@ -802,7 +812,12 @@ export async function dispatchCronDelivery(
     const useDirectDelivery =
       params.deliveryPayloadHasStructuredContent || params.resolvedDelivery.threadId != null;
     if (useDirectDelivery) {
-      const directResult = await deliverViaDirect(params.resolvedDelivery);
+      let directResult: RunCronAgentTurnResult | null;
+      try {
+        directResult = await deliverViaDirect(params.resolvedDelivery);
+      } finally {
+        await cleanupDirectCronSessionIfNeeded();
+      }
       if (directResult) {
         return {
           result: directResult,

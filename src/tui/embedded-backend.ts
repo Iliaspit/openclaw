@@ -276,6 +276,7 @@ export class EmbeddedTuiBackend implements TuiBackend {
         provider: resolvedSessionModel.provider,
         model: resolvedSessionModel.model,
         catalog,
+        agentId: sessionAgentId,
       });
     }
 

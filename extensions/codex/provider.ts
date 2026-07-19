@@ -3,10 +3,10 @@ import { createSubsystemLogger } from "openclaw/plugin-sdk/core";
 import type { ProviderRuntimeModel } from "openclaw/plugin-sdk/plugin-entry";
 import {
   normalizeModelCompat,
+  supportsOpenAiFamilyXHighModelId,
   type ModelProviderConfig,
   type ProviderPlugin,
 } from "openclaw/plugin-sdk/provider-model-shared";
-import { supportsOpenAiFamilyXHighModelId } from "../openai/xhigh-model-support.js";
 import { resolveCodexSystemPromptContribution } from "./prompt-overlay.js";
 import {
   buildCodexModelDefinition,

@@ -23,6 +23,14 @@ import {
 import { loadPluginManifestRegistry, type PluginManifestRecord } from "./manifest-registry.js";
 import { hasKind } from "./slots.js";
 
+export {
+  hasConfiguredChannelsForReadOnlyScope,
+  listConfiguredAnnounceChannelIdsForConfig,
+  listConfiguredChannelIdsForReadOnlyScope,
+  listExplicitConfiguredChannelIdsForConfig,
+  resolveConfiguredChannelPresencePolicy,
+} from "./channel-presence-policy.js";
+
 function hasRuntimeContractSurface(plugin: PluginManifestRecord): boolean {
   return Boolean(
     plugin.providers.length > 0 ||

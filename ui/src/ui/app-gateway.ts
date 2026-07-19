@@ -52,6 +52,10 @@ import {
 } from "./gateway.ts";
 import { GatewayBrowserClient } from "./gateway.ts";
 import type { Tab } from "./navigation.ts";
+import {
+  handlePlannerCompletionLifecycleEvent,
+  type PlannerCompletionNotification,
+} from "./planner-notifications.ts";
 import type { UiSettings } from "./storage.ts";
 import type {
   AgentsListResult,
@@ -102,6 +106,9 @@ type GatewayHost = {
   execApprovalQueue: ExecApprovalRequest[];
   execApprovalError: string | null;
   updateAvailable: UpdateAvailable | null;
+  plannerCompletionNotification: PlannerCompletionNotification | null;
+  plannerCompletionNotificationDismissTimer: ReturnType<typeof setTimeout> | null;
+  plannerCompletionNotificationSeenIds: Set<string>;
 };
 
 type GatewayHostWithDeferredSessionMessageReload = GatewayHost & {
@@ -543,6 +550,11 @@ function handleGatewayEventUnsafe(host: GatewayHost, evt: GatewayEventFrame) {
 
   if (evt.event === "session.message") {
     handleSessionMessageGatewayEvent(host, evt.payload as { sessionKey?: string } | undefined);
+    return;
+  }
+
+  if (evt.event === "session.activity") {
+    handlePlannerCompletionLifecycleEvent(host, evt.payload);
     return;
   }
 

@@ -19,8 +19,14 @@ export const expectedAugmentedOpenaiCodexCatalogEntries = [
 ];
 
 export const expectedAugmentedOpenaiCodexCatalogEntriesWithGpt55 = [
+  { provider: "openai", id: "gpt-5.6-sol", name: "gpt-5.6-sol" },
+  { provider: "openai", id: "gpt-5.6-terra", name: "gpt-5.6-terra" },
+  { provider: "openai", id: "gpt-5.6-luna", name: "gpt-5.6-luna" },
   { provider: "openai", id: "gpt-5.5-pro", name: "gpt-5.5-pro" },
   ...expectedAugmentedOpenaiCodexCatalogEntries.slice(0, 4),
+  { provider: "openai-codex", id: "gpt-5.6-sol", name: "gpt-5.6-sol" },
+  { provider: "openai-codex", id: "gpt-5.6-terra", name: "gpt-5.6-terra" },
+  { provider: "openai-codex", id: "gpt-5.6-luna", name: "gpt-5.6-luna" },
   { provider: "openai-codex", id: "gpt-5.5-pro", name: "gpt-5.5-pro" },
   ...expectedAugmentedOpenaiCodexCatalogEntries.slice(4),
 ];
@@ -35,7 +41,7 @@ export function expectCodexMissingAuthHint(
       listProfileIds: (providerId: string) => string[];
     };
   }) => string | undefined,
-  expectedModel = "openai/gpt-5.5",
+  expectedModel = "openai/gpt-5.6-sol",
 ) {
   expect(
     buildProviderMissingAuthMessageWithPlugin({

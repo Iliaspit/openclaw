@@ -1982,7 +1982,7 @@ describe("runCliAgent spawn path", () => {
     });
     context.reusableCliSession = { sessionId: "thread-123" };
     context.bootstrapPromptWarningLines = [
-      "[Bootstrap truncation warning]",
+      "[Bootstrap context budget warning]",
       "- AGENTS.md: 200 raw -> 20 injected",
     ];
 
@@ -1994,7 +1994,7 @@ describe("runCliAgent spawn path", () => {
     };
     const promptCarrier = [input.input ?? "", ...(input.argv ?? [])].join("\n");
 
-    expect(promptCarrier).toContain("[Bootstrap truncation warning]");
+    expect(promptCarrier).toContain("[Bootstrap context budget warning]");
     expect(promptCarrier).toContain("- AGENTS.md: 200 raw -> 20 injected");
     expect(promptCarrier).toContain("hi");
   });

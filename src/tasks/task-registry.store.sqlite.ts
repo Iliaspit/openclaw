@@ -435,6 +435,12 @@ function ensureTaskRegistryPermissions(pathname: string) {
   }
 }
 
+let repairTaskRegistryPermissions = ensureTaskRegistryPermissions;
+
+export function setTaskRegistryPermissionRepairForTests(repair?: (pathname: string) => void): void {
+  repairTaskRegistryPermissions = repair ?? ensureTaskRegistryPermissions;
+}
+
 function openTaskRegistryDatabase(): TaskRegistryDatabase {
   const pathname = resolveTaskRegistrySqlitePath(process.env);
   if (cachedDatabase && cachedDatabase.path === pathname) {
@@ -444,14 +450,14 @@ function openTaskRegistryDatabase(): TaskRegistryDatabase {
     cachedDatabase.db.close();
     cachedDatabase = null;
   }
-  ensureTaskRegistryPermissions(pathname);
+  repairTaskRegistryPermissions(pathname);
   const { DatabaseSync } = requireNodeSqlite();
   const db = new DatabaseSync(pathname);
   db.exec(`PRAGMA journal_mode = WAL;`);
   db.exec(`PRAGMA synchronous = NORMAL;`);
   db.exec(`PRAGMA busy_timeout = 5000;`);
   ensureSchema(db);
-  ensureTaskRegistryPermissions(pathname);
+  repairTaskRegistryPermissions(pathname);
   cachedDatabase = {
     db,
     path: pathname,
@@ -462,13 +468,15 @@ function openTaskRegistryDatabase(): TaskRegistryDatabase {
 
 function withWriteTransaction(write: (statements: TaskRegistryStatements) => void) {
   const { db, path, statements } = openTaskRegistryDatabase();
+  repairTaskRegistryPermissions(path);
   db.exec("BEGIN IMMEDIATE");
   try {
     write(statements);
     db.exec("COMMIT");
-    ensureTaskRegistryPermissions(path);
   } catch (error) {
-    db.exec("ROLLBACK");
+    if (db.isTransaction) {
+      db.exec("ROLLBACK");
+    }
     throw error;
   }
 }
@@ -544,4 +552,58 @@ export function closeTaskRegistrySqliteStore() {
   }
   cachedDatabase.db.close();
   cachedDatabase = null;
+}
+
+export type TaskRegistrySqliteIntegrityReport = {
+  exists: boolean;
+  ok: boolean;
+  issues: string[];
+};
+
+type IntegrityCheckRow = {
+  integrity_check: string;
+};
+
+// Opens a short-lived connection and runs PRAGMA integrity_check before any
+// schema/migration statements execute, so a corrupt index doesn't get written
+// to (and potentially crash the process) before we even know it's corrupt.
+// Severe corruption can make integrity_check itself throw (rather than return
+// rows describing the damage), so that case is folded into the issue list too.
+export function checkTaskRegistrySqliteIntegrity(): TaskRegistrySqliteIntegrityReport {
+  const pathname = resolveTaskRegistrySqlitePath(process.env);
+  if (!existsSync(pathname)) {
+    return { exists: false, ok: true, issues: [] };
+  }
+  const { DatabaseSync } = requireNodeSqlite();
+  let db: DatabaseSync;
+  try {
+    db = new DatabaseSync(pathname);
+  } catch (err) {
+    return { exists: true, ok: false, issues: [String(err instanceof Error ? err.message : err)] };
+  }
+  try {
+    db.exec(`PRAGMA busy_timeout = 5000;`);
+    const rows = db.prepare(`PRAGMA integrity_check`).all() as IntegrityCheckRow[];
+    const issues = rows.map((row) => row.integrity_check).filter((line) => line !== "ok");
+    return { exists: true, ok: issues.length === 0, issues };
+  } catch (err) {
+    return { exists: true, ok: false, issues: [String(err instanceof Error ? err.message : err)] };
+  } finally {
+    db.close();
+  }
+}
+
+// REINDEX only rebuilds indexes from the existing table rows; it cannot
+// destroy row data, which is why it's safe to offer for index-only corruption
+// without a confirmation gate as strict as a destructive repair would need.
+export function reindexTaskRegistrySqlite(): void {
+  const pathname = resolveTaskRegistrySqlitePath(process.env);
+  const { DatabaseSync } = requireNodeSqlite();
+  const db = new DatabaseSync(pathname);
+  try {
+    db.exec(`PRAGMA busy_timeout = 5000;`);
+    db.exec(`REINDEX;`);
+  } finally {
+    db.close();
+  }
 }

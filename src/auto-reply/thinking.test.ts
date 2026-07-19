@@ -83,6 +83,11 @@ describe("normalizeThinkLevel", () => {
     expect(normalizeThinkLevel("max")).toBe("max");
     expect(normalizeThinkLevel("MAX")).toBe("max");
   });
+
+  it("treats ultra aliases as max", () => {
+    expect(normalizeThinkLevel("ultra")).toBe("max");
+    expect(normalizeThinkLevel("ultrathink")).toBe("max");
+  });
 });
 
 describe("listThinkingLevels", () => {

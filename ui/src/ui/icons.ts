@@ -122,6 +122,13 @@ export const icons = {
     </svg>
   `,
   check: html` <svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></svg> `,
+  alertTriangle: html`
+    <svg viewBox="0 0 24 24">
+      <path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3Z" />
+      <path d="M12 9v4" />
+      <path d="M12 17h.01" />
+    </svg>
+  `,
   arrowDown: html`
     <svg viewBox="0 0 24 24">
       <path d="M12 5v14" />

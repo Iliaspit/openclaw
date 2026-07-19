@@ -61,8 +61,13 @@ function makeHost(overrides?: Partial<ChatHost>): ChatHost {
     chatModelCatalog: [],
     refreshSessionsAfterChat: new Set<string>(),
     updateComplete: Promise.resolve(),
+    toolStreamSyncTimer: null,
+    toolStreamById: new Map(),
+    toolStreamOrder: [],
+    chatToolMessages: [],
+    chatStreamSegments: [],
     ...overrides,
-  };
+  } as ChatHost;
 }
 
 function createSessionsResult(sessions: GatewaySessionRow[]): SessionsListResult {
@@ -321,6 +326,35 @@ describe("handleSendChat", () => {
     vi.unstubAllGlobals();
   });
 
+  it("sends /new through chat.send for the current session", async () => {
+    const request = vi.fn(async (method: string) => {
+      if (method === "chat.send") {
+        return { runId: "run-new", status: "started" };
+      }
+      throw new Error(`Unexpected request: ${method}`);
+    });
+    const host = makeHost({
+      client: { request } as unknown as ChatHost["client"],
+      sessionKey: "agent:planner-2:main",
+      chatMessage: "/new",
+    });
+
+    await handleSendChat(host);
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith(
+      "chat.send",
+      expect.objectContaining({
+        sessionKey: "agent:planner-2:main",
+        message: "/new",
+        deliver: false,
+      }),
+      { timeoutMs: 15_000 },
+    );
+    expect(request.mock.calls.map(([method]) => method)).not.toContain("sessions.create");
+    expect(host.refreshSessionsAfterChat).toEqual(new Set(["run-new"]));
+  });
+
   it("keeps slash-command model changes in sync with the chat header cache", async () => {
     vi.stubGlobal(
       "fetch",
@@ -404,6 +438,7 @@ describe("handleSendChat", () => {
         deliver: false,
         idempotencyKey: expect.any(String),
       }),
+      { timeoutMs: 15_000 },
     );
     expect(host.chatQueue).toEqual([]);
     expect(host.chatRunId).toBe("run-main");
@@ -432,6 +467,7 @@ describe("handleSendChat", () => {
         message: "/btw summarize this",
         deliver: false,
       }),
+      { timeoutMs: 15_000 },
     );
     expect(host.chatRunId).toBeNull();
     expect(host.chatMessages).toEqual([]);
@@ -543,13 +579,17 @@ describe("handleSendChat", () => {
 
     await steerQueuedChatMessage(host, "queued-1");
 
-    expect(request).toHaveBeenCalledWith("chat.send", {
-      sessionKey: "agent:main:main",
-      message: "tighten the plan",
-      deliver: false,
-      idempotencyKey: expect.any(String),
-      attachments: undefined,
-    });
+    expect(request).toHaveBeenCalledWith(
+      "chat.send",
+      {
+        sessionKey: "agent:main:main",
+        message: "tighten the plan",
+        deliver: false,
+        idempotencyKey: expect.any(String),
+        attachments: undefined,
+      },
+      { timeoutMs: 15_000 },
+    );
     expect(host.chatRunId).toBe("run-1");
     expect(host.chatStream).toBe("Working...");
     expect(host.chatQueue).toEqual([

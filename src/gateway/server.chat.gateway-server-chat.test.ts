@@ -542,6 +542,42 @@ describe("gateway server chat", () => {
     expect(textValues).toEqual(["hello", "real reply", "real text field reply", "NO_REPLY"]);
   });
 
+  test("chat.history uses the configured agent thinking default for a fresh session", async () => {
+    const historyDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-gw-thinking-"));
+    try {
+      testState.sessionStorePath = path.join(historyDir, "sessions.json");
+      testState.agentsConfig = {
+        list: [
+          {
+            id: "planner",
+            model: "openai-codex/gpt-5.6-sol",
+            thinkingDefault: "xhigh",
+          },
+        ],
+      };
+      await writeSessionStore({
+        agentId: "planner",
+        entries: {
+          main: {
+            sessionId: "sess-planner",
+            updatedAt: Date.now(),
+          },
+        },
+      });
+
+      const history = await rpcReq<{ thinkingLevel?: string }>(ws, "chat.history", {
+        sessionKey: "agent:planner:main",
+      });
+
+      expect(history.ok).toBe(true);
+      expect(history.payload?.thinkingLevel).toBe("xhigh");
+    } finally {
+      testState.agentsConfig = undefined;
+      testState.sessionStorePath = undefined;
+      await fs.rm(historyDir, { recursive: true, force: true });
+    }
+  });
+
   test("chat.history hides commentary-only assistant entries", async () => {
     const historyMessages = await loadChatHistoryWithMessages([
       {

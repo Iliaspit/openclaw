@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionEntry } from "../../config/sessions.js";
 import type { TypingMode } from "../../config/types.js";
@@ -1055,6 +1058,138 @@ describe("runReplyAgent typing (heartbeat)", () => {
       throw new Error("expected payload");
     }
     expect(payload.text).toContain("/new");
+  });
+
+  it("does not record an empty run as a completed first turn", async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-empty-run-"));
+    try {
+      const storePath = path.join(tmp, "sessions.json");
+      const sessionFile = path.join(tmp, "missing-transcript.jsonl");
+      const sessionEntry: SessionEntry = {
+        sessionId: "session",
+        sessionFile,
+        updatedAt: Date.now(),
+        systemSent: true,
+        startedAt: Date.now() - 5,
+        status: "done",
+      };
+      await fs.writeFile(storePath, JSON.stringify({ main: sessionEntry }, null, 2), "utf-8");
+      state.runEmbeddedPiAgentMock.mockResolvedValueOnce({
+        payloads: [],
+        meta: {
+          systemPromptReport: {
+            source: "run",
+            generatedAt: Date.now(),
+            systemPrompt: {
+              chars: 1,
+              projectContextChars: 0,
+              nonProjectContextChars: 1,
+            },
+            injectedWorkspaceFiles: [],
+            skills: {
+              promptChars: 0,
+              entries: [],
+            },
+            tools: {
+              listChars: 0,
+              schemaChars: 0,
+              entries: [],
+            },
+          },
+        },
+      });
+
+      const { run } = createMinimalRun({
+        sessionEntry,
+        sessionStore: { main: sessionEntry },
+        sessionKey: "main",
+        storePath,
+        runOverrides: { sessionFile },
+      });
+      const res = await run();
+      const payload = Array.isArray(res) ? res[0] : res;
+
+      expect(payload).toMatchObject({
+        isError: true,
+        text: expect.stringContaining("ended before producing a reply"),
+      });
+      const stored = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
+        string,
+        SessionEntry
+      >;
+      expect(stored.main?.systemSent).toBe(false);
+      expect(stored.main?.status).toBe("failed");
+      expect(stored.main?.systemPromptReport).toBeUndefined();
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("does not record a silent-only payload as a completed visible turn", async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-silent-run-"));
+    try {
+      const storePath = path.join(tmp, "sessions.json");
+      const sessionFile = path.join(tmp, "missing-transcript.jsonl");
+      const sessionEntry: SessionEntry = {
+        sessionId: "session",
+        sessionFile,
+        updatedAt: Date.now(),
+        systemSent: true,
+        startedAt: Date.now() - 5,
+        status: "done",
+      };
+      await fs.writeFile(storePath, JSON.stringify({ main: sessionEntry }, null, 2), "utf-8");
+      state.runEmbeddedPiAgentMock.mockResolvedValueOnce({
+        payloads: [{ text: "NO_REPLY" }],
+        meta: {
+          finalAssistantRawText: "NO_REPLY",
+          finalAssistantVisibleText: "NO_REPLY",
+          systemPromptReport: {
+            source: "run",
+            generatedAt: Date.now(),
+            systemPrompt: {
+              chars: 1,
+              projectContextChars: 0,
+              nonProjectContextChars: 1,
+            },
+            injectedWorkspaceFiles: [],
+            skills: {
+              promptChars: 0,
+              entries: [],
+            },
+            tools: {
+              listChars: 0,
+              schemaChars: 0,
+              entries: [],
+            },
+          },
+        },
+      });
+
+      const { run } = createMinimalRun({
+        sessionEntry,
+        sessionStore: { main: sessionEntry },
+        sessionKey: "main",
+        storePath,
+        runOverrides: { sessionFile },
+      });
+      const res = await run();
+      const payload = Array.isArray(res) ? res[0] : res;
+
+      expect(payload).toMatchObject({
+        isError: true,
+        text: expect.stringContaining("ended before producing a reply"),
+      });
+      const stored = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
+        string,
+        SessionEntry
+      >;
+      expect(stored.main?.systemSent).toBe(false);
+      expect(stored.main?.status).toBe("failed");
+      expect(stored.main?.systemPromptReport).toBeUndefined();
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
   });
 
   it("surfaces overflow fallback when embedded payload text is whitespace-only", async () => {

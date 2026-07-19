@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const loadSessionsMock = vi.fn();
 const loadChatHistoryMock = vi.fn();
@@ -55,6 +55,10 @@ const { addExecApproval } = await vi.importActual<typeof import("./controllers/e
   "./controllers/exec-approval.ts",
 );
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 function createHost() {
   return {
     settings: {
@@ -106,6 +110,9 @@ function createHost() {
     execApprovalQueue: [],
     execApprovalError: null,
     updateAvailable: null,
+    plannerCompletionNotification: null,
+    plannerCompletionNotificationDismissTimer: null,
+    plannerCompletionNotificationSeenIds: new Set<string>(),
   } as unknown as Parameters<typeof handleGatewayEvent>[0];
 }
 
@@ -172,6 +179,55 @@ describe("handleGatewayEvent session.message", () => {
     });
 
     expect(loadChatHistoryMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleGatewayEvent session.activity", () => {
+  it("shows a completion notification for top-level planner lifecycle completion", async () => {
+    vi.useFakeTimers();
+    const host = createHost();
+
+    handleGatewayEvent(host, {
+      type: "event",
+      event: "session.activity",
+      payload: {
+        sessionKey: "agent:planner-4:main",
+        phase: "end",
+        runId: "run-planner-4",
+        status: "done",
+        runtimeMs: 61_000,
+      },
+      seq: 1,
+    });
+
+    expect(host.plannerCompletionNotification).toMatchObject({
+      id: "run:run-planner-4",
+      title: "Planner 4 is done",
+      body: "agent:planner-4:main - 1m 1s",
+    });
+
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(host.plannerCompletionNotification).toBeNull();
+  });
+
+  it("ignores nested planner subagent lifecycle completion", () => {
+    const host = createHost();
+
+    handleGatewayEvent(host, {
+      type: "event",
+      event: "session.activity",
+      payload: {
+        sessionKey: "agent:planner-4:subagent:worker",
+        phase: "end",
+        runId: "run-worker",
+        status: "done",
+      },
+      seq: 1,
+    });
+
+    expect(host.plannerCompletionNotification).toBeNull();
+    expect(host.plannerCompletionNotificationSeenIds.size).toBe(0);
   });
 });
 

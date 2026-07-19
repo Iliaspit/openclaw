@@ -33,7 +33,7 @@ import {
 } from "../fallback-state.js";
 import type { OriginatingChannelType, TemplateContext } from "../templating.js";
 import { resolveResponseUsageMode, type VerboseLevel } from "../thinking.js";
-import { SILENT_REPLY_TOKEN } from "../tokens.js";
+import { isSilentReplyPayloadText, SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { runAgentTurnWithFallback } from "./agent-runner-execution.js";
 import {
@@ -563,6 +563,86 @@ async function accumulateSessionUsageFromTranscript(params: {
   } catch {
     return undefined;
   }
+}
+
+function hasRunOutOfBandEffects(runResult: {
+  didSendViaMessagingTool?: boolean;
+  messagingToolSentTexts?: unknown[];
+  messagingToolSentMediaUrls?: unknown[];
+  messagingToolSentTargets?: unknown[];
+  successfulCronAdds?: number;
+  meta?: { toolSummary?: { calls?: number } };
+}): boolean {
+  return (
+    runResult.didSendViaMessagingTool === true ||
+    (runResult.messagingToolSentTexts?.length ?? 0) > 0 ||
+    (runResult.messagingToolSentMediaUrls?.length ?? 0) > 0 ||
+    (runResult.messagingToolSentTargets?.length ?? 0) > 0 ||
+    (runResult.successfulCronAdds ?? 0) > 0 ||
+    (runResult.meta?.toolSummary?.calls ?? 0) > 0
+  );
+}
+
+function isDeliberateSilentRun(runResult: {
+  meta?: {
+    finalAssistantRawText?: string;
+    finalAssistantVisibleText?: string;
+  };
+}): boolean {
+  return [runResult.meta?.finalAssistantRawText, runResult.meta?.finalAssistantVisibleText].some(
+    (text) => isSilentReplyPayloadText(text),
+  );
+}
+
+function isUnexpectedEmptyRun(params: {
+  isHeartbeat: boolean;
+  silentExpected?: boolean;
+  payloads: ReplyPayload[];
+  runResult: {
+    didSendViaMessagingTool?: boolean;
+    messagingToolSentTexts?: unknown[];
+    messagingToolSentMediaUrls?: unknown[];
+    messagingToolSentTargets?: unknown[];
+    successfulCronAdds?: number;
+    meta?: {
+      aborted?: boolean;
+      finalAssistantRawText?: string;
+      finalAssistantVisibleText?: string;
+      toolSummary?: { calls?: number };
+    };
+  };
+}): boolean {
+  if (
+    params.payloads.length > 0 ||
+    params.isHeartbeat ||
+    params.silentExpected === true ||
+    params.runResult.meta?.aborted === true ||
+    hasRunOutOfBandEffects(params.runResult) ||
+    isDeliberateSilentRun(params.runResult)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isUnexpectedNoVisibleRunReply(params: {
+  isHeartbeat: boolean;
+  silentExpected?: boolean;
+  runResult: Parameters<typeof isUnexpectedEmptyRun>[0]["runResult"];
+  blockReplyPipeline?: { didStream: () => boolean } | null;
+  directlySentBlockKeys?: Set<string>;
+}): boolean {
+  if (
+    params.isHeartbeat ||
+    params.silentExpected === true ||
+    params.runResult.meta?.aborted === true ||
+    hasRunOutOfBandEffects(params.runResult) ||
+    params.blockReplyPipeline?.didStream() === true ||
+    (params.directlySentBlockKeys?.size ?? 0) > 0
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function resolveRequestPromptTokens(params: {
@@ -1331,6 +1411,72 @@ export async function runReplyAgent(params: {
         allowAsyncLoad: false,
       }) ?? DEFAULT_CONTEXT_TOKENS;
 
+    const markUnexpectedEmptyRun = async () => {
+      const endedAt = Date.now();
+      const failureMessage =
+        "Agent run ended before producing a reply. I reset this session state so you can try again.";
+      const applyFailedSessionState = (entry: SessionEntry): Partial<SessionEntry> => {
+        const startedAt =
+          typeof entry.startedAt === "number" && Number.isFinite(entry.startedAt)
+            ? entry.startedAt
+            : runStartedAt;
+        return {
+          systemSent: false,
+          status: "failed",
+          endedAt,
+          runtimeMs: Math.max(0, endedAt - startedAt),
+          systemPromptReport: undefined,
+          totalTokensFresh: false,
+          updatedAt: endedAt,
+        };
+      };
+
+      if (activeSessionEntry) {
+        Object.assign(activeSessionEntry, applyFailedSessionState(activeSessionEntry));
+        if (activeSessionStore && sessionKey) {
+          activeSessionStore[sessionKey] = activeSessionEntry;
+        }
+      }
+      if (sessionKey && storePath) {
+        await updateSessionStoreEntry({
+          storePath,
+          sessionKey,
+          update: async (entry) => applyFailedSessionState(entry),
+        });
+      }
+      const emptyRunError = new Error(failureMessage);
+      replyOperation.fail("run_failed", emptyRunError);
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "error",
+          startedAt: runStartedAt,
+          endedAt,
+          error: failureMessage,
+        },
+      });
+      return finalizeWithFollowup(
+        {
+          text: `⚠️ ${failureMessage}`,
+          isError: true,
+        },
+        queueKey,
+        runFollowupTurn,
+      );
+    };
+
+    if (
+      isUnexpectedEmptyRun({
+        isHeartbeat,
+        silentExpected: followupRun.run.silentExpected,
+        payloads: payloadArray,
+        runResult,
+      })
+    ) {
+      return await markUnexpectedEmptyRun();
+    }
+
     await persistRunSessionUsage({
       storePath,
       sessionKey,
@@ -1383,6 +1529,17 @@ export async function runReplyAgent(params: {
     didLogHeartbeatStrip = payloadResult.didLogHeartbeatStrip;
 
     if (replyPayloads.length === 0) {
+      if (
+        isUnexpectedNoVisibleRunReply({
+          isHeartbeat,
+          silentExpected: followupRun.run.silentExpected,
+          runResult,
+          blockReplyPipeline,
+          directlySentBlockKeys,
+        })
+      ) {
+        return await markUnexpectedEmptyRun();
+      }
       return finalizeWithFollowup(undefined, queueKey, runFollowupTurn);
     }
 

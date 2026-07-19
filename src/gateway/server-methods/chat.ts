@@ -149,7 +149,7 @@ async function buildWebchatAudioOnlyAssistantMessage(
 }
 
 export const DEFAULT_CHAT_HISTORY_TEXT_MAX_CHARS = 8_000;
-const CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES = 128 * 1024;
+export const CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES = 128 * 1024;
 const CHAT_HISTORY_OVERSIZED_PLACEHOLDER = "[chat.history omitted: message too large]";
 let chatHistoryPlaceholderEmitCount = 0;
 const CHANNEL_AGNOSTIC_SESSION_SCOPES = new Set([
@@ -1157,7 +1157,7 @@ function buildOversizedHistoryPlaceholder(message?: unknown): Record<string, unk
   };
 }
 
-function replaceOversizedChatHistoryMessages(params: {
+export function replaceOversizedChatHistoryMessages(params: {
   messages: unknown[];
   maxSingleMessageBytes: number;
 }): { messages: unknown[]; replacedCount: number } {
@@ -1176,7 +1176,7 @@ function replaceOversizedChatHistoryMessages(params: {
   return { messages: replacedCount > 0 ? next : messages, replacedCount };
 }
 
-function enforceChatHistoryFinalBudget(params: { messages: unknown[]; maxBytes: number }): {
+export function enforceChatHistoryFinalBudget(params: { messages: unknown[]; maxBytes: number }): {
   messages: unknown[];
   placeholderCount: number;
 } {
@@ -1262,6 +1262,28 @@ function transcriptHasIdempotencyKey(transcriptPath: string, idempotencyKey: str
   } catch {
     return false;
   }
+}
+
+function transcriptHasAssistantMessage(transcriptPath: string): boolean {
+  try {
+    const lines = fs.readFileSync(transcriptPath, "utf-8").split(/\r?\n/);
+    for (const line of lines) {
+      if (!line.trim()) {
+        continue;
+      }
+      const parsed = JSON.parse(line) as {
+        message?: { role?: unknown };
+        role?: unknown;
+      };
+      const role = parsed.message?.role ?? parsed.role;
+      if (role === "assistant") {
+        return true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 function appendAssistantTranscriptMessage(params: {
@@ -1674,6 +1696,7 @@ export const chatHandlers: GatewayRequestHandlers = {
         provider: resolvedSessionModel.provider,
         model: resolvedSessionModel.model,
         catalog,
+        agentId: sessionAgentId,
       });
     }
     const verboseLevel = entry?.verboseLevel ?? cfg.agents?.defaults?.verboseDefault;
@@ -2177,6 +2200,45 @@ export const chatHandlers: GatewayRequestHandlers = {
           `webchat transcript append failed for audio reply: ${appended.error ?? "unknown error"}`,
         );
       };
+      const buildUnpersistedAssistantMessage = (text: string): Record<string, unknown> => ({
+        role: "assistant",
+        content: [{ type: "text", text }],
+        timestamp: Date.now(),
+        // Keep this compatible with Pi stopReason enums even when the primary persistence path failed.
+        stopReason: "stop",
+        usage: { input: 0, output: 0, totalTokens: 0 },
+      });
+      const appendDeliveredFinalReplyTranscript = (combinedReply: string) => {
+        const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(sessionKey);
+        const sessionId = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
+        const appended = appendAssistantTranscriptMessage({
+          message: combinedReply,
+          sessionId,
+          storePath: latestStorePath,
+          sessionFile: latestEntry?.sessionFile,
+          agentId,
+          createIfMissing: true,
+          idempotencyKey: `${clientRunId}:assistant-final`,
+        });
+        if (appended.ok && appended.message) {
+          return appended.message;
+        }
+        context.logGateway.warn(
+          `webchat transcript append failed: ${appended.error ?? "unknown error"}`,
+        );
+        return buildUnpersistedAssistantMessage(combinedReply);
+      };
+      const transcriptHasPersistedAssistant = () => {
+        const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(sessionKey);
+        const sessionId = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
+        const transcriptPath = resolveTranscriptPath({
+          sessionId,
+          storePath: latestStorePath,
+          sessionFile: latestEntry?.sessionFile ?? entry?.sessionFile,
+          agentId,
+        });
+        return transcriptPath ? transcriptHasAssistantMessage(transcriptPath) : false;
+      };
       const dispatcher = createReplyDispatcher({
         ...replyPipeline,
         onError: (err) => {
@@ -2285,33 +2347,10 @@ export const chatHandlers: GatewayRequestHandlers = {
               );
               let message: Record<string, unknown> | undefined;
               if (combinedReply) {
-                const { storePath: latestStorePath, entry: latestEntry } =
-                  loadSessionEntry(sessionKey);
-                const sessionId = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
-                const appended = appendAssistantTranscriptMessage({
-                  message: combinedReply,
-                  sessionId,
-                  storePath: latestStorePath,
-                  sessionFile: latestEntry?.sessionFile,
-                  agentId,
-                  createIfMissing: true,
-                });
-                if (appended.ok) {
-                  message = appended.message;
+                if (transcriptHasPersistedAssistant()) {
+                  message = undefined;
                 } else {
-                  context.logGateway.warn(
-                    `webchat transcript append failed: ${appended.error ?? "unknown error"}`,
-                  );
-                  const now = Date.now();
-                  message = {
-                    role: "assistant",
-                    content: [{ type: "text", text: combinedReply }],
-                    timestamp: now,
-                    // Keep this compatible with Pi stopReason enums even though this message isn't
-                    // persisted to the transcript due to the append failure.
-                    stopReason: "stop",
-                    usage: { input: 0, output: 0, totalTokens: 0 },
-                  };
+                  message = appendDeliveredFinalReplyTranscript(combinedReply);
                 }
               }
               broadcastChatFinal({
@@ -2322,7 +2361,21 @@ export const chatHandlers: GatewayRequestHandlers = {
               });
             }
           } else {
-            void emitUserTranscriptUpdate();
+            await emitUserTranscriptUpdate();
+            const combinedReply = buildTranscriptReplyText(
+              deliveredReplies
+                .filter((entry) => entry.kind === "final")
+                .map((entry) => entry.payload),
+            );
+            if (combinedReply && !transcriptHasPersistedAssistant()) {
+              const message = appendDeliveredFinalReplyTranscript(combinedReply);
+              broadcastChatFinal({
+                context,
+                runId: clientRunId,
+                sessionKey,
+                message,
+              });
+            }
           }
           setGatewayDedupeEntry({
             dedupe: context.dedupe,

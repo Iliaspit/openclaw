@@ -37,6 +37,7 @@ export async function noteBootstrapFileSize(cfg: OpenClawConfig) {
   const { bootstrapFiles, contextFiles } = await resolveBootstrapContextForRun({
     workspaceDir,
     config: cfg,
+    allowPolicyTruncationForDiagnostics: true,
   });
   const stats = buildBootstrapInjectionStats({
     bootstrapFiles,
@@ -68,7 +69,7 @@ export async function noteBootstrapFileSize(cfg: OpenClawConfig) {
   if (nonTruncatedNearLimit.length > 0) {
     for (const file of nonTruncatedNearLimit) {
       lines.push(
-        `- ${file.name}: ${formatInt(file.rawChars)} chars (${formatPercent(file.rawChars, bootstrapMaxChars)} of max/file ${formatInt(bootstrapMaxChars)})`,
+        `- ${file.name}: ${formatInt(file.rawChars)} chars (${formatPercent(file.rawChars, file.limitChars)} of ${file.limitCause === "per-file-limit" ? "max/file" : "max/total"} ${formatInt(file.limitChars)})`,
       );
     }
   }
@@ -82,9 +83,10 @@ export async function noteBootstrapFileSize(cfg: OpenClawConfig) {
 
   const needsPerFileTip =
     analysis.truncatedFiles.some((file) => file.causes.includes("per-file-limit")) ||
-    analysis.nearLimitFiles.length > 0;
+    analysis.nearLimitFiles.some((file) => file.limitCause === "per-file-limit");
   const needsTotalTip =
     analysis.truncatedFiles.some((file) => file.causes.includes("total-limit")) ||
+    analysis.nearLimitFiles.some((file) => file.limitCause === "total-limit") ||
     analysis.totalNearLimit;
   if (needsPerFileTip || needsTotalTip) {
     lines.push("");

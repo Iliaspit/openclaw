@@ -15,6 +15,10 @@ import {
 } from "../shared/string-coerce.js";
 import { normalizeMessageChannel } from "../utils/message-channel.js";
 import { resolveAgentConfig, resolveAgentIdFromSessionKey } from "./agent-scope.js";
+import {
+  resolveDelegationGuardConfig,
+  resolveDelegationGuardPrincipal,
+} from "./delegation/policy.js";
 import type { AnyAgentTool } from "./pi-tools.types.js";
 import { pickSandboxToolPolicy } from "./sandbox-tool-policy.js";
 import type { SandboxToolPolicy } from "./sandbox.js";
@@ -340,10 +344,25 @@ export function resolveEffectiveToolPolicy(params: {
   const explicitProfileAlsoAllow =
     resolveExplicitProfileAlsoAllow(agentTools) ?? resolveExplicitProfileAlsoAllow(globalTools);
   const implicitProfileAlsoAllow = resolveImplicitProfileAlsoAllow({ globalTools, agentTools });
+  const delegationGuard = params.config ? resolveDelegationGuardConfig(params.config) : undefined;
+  const delegationPrincipal =
+    delegationGuard && agentId
+      ? resolveDelegationGuardPrincipal(delegationGuard, agentId)
+      : undefined;
+  const protectedDelegationTool =
+    delegationPrincipal?.kind === "controller"
+      ? "delegation_guard"
+      : delegationPrincipal?.kind === "worker"
+        ? "delegation_report"
+        : undefined;
   const profileAlsoAllow =
-    explicitProfileAlsoAllow || implicitProfileAlsoAllow
+    explicitProfileAlsoAllow || implicitProfileAlsoAllow || protectedDelegationTool
       ? Array.from(
-          new Set([...(explicitProfileAlsoAllow ?? []), ...(implicitProfileAlsoAllow ?? [])]),
+          new Set([
+            ...(explicitProfileAlsoAllow ?? []),
+            ...(implicitProfileAlsoAllow ?? []),
+            ...(protectedDelegationTool ? [protectedDelegationTool] : []),
+          ]),
         )
       : undefined;
   return {

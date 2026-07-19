@@ -101,6 +101,86 @@ describe("resolveBootstrapFilesForRun", () => {
     expect(warnings).toHaveLength(3);
     expect(warnings[0]).toContain('missing or invalid "path" field');
   });
+
+  it("drops missing and template-only bootstrap files from run context", async () => {
+    const workspaceDir = await makeTempWorkspace("openclaw-bootstrap-");
+    await fs.writeFile(path.join(workspaceDir, "AGENTS.md"), "repo rules", "utf8");
+    await fs.writeFile(
+      path.join(workspaceDir, "IDENTITY.md"),
+      [
+        "# IDENTITY.md - Who Am I?",
+        "",
+        "*Fill this in during your first conversation. Make it yours.*",
+        "",
+        "- **Name:**",
+        "*(pick something you like)*",
+        "- **Creature:**",
+        "*(AI? robot? familiar? ghost in the machine? something weirder?)*",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(workspaceDir, "USER.md"),
+      [
+        "# USER.md - About Your Human",
+        "",
+        "*Learn about the person you're helping. Update this as you go.*",
+        "",
+        "- **Name:**",
+        "- **What to call them:**",
+        "- **Timezone:**",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(workspaceDir, "HEARTBEAT.md"),
+      [
+        "# HEARTBEAT.md Template",
+        "",
+        "```markdown",
+        "# Keep this file empty (or with only comments) to skip heartbeat API calls.",
+        "# Add tasks below when you want the agent to check something periodically.",
+        "```",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(workspaceDir, "TOOLS.md"),
+      [
+        "# TOOLS.md - Local Notes",
+        "",
+        "Skills define *how* tools work. This file is for *your* specifics — the stuff that's unique to your setup.",
+        "",
+        "## What Goes Here",
+        "",
+        "Things like:",
+        "",
+        "- Camera names and locations",
+        "- SSH hosts and aliases",
+        "- Preferred voices for TTS",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.writeFile(path.join(workspaceDir, "MEMORY.md"), "User prefers compact startup.", "utf8");
+
+    const files = await resolveBootstrapFilesForRun({ workspaceDir });
+    const names = files.map((file) => file.name);
+
+    expect(names).toEqual(["AGENTS.md", "MEMORY.md"]);
+  });
+
+  it("keeps user-authored bootstrap notes when template files are filled in", async () => {
+    const workspaceDir = await makeTempWorkspace("openclaw-bootstrap-");
+    await fs.writeFile(path.join(workspaceDir, "IDENTITY.md"), "- **Name:** Astino Planner", "utf8");
+    await fs.writeFile(path.join(workspaceDir, "USER.md"), "- **Timezone:** Europe/Athens", "utf8");
+    await fs.writeFile(path.join(workspaceDir, "TOOLS.md"), "### SSH\n- lab: ssh lab-host", "utf8");
+    await fs.writeFile(path.join(workspaceDir, "HEARTBEAT.md"), "- Check pending deploys", "utf8");
+
+    const files = await resolveBootstrapFilesForRun({ workspaceDir });
+    const names = files.map((file) => file.name);
+
+    expect(names).toEqual(["TOOLS.md", "IDENTITY.md", "USER.md", "HEARTBEAT.md"]);
+  });
 });
 
 describe("resolveBootstrapContextForRun", () => {

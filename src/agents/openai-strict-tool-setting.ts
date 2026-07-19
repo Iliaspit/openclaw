@@ -1,3 +1,4 @@
+import { extractModelCompat } from "../plugins/provider-model-compat.js";
 import { readStringValue } from "../shared/string-coerce.js";
 import { resolveProviderRequestCapabilities } from "./provider-attribution.js";
 
@@ -24,7 +25,7 @@ export function resolvesToNativeOpenAIStrictTools(
     capability: "llm",
     transport,
     modelId: optionalString(model.id),
-    compat: model.compat,
+    compat: extractModelCompat({ compat: model.compat }),
   });
   if (!capabilities.usesKnownNativeOpenAIRoute) {
     return false;

@@ -29,10 +29,12 @@ vi.mock("../subagent-registry.js", () => ({
 }));
 
 let createSessionsSpawnTool: typeof import("./sessions-spawn-tool.js").createSessionsSpawnTool;
+let resolveGuardedSpawnMetadata: typeof import("./sessions-spawn-tool.js").resolveGuardedSpawnMetadata;
 
 describe("sessions_spawn tool", () => {
   beforeAll(async () => {
-    ({ createSessionsSpawnTool } = await import("./sessions-spawn-tool.js"));
+    ({ createSessionsSpawnTool, resolveGuardedSpawnMetadata } =
+      await import("./sessions-spawn-tool.js"));
   });
 
   beforeEach(() => {
@@ -47,6 +49,29 @@ describe("sessions_spawn tool", () => {
       runId: "run-acp",
     });
     hoisted.registerSubagentRunMock.mockReset();
+  });
+
+  it("derives guarded sandbox and slice metadata from the assignment role", () => {
+    expect(resolveGuardedSpawnMetadata("helper")).toEqual({
+      sandbox: "require",
+      sliceRole: undefined,
+    });
+    expect(resolveGuardedSpawnMetadata("implementer")).toEqual({
+      sandbox: "require",
+      sliceRole: "implementation",
+    });
+    expect(resolveGuardedSpawnMetadata("tester")).toEqual({
+      sandbox: "require",
+      sliceRole: "testing",
+    });
+    expect(resolveGuardedSpawnMetadata("reviewer")).toEqual({
+      sandbox: "require",
+      sliceRole: "review",
+    });
+    expect(resolveGuardedSpawnMetadata("qa")).toEqual({
+      sandbox: "require",
+      sliceRole: "qa",
+    });
   });
 
   it("uses subagent runtime by default", async () => {
@@ -110,6 +135,23 @@ describe("sessions_spawn tool", () => {
     expect(result.details).toMatchObject({
       ...spawnResult,
       role: "reviewer",
+    });
+  });
+
+  it("returns an explicit terminal error when the subagent spawn seam throws", async () => {
+    hoisted.spawnSubagentDirectMock.mockRejectedValueOnce(new Error("unexpected spawn failure"));
+    const tool = createSessionsSpawnTool({
+      agentSessionKey: "agent:main:main",
+    });
+
+    const result = await tool.execute("call-spawn-throw", {
+      task: "build feature",
+      agentId: "main",
+    });
+
+    expect(result.details).toMatchObject({
+      status: "error",
+      error: expect.stringContaining("Subagent spawn failed unexpectedly"),
     });
   });
 

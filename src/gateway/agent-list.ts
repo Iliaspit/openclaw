@@ -70,7 +70,7 @@ function listConfiguredAgentIds(cfg: OpenClawConfig): string[] {
 
   const remainder = Array.from(ids)
     .filter((id) => !seen.has(id))
-    .sort((a, b) => a.localeCompare(b));
+    .toSorted((a, b) => a.localeCompare(b));
   for (const id of remainder) {
     pushId(id);
   }

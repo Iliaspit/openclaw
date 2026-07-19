@@ -31,6 +31,7 @@ type EventHandlerContext = {
   btw: EventHandlerBtwPresenter;
   tui: EventHandlerTui;
   state: TuiStateAccess;
+  localMode?: boolean;
   setActivityStatus: (text: string) => void;
   refreshSessionInfo?: () => Promise<void>;
   loadHistory?: () => Promise<void>;
@@ -373,7 +374,17 @@ export function createEventHandlers(context: EventHandlerContext) {
     if (evt.state === "error") {
       forgetLocalBtwRunId?.(evt.runId);
       const wasActiveRun = state.activeChatRunId === evt.runId;
-      chatLog.addSystem(`run error: ${evt.errorMessage ?? "unknown"}`);
+      const provider = state.sessionInfo?.modelProvider;
+      const authFailure = /\b(?:401|403|auth(?:entication)?|missing scopes?)\b/i.test(
+        evt.errorMessage ?? "",
+      );
+      if (context.localMode && provider && authFailure) {
+        chatLog.addSystem(
+          `auth or provider access failed for ${provider}. Run /auth ${provider} to refresh credentials; if you already re-authed, switch models/providers because this account may still be blocked for inference.`,
+        );
+      } else {
+        chatLog.addSystem(`run error: ${evt.errorMessage ?? "unknown"}`);
+      }
       terminateRun({ runId: evt.runId, wasActiveRun, status: "error" });
       maybeRefreshHistoryForRun(evt.runId);
     }

@@ -79,6 +79,7 @@ import type {
 } from "./controllers/skills.ts";
 import type { GatewayBrowserClient, GatewayHelloOk } from "./gateway.ts";
 import type { Tab } from "./navigation.ts";
+import type { PlannerCompletionNotification } from "./planner-notifications.ts";
 import type { SidebarContent } from "./sidebar-content.ts";
 import { loadLocalUserIdentity, loadSettings, type UiSettings } from "./storage.ts";
 import { VALID_THEME_NAMES, type ResolvedTheme, type ThemeMode, type ThemeName } from "./theme.ts";
@@ -452,6 +453,9 @@ export class OpenClawApp extends LitElement {
   @state() cronBusy = false;
 
   @state() updateAvailable: import("./types.js").UpdateAvailable | null = null;
+  @state() plannerCompletionNotification: PlannerCompletionNotification | null = null;
+  plannerCompletionNotificationDismissTimer: ReturnType<typeof setTimeout> | null = null;
+  plannerCompletionNotificationSeenIds = new Set<string>();
 
   // Overview dashboard state
   @state() attentionItems: import("./types.js").AttentionItem[] = [];

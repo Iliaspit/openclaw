@@ -109,4 +109,33 @@ describe("pi tool definition adapter logging", () => {
     expect(execute).toHaveBeenCalledWith("call-edit-batch", payload, undefined, undefined);
     expect(logError).not.toHaveBeenCalled();
   });
+
+  it("truncates oversized tool result details before returning to the agent loop", async () => {
+    const baseTool = {
+      name: "exec",
+      label: "Exec",
+      description: "runs a command",
+      parameters: Type.Object({}),
+      execute: async () => ({
+        content: [{ type: "text" as const, text: "ok" }],
+        details: {
+          status: "completed",
+          exitCode: 0,
+          aggregated: "diff --git a/file.ts b/file.ts\n".repeat(2_000),
+        },
+      }),
+    } satisfies AgentTool;
+
+    const [def] = toToolDefinitions([baseTool], { liveToolResultMaxChars: 1_000 });
+    if (!def) {
+      throw new Error("missing tool definition");
+    }
+
+    const result = await def.execute("call-exec-big", {}, undefined, undefined, extensionContext);
+    const details = result.details as Record<string, unknown>;
+
+    expect(details.status).toBe("completed");
+    expect(details.detailsTruncated).toBe(true);
+    expect(JSON.stringify(result).length).toBeLessThanOrEqual(1_000);
+  });
 });

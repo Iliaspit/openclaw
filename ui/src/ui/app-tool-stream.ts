@@ -300,6 +300,11 @@ function setCompactionComplete(host: CompactionHost, runId: string) {
 }
 
 export function handleCompactionEvent(host: CompactionHost, payload: AgentEventPayload) {
+  const accepted = resolveAcceptedSession(host, payload, { allowSessionScopedWhenIdle: true });
+  if (!accepted.accepted) {
+    return;
+  }
+
   const data = payload.data ?? {};
   const phase = typeof data.phase === "string" ? data.phase : "";
   const completed = data.completed === true;

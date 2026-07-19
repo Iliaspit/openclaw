@@ -71,7 +71,7 @@ export async function delegateCompactionToRuntime(
       ? {
           summary: result.result.summary,
           firstKeptEntryId: result.result.firstKeptEntryId,
-          tokensBefore: result.result.tokensBefore,
+          tokensBefore: result.result.tokensBefore ?? currentTokenCount ?? 0,
           tokensAfter: result.result.tokensAfter,
           details: result.result.details,
         }

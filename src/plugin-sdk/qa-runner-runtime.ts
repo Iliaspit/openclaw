@@ -62,6 +62,7 @@ export function loadQaRuntimeModule(): QaRuntimeSurface {
   });
 }
 
+// oxlint-disable-next-line typescript/no-unnecessary-type-parameters -- QA plugin test APIs are dynamically loaded and typed by the caller.
 export function loadQaRunnerBundledPluginTestApi<T extends object>(pluginId: string): T {
   const env = resolvePrivateQaBundledPluginsEnv();
   return loadBundledPluginPublicSurfaceModuleSync<T>({

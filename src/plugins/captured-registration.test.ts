@@ -46,6 +46,10 @@ describe("captured plugin registration", () => {
           description: "Captured command",
           handler: async () => ({ text: "ok" }),
         });
+        api.registerGatewayDiscoveryService({
+          id: "captured-discovery",
+          advertise: () => {},
+        });
       },
     });
 
@@ -53,6 +57,9 @@ describe("captured plugin registration", () => {
     expect(captured.providers.map((provider) => provider.id)).toEqual(["captured-provider"]);
     expect(captured.textTransforms).toHaveLength(1);
     expect(captured.textTransforms[0]?.input).toHaveLength(1);
+    expect(captured.gatewayDiscoveryServices.map((service) => service.id)).toEqual([
+      "captured-discovery",
+    ]);
     expect(captured.api.registerMemoryEmbeddingProvider).toBeTypeOf("function");
   });
 });

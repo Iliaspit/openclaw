@@ -42,21 +42,45 @@ describe("noteBootstrapFileSize", () => {
     resolveBootstrapContextForRun.mockResolvedValue({
       bootstrapFiles: [
         {
-          name: "AGENTS.md",
-          path: "/tmp/workspace/AGENTS.md",
+          name: "TOOLS.md",
+          path: "/tmp/workspace/TOOLS.md",
           content: "a".repeat(25_000),
           missing: false,
         },
       ],
-      contextFiles: [{ path: "/tmp/workspace/AGENTS.md", content: "a".repeat(20_000) }],
+      contextFiles: [{ path: "/tmp/workspace/TOOLS.md", content: "a".repeat(20_000) }],
     });
     await noteBootstrapFileSize({} as OpenClawConfig);
     expect(note).toHaveBeenCalledTimes(1);
     const [message, title] = note.mock.calls[0] ?? [];
     expect(String(title)).toBe("Bootstrap file size");
     expect(String(message)).toContain("will be truncated");
-    expect(String(message)).toContain("AGENTS.md");
+    expect(String(message)).toContain("TOOLS.md");
     expect(String(message)).toContain("max/file");
+    expect(resolveBootstrapContextForRun).toHaveBeenCalledWith(
+      expect.objectContaining({ allowPolicyTruncationForDiagnostics: true }),
+    );
+  });
+
+  it("warns when AGENTS.md is close to the total policy budget", async () => {
+    resolveBootstrapContextForRun.mockResolvedValue({
+      bootstrapFiles: [
+        {
+          name: "AGENTS.md",
+          path: "/tmp/workspace/AGENTS.md",
+          content: "a".repeat(120_000),
+          missing: false,
+        },
+      ],
+      contextFiles: [{ path: "/tmp/workspace/AGENTS.md", content: "a".repeat(120_000) }],
+    });
+    await noteBootstrapFileSize({} as OpenClawConfig);
+    expect(note).toHaveBeenCalledTimes(1);
+    const [message] = note.mock.calls[0] ?? [];
+    expect(String(message)).toContain("near configured limits");
+    expect(String(message)).toContain("80% of max/total 150,000");
+    expect(String(message)).toContain("bootstrapTotalMaxChars");
+    expect(String(message)).not.toContain("bootstrapMaxChars");
   });
 
   it("stays silent when files are comfortably within limits", async () => {

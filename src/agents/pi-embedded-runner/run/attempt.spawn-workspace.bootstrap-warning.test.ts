@@ -13,13 +13,13 @@ describe("runEmbeddedAttempt bootstrap warning prompt assembly", () => {
       files: buildBootstrapInjectionStats({
         bootstrapFiles: [
           {
-            name: "AGENTS.md",
-            path: "/tmp/openclaw-warning-workspace/AGENTS.md",
+            name: "TOOLS.md",
+            path: "/tmp/openclaw-warning-workspace/TOOLS.md",
             content: "A".repeat(200),
             missing: false,
           },
         ],
-        injectedFiles: [{ path: "AGENTS.md", content: "A".repeat(20) }],
+        injectedFiles: [{ path: "TOOLS.md", content: "A".repeat(20) }],
       }),
       bootstrapMaxChars: 50,
       bootstrapTotalMaxChars: 50,
@@ -35,8 +35,8 @@ describe("runEmbeddedAttempt bootstrap warning prompt assembly", () => {
     });
 
     expect(systemPrompt).toContain("hook context");
-    expect(systemPrompt).toContain("[Bootstrap truncation warning]");
-    expect(systemPrompt).toContain("- AGENTS.md: 200 raw -> 20 injected");
+    expect(systemPrompt).toContain("[Bootstrap context budget warning]");
+    expect(systemPrompt).toContain("- TOOLS.md: 200 raw -> 20 injected");
     expect(systemPrompt).toContain("hello");
   });
 });
