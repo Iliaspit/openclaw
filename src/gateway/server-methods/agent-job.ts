@@ -19,6 +19,7 @@ type AgentRunSnapshot = {
   startedAt?: number;
   endedAt?: number;
   error?: string;
+  rawCompletionStopReason?: string;
   ts: number;
 };
 
@@ -86,12 +87,15 @@ function createSnapshotFromLifecycleEvent(params: {
     typeof data?.startedAt === "number" ? data.startedAt : agentRunStarts.get(runId);
   const endedAt = typeof data?.endedAt === "number" ? data.endedAt : undefined;
   const error = typeof data?.error === "string" ? data.error : undefined;
+  const rawCompletionStopReason =
+    typeof data?.stopReason === "string" ? data.stopReason : undefined;
   return {
     runId,
     status: phase === "error" ? "error" : data?.aborted ? "timeout" : "ok",
     startedAt,
     endedAt,
     error,
+    rawCompletionStopReason,
     ts: Date.now(),
   };
 }

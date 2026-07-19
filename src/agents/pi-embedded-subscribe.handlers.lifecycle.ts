@@ -39,6 +39,9 @@ export function handleAgentStart(ctx: EmbeddedPiSubscribeContext) {
 export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext): void | Promise<void> {
   const lastAssistant = ctx.state.lastAssistant;
   const isError = isAssistantMessage(lastAssistant) && lastAssistant.stopReason === "error";
+  const rawCompletionStopReason = isAssistantMessage(lastAssistant)
+    ? lastAssistant.stopReason
+    : undefined;
   let lifecycleErrorText: string | undefined;
   const hasAssistantVisibleText =
     Array.isArray(ctx.state.assistantTexts) &&
@@ -121,6 +124,7 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext): void | Promise<
           ...(livenessState ? { livenessState } : {}),
           ...(replayInvalid ? { replayInvalid } : {}),
           endedAt: Date.now(),
+          ...(rawCompletionStopReason ? { stopReason: rawCompletionStopReason } : {}),
         },
       });
       void ctx.params.onAgentEvent?.({
@@ -130,6 +134,7 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext): void | Promise<
           error: lifecycleErrorText ?? "LLM request failed.",
           ...(livenessState ? { livenessState } : {}),
           ...(replayInvalid ? { replayInvalid } : {}),
+          ...(rawCompletionStopReason ? { stopReason: rawCompletionStopReason } : {}),
         },
       });
       return;
@@ -142,6 +147,7 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext): void | Promise<
         ...(livenessState ? { livenessState } : {}),
         ...(replayInvalid ? { replayInvalid } : {}),
         endedAt: Date.now(),
+        ...(rawCompletionStopReason ? { stopReason: rawCompletionStopReason } : {}),
       },
     });
     void ctx.params.onAgentEvent?.({
@@ -150,6 +156,7 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext): void | Promise<
         phase: "end",
         ...(livenessState ? { livenessState } : {}),
         ...(replayInvalid ? { replayInvalid } : {}),
+        ...(rawCompletionStopReason ? { stopReason: rawCompletionStopReason } : {}),
       },
     });
   };

@@ -310,6 +310,12 @@ async function assertPathWithinRoot(params: {
     return { state: "file", digest: await hashFile(resolved) };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" && !params.allowMissing) {
+      throw new Error(
+        `Delegation scope path must be an existing regular file: ${params.relativePath}`,
+        { cause: error },
+      );
+    }
     if (code !== "ENOENT" || !params.allowMissing) {
       throw error;
     }

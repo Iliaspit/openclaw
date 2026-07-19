@@ -78,18 +78,15 @@ vi.mock("./subagent-registry-completion.js", () => ({
     JSON.stringify(left) === JSON.stringify(right),
 }));
 
-vi.mock("./subagent-registry-helpers.js", () => ({
-  ANNOUNCE_COMPLETION_HARD_EXPIRY_MS: 30 * 60_000,
-  ANNOUNCE_EXPIRY_MS: 5 * 60_000,
-  MAX_ANNOUNCE_RETRY_COUNT: 3,
-  MIN_ANNOUNCE_RETRY_DELAY_MS: 1_000,
-  capFrozenResultText: (text: string) => text.trim(),
-  logAnnounceGiveUp: helperMocks.logAnnounceGiveUp,
-  persistSubagentSessionTiming: helperMocks.persistSubagentSessionTiming,
-  resolveAnnounceRetryDelayMs: (retryCount: number) =>
-    Math.min(1_000 * 2 ** Math.max(0, retryCount - 1), 8_000),
-  safeRemoveAttachmentsDir: helperMocks.safeRemoveAttachmentsDir,
-}));
+vi.mock("./subagent-registry-helpers.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./subagent-registry-helpers.js")>();
+  return {
+    ...actual,
+    logAnnounceGiveUp: helperMocks.logAnnounceGiveUp,
+    persistSubagentSessionTiming: helperMocks.persistSubagentSessionTiming,
+    safeRemoveAttachmentsDir: helperMocks.safeRemoveAttachmentsDir,
+  };
+});
 
 function createRunEntry(overrides: Partial<SubagentRunRecord> = {}): SubagentRunRecord {
   return {
@@ -669,5 +666,53 @@ describe("subagent registry lifecycle hardening", () => {
       browserLifecycleCleanupMocks.cleanupBrowserSessionsForLifecycleEnd,
     ).not.toHaveBeenCalled();
     expect(runSubagentAnnounceFlow).not.toHaveBeenCalled();
+  });
+
+  it("freezes truncation metadata before the first receipt and deduplicates its notice", async () => {
+    const entry = createRunEntry({ runId: "run-truncated" });
+    const controller = createLifecycleController({ entry });
+    const completion = {
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "ok" as const },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: false,
+      rawCompletionStopReason: "length",
+    };
+
+    await controller.completeSubagentRun(completion);
+    await controller.completeSubagentRun(completion);
+
+    expect(entry).toMatchObject({
+      modelCompletion: "truncated",
+      rawCompletionStopReason: "length",
+      frozenResultRuntimeCapped: false,
+      frozenResultOriginalBytes: Buffer.byteLength("final completion reply", "utf8"),
+    });
+    expect(entry.resultReceiptId).toMatch(/^scr_/);
+    expect(entry.frozenResultText).toContain("[incomplete handoff:");
+    expect(entry.frozenResultText?.match(/\[incomplete handoff:/g)).toHaveLength(1);
+  });
+
+  it("re-finalizes late refreshed output with the refreshed stop reason", async () => {
+    const entry = createRunEntry({
+      runId: "run-late-refresh",
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      expectsCompletionMessage: true,
+      frozenResultText: "early output",
+      frozenResultCapturedAt: 3_000,
+    });
+    const controller = createLifecycleController({
+      entry,
+      captureSubagentCompletionReply: vi.fn(async () => "late incomplete output"),
+    });
+
+    await controller.refreshFrozenResultFromSession(entry.childSessionKey, "max_tokens");
+
+    expect(entry.modelCompletion).toBe("truncated");
+    expect(entry.rawCompletionStopReason).toBe("max_tokens");
+    expect(entry.frozenResultText).toContain("late incomplete output");
+    expect(entry.frozenResultText).toContain("[incomplete handoff:");
   });
 });

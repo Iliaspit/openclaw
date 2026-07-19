@@ -562,7 +562,7 @@ async function agentCommandInternal(
         throw new Error(message);
       }
 
-      attemptExecutionRuntime.emitAcpLifecycleEnd({ runId });
+      attemptExecutionRuntime.emitAcpLifecycleEnd({ runId, stopReason });
 
       const result = attemptExecutionRuntime.buildAcpResult({
         payloadText: finalText,

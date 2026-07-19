@@ -53,6 +53,7 @@ export type AgentWaitResult = {
   startedAt?: number;
   endedAt?: number;
   error?: string;
+  rawCompletionStopReason?: string;
 };
 
 export type SubagentRunOutcome = {
@@ -335,6 +336,10 @@ export function applySubagentWaitOutcome(params: {
     outcome: params.outcome,
     startedAt: params.startedAt,
     endedAt: params.endedAt,
+    rawCompletionStopReason:
+      typeof params.wait?.rawCompletionStopReason === "string"
+        ? params.wait.rawCompletionStopReason
+        : undefined,
   };
   if (typeof params.wait?.startedAt === "number" && typeof next.startedAt !== "number") {
     next.startedAt = params.wait.startedAt;

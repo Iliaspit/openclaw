@@ -173,6 +173,7 @@ export function createSubagentRunManager(params: {
     sendFarewell?: boolean;
     accountId?: string;
     triggerCleanup: boolean;
+    rawCompletionStopReason?: string;
   }): Promise<void>;
   recordSubagentSliceSpawn?(entry: SubagentRunRecord): void;
   recordSubagentSliceTerminalOutcome?(args: {
@@ -214,6 +215,7 @@ export function createSubagentRunManager(params: {
           sendFarewell: true,
           accountId: entry.requesterOrigin?.accountId,
           triggerCleanup: true,
+          rawCompletionStopReason: entry.rawCompletionStopReason,
         })
         .catch((completeError) => {
           log.warn("Failed to terminalize subagent wait error", {
@@ -287,6 +289,7 @@ export function createSubagentRunManager(params: {
         sendFarewell: true,
         accountId: entry.requesterOrigin?.accountId,
         triggerCleanup: true,
+        rawCompletionStopReason: wait.rawCompletionStopReason,
       })
       .catch((completeError) => {
         log.warn("Failed to complete subagent run after wait", {
@@ -451,6 +454,10 @@ export function createSubagentRunManager(params: {
       outcome: undefined,
       frozenResultText: undefined,
       frozenResultCapturedAt: undefined,
+      modelCompletion: undefined,
+      rawCompletionStopReason: undefined,
+      frozenResultRuntimeCapped: undefined,
+      frozenResultOriginalBytes: undefined,
       resultReceiptId: undefined,
       resultReceiptSha256: undefined,
       resultReceiptBytes: undefined,

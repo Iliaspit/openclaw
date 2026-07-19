@@ -112,7 +112,7 @@ describe("delegation candidate fingerprint", () => {
         policyDigest: "policy",
         epoch: 1,
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow("Delegation scope path must be an existing regular file: nested/missing.ts");
   });
 
   it("returns deterministic bounded metadata for a dirty inventory larger than 185 KB", async () => {

@@ -202,6 +202,33 @@ export type DelegationValidatorResponse = {
 
 export type DelegationValidationOutcome = "accepted" | "rejected" | "blocked";
 
+export const DELEGATION_REPORT_ERROR_CODES = [
+  "scope_path_outside_assignment",
+  "scope_id_ambiguous",
+  "scope_partition_mismatch",
+  "newly_discovered_invalid",
+  "writable_scope_drift",
+  "report_structure_invalid",
+  "candidate_drift",
+  "validator_execution_failed",
+  "validator_rejected",
+] as const;
+
+export type DelegationReportErrorCode = (typeof DELEGATION_REPORT_ERROR_CODES)[number];
+
+export type DelegationPreReceiptRejection = {
+  auditEventId: string;
+  assignmentId: string;
+  sliceId: string;
+  routeFamilyId: string;
+  workerAgentId: string;
+  errorCode: DelegationReportErrorCode;
+  submittedSemanticDigest: string;
+  reportBytes: number;
+  message: string;
+  createdAt: number;
+};
+
 export type DelegationLedgerStatus = {
   epoch: number;
   auditEvents: number;

@@ -5,8 +5,13 @@ import type { SubagentRunRecord } from "../subagent-registry.types.js";
 
 const ledgerMocks = vi.hoisted(() => ({
   appendRouteEvent: vi.fn(),
+  acceptedReceiptForAssignment: vi.fn(),
   currentEpoch: vi.fn(() => 4),
+  guardMode: "enforce" as "audit" | "enforce",
+  guardResolutionFails: false,
   getAssignment: vi.fn(() => ({ assignmentId: "assignment-1", epoch: 4 })),
+  promoteRecordedTerminalCompletion: vi.fn(),
+  recordTerminalResultReceipt: vi.fn(),
   resolveAssignmentForChildSession: vi.fn(() => ({ assignmentId: "assignment-1", epoch: 4 })),
 }));
 
@@ -23,7 +28,12 @@ vi.mock("./ledger.js", () => ({
 }));
 
 vi.mock("./policy.js", () => ({
-  resolveDelegationGuardConfig: () => ({ mode: "enforce" }),
+  resolveDelegationGuardConfig: () => {
+    if (ledgerMocks.guardResolutionFails) {
+      throw new Error("guard mode unavailable");
+    }
+    return { mode: ledgerMocks.guardMode };
+  },
   resolveDelegationPolicyDigest: () => "policy-digest",
 }));
 
@@ -49,17 +59,15 @@ vi.mock("../child-route-health.js", () => ({
   recordChildRouteHealthEvent: vi.fn(async () => ({ ok: true, eventId: "route-event" })),
 }));
 
-vi.mock("../subagent-registry-helpers.js", () => ({
-  ANNOUNCE_COMPLETION_HARD_EXPIRY_MS: 30 * 60_000,
-  ANNOUNCE_EXPIRY_MS: 5 * 60_000,
-  MAX_ANNOUNCE_RETRY_COUNT: 3,
-  MIN_ANNOUNCE_RETRY_DELAY_MS: 1_000,
-  capFrozenResultText: (text: string) => text.trim(),
-  logAnnounceGiveUp: vi.fn(),
-  persistSubagentSessionTiming: vi.fn(async () => {}),
-  resolveAnnounceRetryDelayMs: () => 1_000,
-  safeRemoveAttachmentsDir: vi.fn(async () => {}),
-}));
+vi.mock("../subagent-registry-helpers.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../subagent-registry-helpers.js")>();
+  return {
+    ...actual,
+    logAnnounceGiveUp: vi.fn(),
+    persistSubagentSessionTiming: vi.fn(async () => {}),
+    safeRemoveAttachmentsDir: vi.fn(async () => {}),
+  };
+});
 
 vi.mock("../subagent-result-receipts.js", () => ({
   applySubagentResultReceiptToRun: () => false,
@@ -69,10 +77,12 @@ vi.mock("../subagent-result-receipts.js", () => ({
 describe("guarded subagent lifecycle timeout", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    ledgerMocks.guardMode = "enforce";
+    ledgerMocks.guardResolutionFails = false;
   });
 
-  it("persists an actual child run deadline as a terminal route timeout", async () => {
-    const entry: SubagentRunRecord = {
+  function createEntry(): SubagentRunRecord {
+    return {
       runId: "run-1",
       childSessionKey: "agent:helper:subagent:child-1",
       requesterSessionKey: "agent:planner:main",
@@ -83,7 +93,16 @@ describe("guarded subagent lifecycle timeout", () => {
       startedAt: 2_000,
       delegationAssignmentId: "assignment-1",
     };
-    const controller = createSubagentRegistryLifecycleController({
+  }
+
+  function createController(
+    entry: SubagentRunRecord,
+    overrides?: {
+      recordSubagentSliceTerminalOutcome?: ReturnType<typeof vi.fn>;
+      warn?: ReturnType<typeof vi.fn>;
+    },
+  ) {
+    return createSubagentRegistryLifecycleController({
       runs: new Map([[entry.runId, entry]]),
       resumedRuns: new Set(),
       subagentAnnounceTimeoutMs: 1_000,
@@ -95,10 +114,16 @@ describe("guarded subagent lifecycle timeout", () => {
       emitSubagentEndedHookForRun: vi.fn(async () => {}),
       notifyContextEngineSubagentEnded: vi.fn(async () => {}),
       resumeSubagentRun: vi.fn(),
-      captureSubagentCompletionReply: vi.fn(async () => undefined),
+      captureSubagentCompletionReply: vi.fn(async () => "visible completion"),
       runSubagentAnnounceFlow: vi.fn(async () => false),
-      warn: vi.fn(),
+      recordSubagentSliceTerminalOutcome: overrides?.recordSubagentSliceTerminalOutcome,
+      warn: overrides?.warn ?? vi.fn(),
     });
+  }
+
+  it("persists an actual child run deadline as a terminal route timeout", async () => {
+    const entry = createEntry();
+    const controller = createController(entry);
 
     await controller.completeSubagentRun({
       runId: entry.runId,
@@ -115,5 +140,96 @@ describe("guarded subagent lifecycle timeout", () => {
       createdAt: 4_000,
       payload: { runId: "run-1", deadlineKind: "run" },
     });
+  });
+
+  it.each(["enforce", "audit"] as const)(
+    "records a visible evidence gap when %s timeout persistence fails",
+    async (mode) => {
+      ledgerMocks.guardMode = mode;
+      ledgerMocks.appendRouteEvent.mockImplementationOnce(() => {
+        throw new Error("ledger unavailable");
+      });
+      const entry = createEntry();
+      const recordEvidenceGap = vi.fn(() => true);
+      const warn = vi.fn();
+      const controller = createController(entry, {
+        recordSubagentSliceTerminalOutcome: recordEvidenceGap,
+        warn,
+      });
+
+      await controller.completeSubagentRun({
+        runId: entry.runId,
+        endedAt: 4_000,
+        outcome: { status: "timeout" },
+        reason: SUBAGENT_ENDED_REASON_ERROR,
+        triggerCleanup: false,
+      });
+
+      expect(warn).toHaveBeenCalledWith(
+        "failed to persist guarded run deadline",
+        expect.objectContaining({ mode }),
+      );
+      expect(recordEvidenceGap).toHaveBeenCalledWith(
+        expect.objectContaining({ evidenceGapKind: "timeout" }),
+      );
+      expect(entry.outcome?.status).toBe(mode === "enforce" ? "error" : "timeout");
+    },
+  );
+
+  it("defaults fail-closed when timeout guard-mode resolution fails", async () => {
+    ledgerMocks.guardResolutionFails = true;
+    const entry = createEntry();
+    const recordEvidenceGap = vi.fn(() => true);
+    const controller = createController(entry, {
+      recordSubagentSliceTerminalOutcome: recordEvidenceGap,
+    });
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "timeout" },
+      reason: SUBAGENT_ENDED_REASON_ERROR,
+      triggerCleanup: false,
+    });
+
+    expect(entry.outcome?.status).toBe("error");
+    expect(recordEvidenceGap).toHaveBeenCalledWith(
+      expect.objectContaining({ evidenceGapKind: "timeout" }),
+    );
+  });
+
+  it.each([
+    ["missing-accepted-report", true],
+    ["missing-terminal-receipt", false],
+  ] as const)("rejects successful completion with %s", async (code, hasTerminalFields) => {
+    const entry = createEntry();
+    if (hasTerminalFields) {
+      Object.assign(entry, {
+        frozenResultText: "visible completion",
+        resultReceiptId: "result-1",
+        resultReceiptSha256: "a".repeat(64),
+        resultReceiptBytes: 18,
+        resultReceiptCapturedAt: 3_000,
+      });
+    }
+    ledgerMocks.acceptedReceiptForAssignment.mockReturnValue(undefined);
+    const controller = createController(entry);
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      reason: SUBAGENT_ENDED_REASON_ERROR,
+      triggerCleanup: false,
+    });
+
+    expect(ledgerMocks.appendRouteEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assignmentId: "assignment-1",
+        kind: "validation_rejected",
+        payload: expect.objectContaining({ code }),
+      }),
+    );
+    expect(entry.outcome?.status).toBe("error");
   });
 });

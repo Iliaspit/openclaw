@@ -70,6 +70,26 @@ describe("agent wait dedupe helper", () => {
     expect(__testing.getWaiterCount(runId)).toBe(0);
   });
 
+  it("normalizes raw stop reason from terminal agent payloads", () => {
+    const dedupe = new Map();
+    const runId = "run-agent-stop-reason";
+    setRunEntry({
+      dedupe,
+      kind: "agent",
+      runId,
+      payload: {
+        runId,
+        status: "ok",
+        result: { meta: { stopReason: "max_tokens" } },
+      },
+    });
+
+    expect(readTerminalSnapshotFromGatewayDedupe({ dedupe, runId })).toMatchObject({
+      status: "ok",
+      rawCompletionStopReason: "max_tokens",
+    });
+  });
+
   it("keeps stale chat dedupe blocked while agent dedupe is in-flight", async () => {
     const dedupe = new Map();
     const runId = "run-stale-chat";

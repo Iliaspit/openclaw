@@ -13,7 +13,7 @@ import {
 
 const GLOB_META = /[*?[\]{}]/;
 
-function canonicalizeScopePath(input: string): string {
+export function canonicalizeDelegationScopePath(input: string): string {
   if (!input || input.trim() !== input) {
     throw new Error("Delegation scope paths must be non-empty and cannot contain edge whitespace.");
   }
@@ -48,7 +48,7 @@ function canonicalizeSliceManifest(
   }
   const seen = new Set<string>();
   const entries = manifest.entries.map((entry) => {
-    const canonicalPath = canonicalizeScopePath(entry.path);
+    const canonicalPath = canonicalizeDelegationScopePath(entry.path);
     if (seen.has(canonicalPath)) {
       throw new Error(`Delegation scope contains a duplicate path: ${canonicalPath}`);
     }

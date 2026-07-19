@@ -305,6 +305,7 @@ function prepareAgentRunFromGateway(params: {
           status: "ok" as const,
           summary: "completed",
           result,
+          rawCompletionStopReason: result.meta.stopReason,
         };
         setGatewayDedupeEntry({
           dedupe: params.context.dedupe,
@@ -1587,6 +1588,7 @@ export const agentHandlers: GatewayRequestHandlers = {
         startedAt: cachedGatewaySnapshot.startedAt,
         endedAt: cachedGatewaySnapshot.endedAt,
         error: cachedGatewaySnapshot.error,
+        rawCompletionStopReason: cachedGatewaySnapshot.rawCompletionStopReason,
       });
       return;
     }
@@ -1641,6 +1643,7 @@ export const agentHandlers: GatewayRequestHandlers = {
       startedAt: snapshot.startedAt,
       endedAt: snapshot.endedAt,
       error: snapshot.error,
+      rawCompletionStopReason: snapshot.rawCompletionStopReason,
     });
   },
 };

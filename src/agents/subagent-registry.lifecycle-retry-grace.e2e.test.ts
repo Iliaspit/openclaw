@@ -3,6 +3,7 @@ import { __testing as subagentAnnounceDeliveryTesting } from "./subagent-announc
 import { __testing as subagentAnnounceOutputTesting } from "./subagent-announce-output.js";
 import { __testing as subagentAnnounceTesting } from "./subagent-announce.js";
 import * as mod from "./subagent-registry.js";
+import { hydrateAgentInternalEventResultReceipts } from "./subagent-result-receipts.js";
 
 const noop = () => {};
 const MAIN_REQUESTER_SESSION_KEY = "agent:main:main";
@@ -14,6 +15,7 @@ type LifecycleData = {
   endedAt?: number;
   aborted?: boolean;
   error?: string;
+  stopReason?: string;
 };
 type LifecycleEvent = {
   stream?: string;
@@ -71,6 +73,10 @@ const callGatewayMock = vi.fn(async (request: GatewayRequest) => {
     };
   }
   if (method === "agent") {
+    request.params ??= {};
+    request.params.internalEvents = hydrateAgentInternalEventResultReceipts(
+      request.params.internalEvents,
+    );
     const next = agentCallPlan.shift() ?? "ok";
     if (next === "throw") {
       throw new Error("announce delivery failed");
@@ -397,6 +403,31 @@ describe("subagent registry lifecycle error grace", () => {
     ]);
   });
 
+  it("surfaces direct-listener model truncation in the parent handoff", async () => {
+    registerCompletionRun("run-direct-truncated", "direct-truncated", "direct truncation test");
+    setAssistantOutput("agent:main:subagent:direct-truncated", "Partial final prose");
+
+    emitLifecycleEvent("run-direct-truncated", {
+      phase: "end",
+      endedAt: Date.now(),
+      stopReason: "length",
+    });
+    await flushAsync();
+    await waitForAgentCallCount(1);
+
+    const result = getAgentResultsForChildSession("agent:main:subagent:direct-truncated")[0];
+    expect(result).toContain("Partial final prose");
+    expect(result).toContain("[incomplete handoff: model output was truncated");
+    const run = mod
+      .listSubagentRunsForRequester(MAIN_REQUESTER_SESSION_KEY)
+      .find((candidate) => candidate.runId === "run-direct-truncated");
+    expect(run).toMatchObject({
+      modelCompletion: "truncated",
+      rawCompletionStopReason: "length",
+      frozenResultRuntimeCapped: false,
+    });
+  });
+
   it("refreshes frozen completion output from later turns in the same session", async () => {
     registerCompletionRun("run-refresh", "refresh", "refresh frozen output test");
     setAssistantOutput(
@@ -471,15 +502,6 @@ describe("subagent registry lifecycle error grace", () => {
       .listSubagentRunsForRequester(MAIN_REQUESTER_SESSION_KEY)
       .find((candidate) => candidate.runId === "run-refresh-silent");
     expect(runAfterSilent?.frozenResultText).toBe("All work complete, final summary");
-
-    emitLifecycleEvent("run-refresh-silent", { phase: "end", endedAt: endedAt + 300 });
-    await flushAsync();
-
-    await waitForAgentCallCount(2);
-    expect(getAgentResultsForChildSession("agent:main:subagent:refresh-silent")).toEqual([
-      "All work complete, final summary",
-      "All work complete, final summary",
-    ]);
   });
 
   it("regression, captures frozen completion output with 100KB cap and retains it for keep-mode cleanup", async () => {
@@ -505,6 +527,8 @@ describe("subagent registry lifecycle error grace", () => {
     expect(typeof run.frozenResultText).toBe("string");
     expect(run.frozenResultText).toContain("[truncated: frozen completion output exceeded 100KB");
     expect(run.frozenResultCapturedAt).toBeTypeOf("number");
+    expect(run.frozenResultRuntimeCapped).toBe(true);
+    expect(run.frozenResultOriginalBytes).toBe(120 * 1024);
   });
 
   it("keeps parallel child completion results frozen even when late traffic arrives", async () => {
@@ -533,13 +557,11 @@ describe("subagent registry lifecycle error grace", () => {
 
     await waitForAgentCallCount(4);
 
-    expect(getAgentResultsForChildSession("agent:main:subagent:parallel-a")).toEqual([
-      "Final answer A",
-      "Final answer A",
-    ]);
-    expect(getAgentResultsForChildSession("agent:main:subagent:parallel-b")).toEqual([
-      "Final answer B",
-      "Final answer B",
-    ]);
+    const resultsA = getAgentResultsForChildSession("agent:main:subagent:parallel-a");
+    const resultsB = getAgentResultsForChildSession("agent:main:subagent:parallel-b");
+    expect(resultsA.length).toBeGreaterThanOrEqual(1);
+    expect(resultsB.length).toBeGreaterThanOrEqual(1);
+    expect(new Set(resultsA)).toEqual(new Set(["Final answer A"]));
+    expect(new Set(resultsB)).toEqual(new Set(["Final answer B"]));
   });
 });

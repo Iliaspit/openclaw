@@ -88,6 +88,7 @@ describe("handleAgentEnd", () => {
         phase: "error",
         error: "LLM request failed: connection refused by the provider endpoint.",
         livenessState: "blocked",
+        stopReason: "error",
       },
     });
   });
@@ -164,6 +165,7 @@ describe("handleAgentEnd", () => {
       data: {
         phase: "error",
         error: "x-api-key: ***",
+        stopReason: "error",
       },
     });
   });
@@ -282,6 +284,7 @@ describe("handleAgentEnd", () => {
         phase: "end",
         livenessState: "abandoned",
         replayInvalid: true,
+        stopReason: "toolUse",
       },
     });
   });
@@ -521,6 +524,7 @@ describe("handleAgentEnd", () => {
       data: {
         phase: "error",
         error: "LLM request failed: connection refused by the provider endpoint.",
+        stopReason: "error",
       },
     });
   });
@@ -535,6 +539,25 @@ describe("handleAgentEnd", () => {
     expect(onAgentEvent).toHaveBeenCalledWith({
       stream: "lifecycle",
       data: { phase: "end" },
+    });
+  });
+
+  it("emits the raw length stop reason with embedded terminal lifecycle", async () => {
+    const onAgentEvent = vi.fn();
+    const ctx = createContext(
+      {
+        role: "assistant",
+        stopReason: "length",
+        content: [{ type: "text", text: "partial" }],
+      },
+      { onAgentEvent },
+    );
+
+    await handleAgentEnd(ctx);
+
+    expect(onAgentEvent).toHaveBeenCalledWith({
+      stream: "lifecycle",
+      data: { phase: "end", stopReason: "length" },
     });
   });
 

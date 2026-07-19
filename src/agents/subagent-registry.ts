@@ -252,6 +252,7 @@ const pendingLifecycleErrorByRunId = new Map<
     timer: NodeJS.Timeout;
     endedAt: number;
     error?: string;
+    rawCompletionStopReason?: string;
   }
 >();
 
@@ -271,7 +272,12 @@ function clearAllPendingLifecycleErrors() {
   pendingLifecycleErrorByRunId.clear();
 }
 
-function schedulePendingLifecycleError(params: { runId: string; endedAt: number; error?: string }) {
+function schedulePendingLifecycleError(params: {
+  runId: string;
+  endedAt: number;
+  error?: string;
+  rawCompletionStopReason?: string;
+}) {
   clearPendingLifecycleError(params.runId);
   const timer = setTimeout(() => {
     const pending = pendingLifecycleErrorByRunId.get(params.runId);
@@ -297,6 +303,7 @@ function schedulePendingLifecycleError(params: { runId: string; endedAt: number;
       sendFarewell: true,
       accountId: entry.requesterOrigin?.accountId,
       triggerCleanup: true,
+      rawCompletionStopReason: pending.rawCompletionStopReason,
     });
   }, LIFECYCLE_ERROR_RETRY_GRACE_MS);
   timer.unref?.();
@@ -304,6 +311,7 @@ function schedulePendingLifecycleError(params: { runId: string; endedAt: number;
     timer,
     endedAt: params.endedAt,
     error: params.error,
+    rawCompletionStopReason: params.rawCompletionStopReason,
   });
 }
 
@@ -741,7 +749,10 @@ function ensureListener() {
       const entry = subagentRuns.get(evt.runId);
       if (!entry) {
         if (phase === "end" && typeof evt.sessionKey === "string") {
-          await refreshFrozenResultFromSession(evt.sessionKey);
+          await refreshFrozenResultFromSession(
+            evt.sessionKey,
+            typeof evt.data?.stopReason === "string" ? evt.data.stopReason : undefined,
+          );
         }
         return;
       }
@@ -762,11 +773,14 @@ function ensureListener() {
       }
       const endedAt = typeof evt.data?.endedAt === "number" ? evt.data.endedAt : Date.now();
       const error = typeof evt.data?.error === "string" ? evt.data.error : undefined;
+      const rawCompletionStopReason =
+        typeof evt.data?.stopReason === "string" ? evt.data.stopReason : undefined;
       if (phase === "error") {
         schedulePendingLifecycleError({
           runId: evt.runId,
           endedAt,
           error,
+          rawCompletionStopReason,
         });
         return;
       }
@@ -782,6 +796,7 @@ function ensureListener() {
         sendFarewell: true,
         accountId: entry.requesterOrigin?.accountId,
         triggerCleanup: true,
+        rawCompletionStopReason,
       });
     })();
   });

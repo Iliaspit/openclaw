@@ -22,6 +22,7 @@ export type AgentWaitResult = {
   error?: string;
   startedAt?: number;
   endedAt?: number;
+  rawCompletionStopReason?: string;
 };
 
 export type AgentRunsDrainResult = {
@@ -35,6 +36,7 @@ type RawAgentWaitResponse = {
   error?: string;
   startedAt?: unknown;
   endedAt?: unknown;
+  rawCompletionStopReason?: unknown;
 };
 
 function normalizeAgentWaitResult(
@@ -46,6 +48,10 @@ function normalizeAgentWaitResult(
     error: typeof wait?.error === "string" ? wait.error : undefined,
     startedAt: typeof wait?.startedAt === "number" ? wait.startedAt : undefined,
     endedAt: typeof wait?.endedAt === "number" ? wait.endedAt : undefined,
+    rawCompletionStopReason:
+      typeof wait?.rawCompletionStopReason === "string"
+        ? wait.rawCompletionStopReason
+        : undefined,
   };
 }
 

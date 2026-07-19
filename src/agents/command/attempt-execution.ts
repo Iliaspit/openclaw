@@ -437,13 +437,14 @@ export function emitAcpLifecycleStart(params: { runId: string; startedAt: number
   });
 }
 
-export function emitAcpLifecycleEnd(params: { runId: string }) {
+export function emitAcpLifecycleEnd(params: { runId: string; stopReason?: string }) {
   emitAgentEvent({
     runId: params.runId,
     stream: "lifecycle",
     data: {
       phase: "end",
       endedAt: Date.now(),
+      ...(params.stopReason ? { stopReason: params.stopReason } : {}),
     },
   });
 }

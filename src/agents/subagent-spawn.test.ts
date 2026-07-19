@@ -144,6 +144,8 @@ describe("spawnSubagentDirect seam flow", () => {
     expect(prompt).toContain('[".openclaw/delegation-runtime-canary.txt","src/example.ts"]');
     expect(prompt).toContain("MUST exactly equal");
     expect(prompt).toContain("Do not add labels, aliases, descriptions");
+    expect(prompt).toContain("canonical repository-relative path for both scopeId and path");
+    expect(prompt).toContain("normally with disposition follow-up");
   });
 
   beforeEach(async () => {

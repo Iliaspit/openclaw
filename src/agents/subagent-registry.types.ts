@@ -7,6 +7,7 @@ export type SubagentSliceFullE2EGateGreen = boolean | "unknown";
 export type SubagentSliceRole = "implementation" | "testing" | "review" | "qa" | "full_gate";
 export type SubagentSliceContinuation = "default" | "same";
 export type SubagentSliceBoundary = "original" | "post_full_gate_followup";
+export type SubagentModelCompletion = "complete" | "truncated" | "unknown";
 
 export type SubagentSliceBudgetTerminalEvidenceGapKind =
   | "timeout"
@@ -86,6 +87,10 @@ export type SubagentRunRecord = {
   wakeOnDescendantSettle?: boolean;
   frozenResultText?: string | null;
   frozenResultCapturedAt?: number;
+  modelCompletion?: SubagentModelCompletion;
+  rawCompletionStopReason?: string;
+  frozenResultRuntimeCapped?: boolean;
+  frozenResultOriginalBytes?: number;
   resultReceiptId?: string;
   resultReceiptSha256?: string;
   resultReceiptBytes?: number;

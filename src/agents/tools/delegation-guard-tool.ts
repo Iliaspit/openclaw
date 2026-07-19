@@ -558,23 +558,57 @@ export function createDelegationGuardTool(opts: {
           }
           const receipt = runtime.ledger.acceptedReceiptForAssignment(assignmentId);
           const completed = runtime.ledger.isAssignmentCompleted(assignmentId);
-          return receipt && completed
-            ? jsonResult({
-                status: "completed",
-                action,
-                assignmentId,
-                receiptId: receipt.receiptId,
-                semanticDigest: receipt.semanticDigest,
-              })
-            : receipt
-              ? jsonResult({
-                  status: "awaiting_terminal_receipt",
-                  action,
-                  assignmentId,
-                  receiptId: receipt.receiptId,
-                  semanticDigest: receipt.semanticDigest,
-                })
-              : jsonResult({ status: "pending", action, assignmentId });
+          if (receipt && completed) {
+            return jsonResult({
+              status: "completed",
+              action,
+              assignmentId,
+              receiptId: receipt.receiptId,
+              semanticDigest: receipt.semanticDigest,
+            });
+          }
+          if (receipt) {
+            return jsonResult({
+              status: "awaiting_terminal_receipt",
+              action,
+              assignmentId,
+              receiptId: receipt.receiptId,
+              semanticDigest: receipt.semanticDigest,
+            });
+          }
+          const rejectedReceipt = runtime.ledger.rejectedReceiptForAssignment(assignmentId);
+          if (rejectedReceipt) {
+            return jsonResult({
+              status: "report_rejected",
+              action,
+              assignmentId,
+              errorCode: rejectedReceipt.errorCode,
+              message: rejectedReceipt.message,
+              receiptId: rejectedReceipt.receiptId,
+              validationId: rejectedReceipt.validationId,
+              semanticDigest: rejectedReceipt.semanticDigest,
+              outcome: rejectedReceipt.outcome,
+              issueCodes: rejectedReceipt.issues.map((issue) => issue.code),
+            });
+          }
+          const preReceipt = runtime.ledger.latestPreReceiptReportRejection(assignmentId);
+          if (preReceipt) {
+            return jsonResult({
+              status: "report_rejected_before_receipt",
+              action,
+              assignmentId,
+              sliceId: preReceipt.sliceId,
+              routeFamilyId: preReceipt.routeFamilyId,
+              workerAgentId: preReceipt.workerAgentId,
+              errorCode: preReceipt.errorCode,
+              submittedSemanticDigest: preReceipt.submittedSemanticDigest,
+              message: preReceipt.message,
+              auditEventId: preReceipt.auditEventId,
+              reportBytes: preReceipt.reportBytes,
+              createdAt: preReceipt.createdAt,
+            });
+          }
+          return jsonResult({ status: "pending", action, assignmentId });
         }
 
         if (action === "format_correction") {

@@ -5,6 +5,7 @@ export type AgentWaitTerminalSnapshot = {
   startedAt?: number;
   endedAt?: number;
   error?: string;
+  rawCompletionStopReason?: string;
 };
 
 const AGENT_WAITERS_BY_RUN_ID = new Map<string, Set<() => void>>();
@@ -72,6 +73,8 @@ export function readTerminalSnapshotFromDedupeEntry(
         endedAt?: unknown;
         error?: unknown;
         summary?: unknown;
+        rawCompletionStopReason?: unknown;
+        result?: unknown;
       }
     | undefined;
   const status = typeof payload?.status === "string" ? payload.status : undefined;
@@ -87,6 +90,20 @@ export function readTerminalSnapshotFromDedupeEntry(
       : typeof payload?.summary === "string"
         ? payload.summary
         : entry.error?.message;
+  const nestedResult =
+    payload?.result && typeof payload.result === "object"
+      ? (payload.result as { meta?: unknown })
+      : undefined;
+  const nestedMeta =
+    nestedResult?.meta && typeof nestedResult.meta === "object"
+      ? (nestedResult.meta as { stopReason?: unknown })
+      : undefined;
+  const rawCompletionStopReason =
+    typeof payload?.rawCompletionStopReason === "string"
+      ? payload.rawCompletionStopReason
+      : typeof nestedMeta?.stopReason === "string"
+        ? nestedMeta.stopReason
+        : undefined;
 
   if (status === "ok" || status === "timeout") {
     return {
@@ -94,6 +111,7 @@ export function readTerminalSnapshotFromDedupeEntry(
       startedAt,
       endedAt,
       error: status === "timeout" ? errorMessage : undefined,
+      rawCompletionStopReason,
     };
   }
   if (status === "error" || !entry.ok) {
@@ -102,6 +120,7 @@ export function readTerminalSnapshotFromDedupeEntry(
       startedAt,
       endedAt,
       error: errorMessage,
+      rawCompletionStopReason,
     };
   }
   return null;

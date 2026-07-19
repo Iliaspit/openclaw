@@ -39,7 +39,8 @@ import { runOutcomesEqual } from "./subagent-registry-completion.js";
 import {
   ANNOUNCE_COMPLETION_HARD_EXPIRY_MS,
   ANNOUNCE_EXPIRY_MS,
-  capFrozenResultText,
+  classifySubagentModelCompletion,
+  finalizeFrozenResultText,
   logAnnounceGiveUp,
   MAX_ANNOUNCE_RETRY_COUNT,
   MIN_ANNOUNCE_RETRY_DELAY_MS,
@@ -287,11 +288,13 @@ export function createSubagentRegistryLifecycleController(params: {
     }
 
     if (args.outcome.status === "timeout") {
+      let auditOnly = false;
       try {
         const guard = resolveDelegationGuardConfig(loadConfig());
         if (!guard) {
           throw new Error("delegation guard is unavailable");
         }
+        auditOnly = guard.mode === "audit";
         const ledger = openConfiguredDelegationLedger({
           guard,
           policyDigest: resolveDelegationPolicyDigest(guard),
@@ -316,7 +319,23 @@ export function createSubagentRegistryLifecycleController(params: {
           error: buildSafeLifecycleErrorMeta(err),
           runId: maskRunId(args.entry.runId),
           childSessionKey: maskSessionKey(args.entry.childSessionKey),
+          mode: auditOnly ? "audit" : "enforce",
         });
+        if (auditOnly) {
+          return { outcome: args.outcome, reason: args.reason, mutated: false, evidenceGap: true };
+        }
+        const outcome = withSubagentOutcomeTiming(
+          { status: "error", error: GUARDED_COMPLETION_EVIDENCE_ERROR },
+          { startedAt: args.entry.startedAt, endedAt: args.endedAt },
+        );
+        args.entry.outcome = outcome;
+        args.entry.endedReason = SUBAGENT_ENDED_REASON_ERROR;
+        return {
+          outcome,
+          reason: SUBAGENT_ENDED_REASON_ERROR,
+          mutated: true,
+          evidenceGap: true,
+        };
       }
       return { outcome: args.outcome, reason: args.reason, mutated: false, evidenceGap: false };
     }
@@ -454,6 +473,64 @@ export function createSubagentRegistryLifecycleController(params: {
   const requiresVisibleCompletion = (entry: SubagentRunRecord): boolean =>
     entry.expectsCompletionMessage === true && entry.outcome?.status === "ok";
 
+  const updateModelCompletion = (
+    entry: SubagentRunRecord,
+    rawCompletionStopReason?: string,
+  ): boolean => {
+    const normalizedStopReason = rawCompletionStopReason?.trim() || undefined;
+    const nextStopReason = normalizedStopReason ?? entry.rawCompletionStopReason;
+    const nextCompletion = classifySubagentModelCompletion(nextStopReason);
+    let changed = false;
+    if (entry.rawCompletionStopReason !== nextStopReason) {
+      entry.rawCompletionStopReason = nextStopReason;
+      changed = true;
+    }
+    if (entry.modelCompletion !== nextCompletion) {
+      entry.modelCompletion = nextCompletion;
+      changed = true;
+    }
+    return changed;
+  };
+
+  const finalizeRunResult = (args: {
+    entry: SubagentRunRecord;
+    resultText: string;
+    preserveExistingCapMetadata?: boolean;
+  }): boolean => {
+    const finalized = finalizeFrozenResultText({
+      resultText: args.resultText,
+      rawCompletionStopReason: args.entry.rawCompletionStopReason,
+      ...(args.preserveExistingCapMetadata
+        ? {
+            priorRuntimeCapped: args.entry.frozenResultRuntimeCapped,
+            originalBytes: args.entry.frozenResultOriginalBytes,
+          }
+        : {}),
+    });
+    let changed = false;
+    if (args.entry.frozenResultText !== finalized.resultText) {
+      args.entry.frozenResultText = finalized.resultText;
+      changed = true;
+    }
+    if (args.entry.modelCompletion !== finalized.modelCompletion) {
+      args.entry.modelCompletion = finalized.modelCompletion;
+      changed = true;
+    }
+    if (args.entry.rawCompletionStopReason !== finalized.rawCompletionStopReason) {
+      args.entry.rawCompletionStopReason = finalized.rawCompletionStopReason;
+      changed = true;
+    }
+    if (args.entry.frozenResultRuntimeCapped !== finalized.runtimeCapped) {
+      args.entry.frozenResultRuntimeCapped = finalized.runtimeCapped;
+      changed = true;
+    }
+    if (args.entry.frozenResultOriginalBytes !== finalized.originalBytes) {
+      args.entry.frozenResultOriginalBytes = finalized.originalBytes;
+      changed = true;
+    }
+    return changed;
+  };
+
   const clearSubagentResultReceipt = (entry: SubagentRunRecord): boolean => {
     let changed = false;
     const clear = (key: keyof SubagentRunRecord) => {
@@ -475,8 +552,16 @@ export function createSubagentRegistryLifecycleController(params: {
   ): Promise<{ mutated: boolean; hasVisibleResult: boolean }> => {
     const requireAssistantReply = requiresVisibleCompletion(entry);
     if (entry.frozenResultText !== undefined) {
+      let mutated = false;
+      if (typeof entry.frozenResultText === "string") {
+        mutated = finalizeRunResult({
+          entry,
+          resultText: entry.frozenResultText,
+          preserveExistingCapMetadata: true,
+        });
+      }
       if (requireAssistantReply && !hasVisibleFrozenResult(entry)) {
-        return { mutated: false, hasVisibleResult: false };
+        return { mutated, hasVisibleResult: false };
       }
       const persisted = persistSubagentResultReceiptForRunSync(entry);
       if (!persisted.ok) {
@@ -487,10 +572,10 @@ export function createSubagentRegistryLifecycleController(params: {
         });
         if (entry.cleanup === "delete") {
           entry.cleanup = "keep";
-          return { mutated: true, hasVisibleResult: hasVisibleFrozenResult(entry) };
+          mutated = true;
         }
       }
-      return { mutated: false, hasVisibleResult: hasVisibleFrozenResult(entry) };
+      return { mutated, hasVisibleResult: hasVisibleFrozenResult(entry) };
     }
     try {
       const captured = await params.captureSubagentCompletionReply(entry.childSessionKey, {
@@ -498,9 +583,18 @@ export function createSubagentRegistryLifecycleController(params: {
         outcome: entry.outcome,
         ...(requireAssistantReply ? { requireAssistantReply: true } : {}),
       });
-      entry.frozenResultText = captured?.trim() ? capFrozenResultText(captured) : null;
+      const trimmed = captured?.trim();
+      if (trimmed) {
+        finalizeRunResult({ entry, resultText: trimmed });
+      } else {
+        entry.frozenResultText = null;
+        entry.frozenResultRuntimeCapped = false;
+        entry.frozenResultOriginalBytes = 0;
+      }
     } catch {
       entry.frozenResultText = null;
+      entry.frozenResultRuntimeCapped = false;
+      entry.frozenResultOriginalBytes = 0;
     }
     entry.frozenResultCapturedAt = Date.now();
     if (requireAssistantReply && !hasVisibleFrozenResult(entry)) {
@@ -544,7 +638,10 @@ export function createSubagentRegistryLifecycleController(params: {
     return out;
   };
 
-  const refreshFrozenResultFromSession = async (sessionKey: string): Promise<boolean> => {
+  const refreshFrozenResultFromSession = async (
+    sessionKey: string,
+    rawCompletionStopReason?: string,
+  ): Promise<boolean> => {
     const candidates = listPendingCompletionRunsForSession(sessionKey);
     if (candidates.length === 0) {
       return false;
@@ -552,7 +649,7 @@ export function createSubagentRegistryLifecycleController(params: {
 
     let captured: string | undefined;
     try {
-      captured = await captureSubagentCompletionReply(sessionKey);
+      captured = await params.captureSubagentCompletionReply(sessionKey);
     } catch {
       return false;
     }
@@ -561,12 +658,13 @@ export function createSubagentRegistryLifecycleController(params: {
       return false;
     }
 
-    const nextFrozen = capFrozenResultText(trimmed);
     const capturedAt = Date.now();
     let changed = false;
     for (const entry of candidates) {
-      if (entry.frozenResultText !== nextFrozen) {
-        entry.frozenResultText = nextFrozen;
+      if (updateModelCompletion(entry, rawCompletionStopReason)) {
+        changed = true;
+      }
+      if (finalizeRunResult({ entry, resultText: trimmed })) {
         entry.frozenResultCapturedAt = capturedAt;
         changed = true;
       }
@@ -908,6 +1006,7 @@ export function createSubagentRegistryLifecycleController(params: {
     sendFarewell?: boolean;
     accountId?: string;
     triggerCleanup: boolean;
+    rawCompletionStopReason?: string;
   }) => {
     params.clearPendingLifecycleError(completeParams.runId);
     const entry = params.runs.get(completeParams.runId);
@@ -915,15 +1014,22 @@ export function createSubagentRegistryLifecycleController(params: {
       return;
     }
 
+    const completionMetadataMutated = updateModelCompletion(
+      entry,
+      completeParams.rawCompletionStopReason,
+    );
+
     if (
       entry.suppressAnnounceReason === "killed" &&
       entry.endedReason === SUBAGENT_ENDED_REASON_KILLED &&
       (entry.cleanupHandled || typeof entry.cleanupCompletedAt === "number")
     ) {
-      let killedMutated = false;
+      let killedMutated = completionMetadataMutated;
       if (entry.frozenResultText === undefined) {
         entry.frozenResultText = null;
         entry.frozenResultCapturedAt = entry.endedAt ?? Date.now();
+        entry.frozenResultRuntimeCapped = false;
+        entry.frozenResultOriginalBytes = 0;
         killedMutated = true;
       }
       const persisted = persistSubagentResultReceiptForRunSync(entry);
@@ -947,7 +1053,7 @@ export function createSubagentRegistryLifecycleController(params: {
       return;
     }
 
-    let mutated = false;
+    let mutated = completionMetadataMutated;
     const endedAt =
       typeof completeParams.endedAt === "number" ? completeParams.endedAt : Date.now();
     if (entry.endedAt !== endedAt) {
@@ -1008,7 +1114,7 @@ export function createSubagentRegistryLifecycleController(params: {
     if (guardedCompletion.mutated) {
       mutated = true;
     }
-    if (guardedCompletion.evidenceGap) {
+    if (guardedCompletion.evidenceGap && !terminalEvidenceGapKind) {
       terminalEvidenceGapKind = "error";
     }
     if (terminalReason === SUBAGENT_ENDED_REASON_KILLED) {

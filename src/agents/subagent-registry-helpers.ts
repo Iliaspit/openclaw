@@ -14,7 +14,8 @@ import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
 import { withSubagentOutcomeTiming } from "./subagent-announce-output.js";
 import { SUBAGENT_ENDED_REASON_ERROR } from "./subagent-lifecycle-events.js";
 import { shouldUpdateRunOutcome } from "./subagent-registry-completion.js";
-import type { SubagentRunRecord } from "./subagent-registry.types.js";
+import { classifySubagentModelCompletion } from "./subagent-model-completion.js";
+import type { SubagentModelCompletion, SubagentRunRecord } from "./subagent-registry.types.js";
 import {
   getSubagentSessionRuntimeMs,
   getSubagentSessionStartedAt,
@@ -34,25 +35,87 @@ export const ANNOUNCE_EXPIRY_MS = 5 * 60_000;
 export const ANNOUNCE_COMPLETION_HARD_EXPIRY_MS = 30 * 60_000;
 
 const FROZEN_RESULT_TEXT_MAX_BYTES = 100 * 1024;
+const MODEL_TRUNCATION_NOTICE_PREFIX =
+  "[incomplete handoff: model output was truncated before a complete prose handoff";
+const RUNTIME_CAP_NOTICE_PREFIX = "[truncated: frozen completion output exceeded";
 
 export type SubagentRunOrphanReason = "missing-session-entry" | "missing-session-id";
 
+export { classifySubagentModelCompletion } from "./subagent-model-completion.js";
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let result = "";
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maxBytes) {
+      break;
+    }
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
+}
+
+function stripFrozenResultNotices(value: string): string {
+  const blocks = value.trim().split("\n\n");
+  while (blocks.length > 0) {
+    const last = blocks.at(-1) ?? "";
+    if (
+      !last.startsWith(MODEL_TRUNCATION_NOTICE_PREFIX) &&
+      !last.startsWith(RUNTIME_CAP_NOTICE_PREFIX)
+    ) {
+      break;
+    }
+    blocks.pop();
+  }
+  return blocks.join("\n\n").trim();
+}
+
+export function finalizeFrozenResultText(params: {
+  resultText: string;
+  rawCompletionStopReason?: string;
+  priorRuntimeCapped?: boolean;
+  originalBytes?: number;
+}): {
+  resultText: string;
+  modelCompletion: SubagentModelCompletion;
+  rawCompletionStopReason?: string;
+  runtimeCapped: boolean;
+  originalBytes: number;
+} {
+  const rawCompletionStopReason = params.rawCompletionStopReason?.trim() || undefined;
+  const modelCompletion = classifySubagentModelCompletion(rawCompletionStopReason);
+  const payloadSource = stripFrozenResultNotices(params.resultText);
+  const originalBytes =
+    typeof params.originalBytes === "number" && Number.isFinite(params.originalBytes)
+      ? Math.max(0, Math.floor(params.originalBytes))
+      : Buffer.byteLength(payloadSource, "utf8");
+  const modelNotice =
+    modelCompletion === "truncated"
+      ? `\n\n${MODEL_TRUNCATION_NOTICE_PREFIX} (stopReason=${rawCompletionStopReason}); an accepted protected report remains authoritative, and no automatic continuation was attempted.]`
+      : "";
+  const uncappedBytes = Buffer.byteLength(payloadSource, "utf8") + Buffer.byteLength(modelNotice);
+  const runtimeCapped =
+    params.priorRuntimeCapped === true || uncappedBytes > FROZEN_RESULT_TEXT_MAX_BYTES;
+  const capNotice = runtimeCapped
+    ? `\n\n${RUNTIME_CAP_NOTICE_PREFIX} ${Math.round(FROZEN_RESULT_TEXT_MAX_BYTES / 1024)}KB (${Math.round(originalBytes / 1024)}KB)]`
+    : "";
+  const reservedBytes = Buffer.byteLength(modelNotice, "utf8") + Buffer.byteLength(capNotice, "utf8");
+  const payload = runtimeCapped
+    ? truncateUtf8(payloadSource, Math.max(0, FROZEN_RESULT_TEXT_MAX_BYTES - reservedBytes))
+    : payloadSource;
+  return {
+    resultText: `${payload}${modelNotice}${capNotice}`.trim(),
+    modelCompletion,
+    ...(rawCompletionStopReason ? { rawCompletionStopReason } : {}),
+    runtimeCapped,
+    originalBytes,
+  };
+}
+
 export function capFrozenResultText(resultText: string): string {
-  const trimmed = resultText.trim();
-  if (!trimmed) {
-    return "";
-  }
-  const totalBytes = Buffer.byteLength(trimmed, "utf8");
-  if (totalBytes <= FROZEN_RESULT_TEXT_MAX_BYTES) {
-    return trimmed;
-  }
-  const notice = `\n\n[truncated: frozen completion output exceeded ${Math.round(FROZEN_RESULT_TEXT_MAX_BYTES / 1024)}KB (${Math.round(totalBytes / 1024)}KB)]`;
-  const maxPayloadBytes = Math.max(
-    0,
-    FROZEN_RESULT_TEXT_MAX_BYTES - Buffer.byteLength(notice, "utf8"),
-  );
-  const payload = Buffer.from(trimmed, "utf8").subarray(0, maxPayloadBytes).toString("utf8");
-  return `${payload}${notice}`;
+  return finalizeFrozenResultText({ resultText }).resultText;
 }
 
 export function resolveAnnounceRetryDelayMs(retryCount: number) {

@@ -4,11 +4,9 @@ import { resolveStateDir } from "../config/paths.js";
 import { loadJsonFile, saveJsonFile } from "../infra/json-file.js";
 import { readStringValue } from "../shared/string-coerce.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
+import { classifySubagentModelCompletion } from "./subagent-model-completion.js";
 import { normalizeSubagentSliceBudgetRecord } from "./subagent-registry-budget.js";
-import type {
-  SubagentRunRecord,
-  SubagentSliceBudgetRecord,
-} from "./subagent-registry.types.js";
+import type { SubagentRunRecord, SubagentSliceBudgetRecord } from "./subagent-registry.types.js";
 
 export type PersistedSubagentRegistryVersion = 1 | 2;
 
@@ -126,6 +124,8 @@ export function loadSubagentRegistryFromDisk(): LoadedSubagentRegistry {
     const requesterSessionKey = readStringValue(typed.requesterSessionKey)?.trim() ?? "";
     const controllerSessionKey =
       readStringValue(typed.controllerSessionKey)?.trim() || requesterSessionKey;
+    const rawCompletionStopReason = readStringValue(typed.rawCompletionStopReason)?.trim();
+    const modelCompletion = classifySubagentModelCompletion(rawCompletionStopReason);
     if (!childSessionKey || !requesterSessionKey) {
       continue;
     }
@@ -145,6 +145,8 @@ export function loadSubagentRegistryFromDisk(): LoadedSubagentRegistry {
       cleanupCompletedAt,
       cleanupHandled,
       spawnMode: typed.spawnMode === "session" ? "session" : "run",
+      modelCompletion,
+      ...(rawCompletionStopReason ? { rawCompletionStopReason } : {}),
     });
     if (isLegacy) {
       migrated = true;

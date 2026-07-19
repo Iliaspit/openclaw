@@ -5,6 +5,7 @@ import {
   DELEGATION_VALIDATOR_PROTOCOL,
   type DelegationWorkerReport,
 } from "../delegation/contracts.js";
+import { canonicalDelegationJson } from "../delegation/identity.js";
 import {
   hashDelegationReportSemantics,
   validateDelegationReportCoverage,
@@ -13,6 +14,12 @@ import {
   resolveDelegationGuardPrincipal,
   resolveDelegationWorkerRequiredModel,
 } from "../delegation/policy.js";
+import {
+  createDelegationReportFailureResult,
+  DelegationReportContractError,
+  resolveDelegationReportErrorCode,
+} from "../delegation/report-result.js";
+import { validateDelegationNewlyDiscovered } from "../delegation/report-validation.js";
 import {
   assertDelegationAssignmentScopeCurrent,
   assertDelegationWorkerSandbox,
@@ -159,11 +166,17 @@ export function bindDelegationReportToAssignmentScope(params: {
 
   for (const entry of reportedPartition) {
     if (!authoritativeScope.has(entry.path)) {
-      throw new Error(`Report scope path is outside the protected assignment: ${entry.path}`);
+      throw new DelegationReportContractError(
+        "scope_path_outside_assignment",
+        `Report scope path is outside the protected assignment: ${entry.path}`,
+      );
     }
     const existing = localIdToCanonical.get(entry.scopeId);
     if (existing && existing !== entry.path) {
-      throw new Error(`Report scope ID maps to multiple protected paths: ${entry.scopeId}`);
+      throw new DelegationReportContractError(
+        "scope_id_ambiguous",
+        `Report scope ID maps to multiple protected paths: ${entry.scopeId}`,
+      );
     }
     localIdToCanonical.set(entry.scopeId, entry.path);
   }
@@ -175,7 +188,8 @@ export function bindDelegationReportToAssignmentScope(params: {
     partitionPaths.size !== authoritativeScope.size ||
     [...authoritativeScope].some((scopeId) => !partitionPaths.has(scopeId))
   ) {
-    throw new Error(
+    throw new DelegationReportContractError(
+      "scope_partition_mismatch",
       "Report scope partition must map one-to-one onto the runtime-owned canonical slice scope.",
     );
   }
@@ -305,6 +319,45 @@ export function createDelegationReportTool(opts: {
         return jsonResult({ status: "error", error: "Assignment slice is missing or stale." });
       }
       const scopeUnits = assignment.scopeUnits.map((scopeId) => ({ scopeId, path: scopeId }));
+      const submittedSemanticDigest = hashDelegationReportSemantics(submittedReport);
+      const submittedReportBytes = Buffer.byteLength(
+        canonicalDelegationJson(submittedReport),
+        "utf8",
+      );
+      const rejectBeforeReceipt = (
+        errorCode: DelegationReportContractError["errorCode"],
+        message: string,
+        issues: unknown[] = [],
+      ) => {
+        try {
+          const rejection = runtime.ledger.appendPreReceiptReportRejection({
+            assignmentId: assignment.assignmentId,
+            errorCode,
+            submittedSemanticDigest,
+            reportBytes: submittedReportBytes,
+            message,
+          });
+          return jsonResult(
+            createDelegationReportFailureResult({
+              phase: "pre_receipt",
+              assignmentId: assignment.assignmentId,
+              errorCode,
+              message,
+              auditEventId: rejection.auditEventId,
+              issues,
+            }),
+          );
+        } catch (error) {
+          return jsonResult({
+            status: "error",
+            assignmentId: assignment.assignmentId,
+            error:
+              error instanceof Error
+                ? error.message
+                : "Pre-receipt report rejection could not be persisted.",
+          });
+        }
+      };
       let report: DelegationWorkerReport;
       try {
         report = bindDelegationReportToAssignmentScope({
@@ -312,13 +365,26 @@ export function createDelegationReportTool(opts: {
           scopeUnits: assignment.scopeUnits,
         });
       } catch (error) {
-        return jsonResult({
-          status: "rejected",
-          error:
-            error instanceof Error
-              ? error.message
-              : "Report scope could not be bound to the protected assignment.",
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Report scope could not be bound to the protected assignment.";
+        return rejectBeforeReceipt(
+          error instanceof DelegationReportContractError
+            ? error.errorCode
+            : "scope_partition_mismatch",
+          message,
+        );
+      }
+      try {
+        validateDelegationNewlyDiscovered({
+          report,
+          assignedScope: assignment.scopeUnits,
         });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Newly discovered scope is invalid.";
+        return rejectBeforeReceipt("newly_discovered_invalid", message);
       }
       const existingReceipt = runtime.ledger.initialReceiptForAssignment(assignment.assignmentId);
       if (
@@ -329,13 +395,12 @@ export function createDelegationReportTool(opts: {
         try {
           await assertDelegationAssignmentScopeCurrent({ runtime, assignment });
         } catch (error) {
-          return jsonResult({
-            status: "rejected",
-            error:
-              error instanceof Error
-                ? error.message
-                : "Writable assignment changed repository state outside its protected scope.",
-          });
+          return rejectBeforeReceipt(
+            "writable_scope_drift",
+            error instanceof Error
+              ? error.message
+              : "Writable assignment changed repository state outside its protected scope.",
+          );
         }
       }
       try {
@@ -346,41 +411,26 @@ export function createDelegationReportTool(opts: {
           message:
             error instanceof Error ? error.message : "Delegation report structure is invalid.",
         };
-        try {
-          const rejected = runtime.ledger.appendRejectedReceipt({
-            assignmentId: assignment.assignmentId,
-            report,
-            issues: [issue],
-          });
-          runtime.ledger.appendRouteEvent({
-            assignmentId: assignment.assignmentId,
-            kind: "validation_rejected",
-            payload: {
-              receiptId: rejected.receiptId,
-              validationId: rejected.validationId,
-              code: issue.code,
-            },
-          });
-          return jsonResult({
-            status: "rejected",
-            assignmentId: assignment.assignmentId,
-            receiptId: rejected.receiptId,
-            validationId: rejected.validationId,
-            semanticDigest: rejected.semanticDigest,
-            issues: [issue],
-          });
-        } catch (persistenceError) {
-          return jsonResult({
-            status: "error",
-            error:
-              persistenceError instanceof Error
-                ? persistenceError.message
-                : "Structurally rejected delegation report could not be persisted.",
-          });
-        }
+        return rejectBeforeReceipt("report_structure_invalid", issue.message, [issue]);
       }
       let receiptId: string | undefined;
       let semanticDigest = hashDelegationReportSemantics(report);
+      const rejectWithReceipt = (params: {
+        outcome: "rejected" | "blocked";
+        errorCode: DelegationReportContractError["errorCode"];
+        message: string;
+        receiptId: string;
+        validationId: string;
+        semanticDigest: string;
+        issues?: unknown[];
+      }) =>
+        jsonResult(
+          createDelegationReportFailureResult({
+            phase: "receipt",
+            assignmentId: assignment.assignmentId,
+            ...params,
+          }),
+        );
       const initialReceipt = runtime.ledger.initialReceiptForAssignment(assignment.assignmentId);
       if (initialReceipt) {
         try {
@@ -410,9 +460,30 @@ export function createDelegationReportTool(opts: {
             error: "Protected receipt validation does not match the active validator identity.",
           });
         }
-        return jsonResult({
-          status: existingValidation.outcome,
-          assignmentId: assignment.assignmentId,
+        if (existingValidation.outcome === "accepted") {
+          return jsonResult({
+            status: "accepted",
+            assignmentId: assignment.assignmentId,
+            receiptId,
+            validationId: existingValidation.validationId,
+            semanticDigest,
+          });
+        }
+        const errorCode = resolveDelegationReportErrorCode({
+          fallback:
+            existingValidation.outcome === "blocked"
+              ? "validator_execution_failed"
+              : "validator_rejected",
+          issues: existingValidation.issues,
+        });
+        const firstIssue = existingValidation.issues[0] as { message?: unknown } | undefined;
+        return rejectWithReceipt({
+          outcome: existingValidation.outcome,
+          errorCode,
+          message:
+            typeof firstIssue?.message === "string"
+              ? firstIssue.message
+              : "Stored delegation report validation rejected the report.",
           receiptId,
           validationId: existingValidation.validationId,
           semanticDigest,
@@ -471,12 +542,19 @@ export function createDelegationReportTool(opts: {
         runtime.ledger.appendRouteEvent({
           assignmentId: assignment.assignmentId,
           kind: "validation_rejected",
-          payload: { receiptId: persisted.receiptId, validationId, code: issue.code },
+          payload: {
+            receiptId: persisted.receiptId,
+            validationId,
+            errorCode: "candidate_drift",
+          },
         });
-        return jsonResult({
-          status: "rejected",
+        return rejectWithReceipt({
+          outcome: "rejected",
+          errorCode: "candidate_drift",
+          message: issue.message,
           receiptId: persisted.receiptId,
           validationId,
+          semanticDigest: persisted.semanticDigest,
           issues: [issue],
         });
       }
@@ -513,13 +591,16 @@ export function createDelegationReportTool(opts: {
           payload: {
             receiptId: persisted.receiptId,
             validationId: persisted.validationId,
-            code: issue.code,
+            errorCode: "validator_execution_failed",
           },
         });
-        return jsonResult({
-          status: "blocked",
+        return rejectWithReceipt({
+          outcome: "blocked",
+          errorCode: "validator_execution_failed",
+          message: issue.message,
           receiptId: persisted.receiptId,
           validationId: persisted.validationId,
+          semanticDigest: persisted.semanticDigest,
           issues: [issue],
         });
       }
@@ -543,12 +624,19 @@ export function createDelegationReportTool(opts: {
           runtime.ledger.appendRouteEvent({
             assignmentId: assignment.assignmentId,
             kind: "validation_rejected",
-            payload: { receiptId: persisted.receiptId, validationId, code: issue.code },
+            payload: {
+              receiptId: persisted.receiptId,
+              validationId,
+              errorCode: "candidate_drift",
+            },
           });
-          return jsonResult({
-            status: "rejected",
+          return rejectWithReceipt({
+            outcome: "rejected",
+            errorCode: "candidate_drift",
+            message: issue.message,
             receiptId: persisted.receiptId,
             validationId,
+            semanticDigest: persisted.semanticDigest,
             issues: [issue],
           });
         }
@@ -560,13 +648,22 @@ export function createDelegationReportTool(opts: {
         runtime.ledger.appendRouteEvent({
           assignmentId: assignment.assignmentId,
           kind: "validation_rejected",
-          payload: { receiptId: persisted.receiptId, validationId },
+          payload: {
+            receiptId: persisted.receiptId,
+            validationId,
+            errorCode: "validator_rejected",
+          },
         });
-        return jsonResult({
-          status: "rejected",
+        const issues = validatorResponse.issues ?? [];
+        const firstIssue = issues[0];
+        return rejectWithReceipt({
+          outcome: "rejected",
+          errorCode: "validator_rejected",
+          message: firstIssue?.message ?? "Delegation validator rejected the report.",
           receiptId: persisted.receiptId,
           validationId,
-          issues: validatorResponse.issues ?? [],
+          semanticDigest: persisted.semanticDigest,
+          issues,
         });
       }
       return jsonResult({

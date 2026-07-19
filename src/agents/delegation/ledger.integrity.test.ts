@@ -1204,6 +1204,56 @@ describe("protected delegation ledger integrity", () => {
     }
   });
 
+  it("names the blocking assignment and same-epoch new-slice recovery for duplicate phases", () => {
+    const fixture = createLedgerFixture();
+    try {
+      const first = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+      expect(() => issueAssignment({ fixture, purpose: "discovery", role: "helper" })).toThrow(
+        new RegExp(
+          `${first.assignment.assignmentId}.*settlement state pending.*corrected new slice in the same epoch`,
+          "i",
+        ),
+      );
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("keeps validation rejection fail-closed and directs recovery to a corrected new slice", () => {
+    const fixture = createLedgerFixture();
+    try {
+      const first = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+      startAssignment({ fixture, ...first });
+      const rejected = fixture.ledger.appendValidatedReceipt({
+        assignmentId: first.assignment.assignmentId,
+        report: makeCompleteReport({ assigned: first.assignment.scopeUnits }),
+        outcome: "rejected",
+        issues: [{ code: "validator-rejected", message: "binding rejected" }],
+      });
+      fixture.ledger.appendRouteEvent({
+        assignmentId: first.assignment.assignmentId,
+        kind: "validation_rejected",
+        payload: { receiptId: rejected.receiptId },
+      });
+
+      expect(() =>
+        issueAssignment({
+          fixture,
+          purpose: "discovery",
+          role: "helper",
+          recoveryOfAssignmentId: first.assignment.assignmentId,
+        }),
+      ).toThrow(
+        new RegExp(
+          `${first.assignment.assignmentId}.*settlement state validation_rejected.*corrected new slice in the same epoch`,
+          "i",
+        ),
+      );
+    } finally {
+      fixture.close();
+    }
+  });
+
   it.each([
     [
       "missing scope disposition",
@@ -1362,6 +1412,160 @@ describe("protected delegation ledger integrity", () => {
     }
   });
 
+  it("keeps the report slot open when pre-receipt audit mapping fails", () => {
+    const fixture = createLedgerFixture();
+    try {
+      const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+      startAssignment({ fixture, ...issued });
+      const report = makeCompleteReport({ assigned: issued.assignment.scopeUnits });
+      const db = unsafeDatabaseForTest(fixture.ledger);
+      db.exec(`
+        CREATE TRIGGER fail_pre_receipt_mapping
+        BEFORE INSERT ON assignment_audit_events
+        BEGIN
+          SELECT RAISE(ABORT, 'simulated audit mapping failure');
+        END;
+      `);
+
+      expect(() =>
+        fixture.ledger.appendPreReceiptReportRejection({
+          assignmentId: issued.assignment.assignmentId,
+          errorCode: "report_structure_invalid",
+          submittedSemanticDigest: hashDelegationReportSemantics(report),
+          reportBytes: Buffer.byteLength(JSON.stringify(report), "utf8"),
+          message: "🦞".repeat(400),
+        }),
+      ).toThrow("simulated audit mapping failure");
+      expect(fixture.ledger.hasReceiptForAssignment(issued.assignment.assignmentId)).toBe(false);
+      expect(
+        fixture.ledger.latestPreReceiptReportRejection(issued.assignment.assignmentId),
+      ).toBeUndefined();
+
+      db.exec("DROP TRIGGER fail_pre_receipt_mapping");
+      const rejection = fixture.ledger.appendPreReceiptReportRejection({
+        assignmentId: issued.assignment.assignmentId,
+        errorCode: "report_structure_invalid",
+        submittedSemanticDigest: hashDelegationReportSemantics(report),
+        reportBytes: Buffer.byteLength(JSON.stringify(report), "utf8"),
+        message: "🦞".repeat(400),
+      });
+      expect(Buffer.byteLength(rejection.message, "utf8")).toBeLessThanOrEqual(1024);
+      expect(
+        fixture.ledger.latestPreReceiptReportRejection(issued.assignment.assignmentId),
+      ).toEqual(rejection);
+      expect(fixture.ledger.hasReceiptForAssignment(issued.assignment.assignmentId)).toBe(false);
+
+      const corrected = fixture.ledger.appendValidatedReceipt({
+        assignmentId: issued.assignment.assignmentId,
+        report,
+        outcome: "accepted",
+      });
+      expect(corrected.receiptId).toMatch(/^receipt_/);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("ports pre-receipt rejection through corrected same-epoch new-slice recovery", () => {
+    const fixture = createLedgerFixture();
+    try {
+      const rejected = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+      startAssignment({ fixture, ...rejected });
+      const report = makeCompleteReport({ assigned: rejected.assignment.scopeUnits });
+      const audit = fixture.ledger.appendPreReceiptReportRejection({
+        assignmentId: rejected.assignment.assignmentId,
+        errorCode: "report_structure_invalid",
+        submittedSemanticDigest: hashDelegationReportSemantics(report),
+        reportBytes: Buffer.byteLength(JSON.stringify(report), "utf8"),
+        message: "worker returned invalid report structure before ending",
+      });
+
+      expect(fixture.ledger.hasReceiptForAssignment(rejected.assignment.assignmentId)).toBe(false);
+      expect(
+        fixture.ledger.latestPreReceiptReportRejection(rejected.assignment.assignmentId),
+      ).toEqual(audit);
+      expect(() =>
+        fixture.ledger.appendFormatCorrection({
+          assignmentId: rejected.assignment.assignmentId,
+          originalReceiptId: "receipt-missing",
+          report,
+        }),
+      ).toThrow(/requires one rejected initial receipt/i);
+      expect(() =>
+        issueAssignment({
+          fixture,
+          purpose: "discovery",
+          role: "helper",
+          recoveryOfAssignmentId: rejected.assignment.assignmentId,
+        }),
+      ).toThrow(/settlement state pending.*corrected new slice in the same epoch/i);
+      expect(() => issueAssignment({ fixture, purpose: "discovery", role: "helper" })).toThrow(
+        new RegExp(`${rejected.assignment.assignmentId}.*corrected new slice`, "i"),
+      );
+
+      const repositoryRoot = fixture.ledger.getSliceScope(fixture.sliceId)?.repositoryRoot;
+      if (!repositoryRoot) {
+        throw new Error("missing repository root");
+      }
+      const baseline = fixture.ledger.createSliceWithBaseline({
+        controllerAgentId: TEST_CONTROLLER.agentId,
+        controllerSessionKey: TEST_CONTROLLER.sessionKey,
+        repositoryRoot,
+        scope: fixture.scope,
+        fingerprint: createFingerprint({
+          guard: fixture.guard,
+          policyDigest: fixture.policyDigest,
+          scope: fixture.scope,
+          epoch: fixture.ledger.currentEpoch(),
+          label: "corrected-new-slice",
+        }),
+      });
+      const correctedFixture = { ...fixture, sliceId: baseline.sliceId };
+      const corrected = issueAssignment({
+        fixture: correctedFixture,
+        purpose: "discovery",
+        role: "helper",
+      });
+      startAssignment({ fixture: correctedFixture, ...corrected });
+      const accepted = fixture.ledger.appendValidatedReceipt({
+        assignmentId: corrected.assignment.assignmentId,
+        report: makeCompleteReport({ assigned: corrected.assignment.scopeUnits }),
+        outcome: "accepted",
+      });
+      expect(fixture.ledger.getValidationForReceipt(accepted.receiptId)?.outcome).toBe("accepted");
+      expect(corrected.assignment.epoch).toBe(rejected.assignment.epoch);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("rejects invalid newly discovered scope before every direct initial receipt write", () => {
+    const fixture = createLedgerFixture();
+    try {
+      const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+      startAssignment({ fixture, ...issued });
+      const report = makeCompleteReport({ assigned: issued.assignment.scopeUnits });
+      report.scope.newlyDiscovered.push({
+        scopeId: issued.assignment.scopeUnits[0],
+        path: issued.assignment.scopeUnits[0],
+        reason: "incorrectly rediscovered assigned scope",
+        disposition: "follow-up",
+        evidenceIds: [],
+      });
+
+      expect(() =>
+        fixture.ledger.appendValidatedReceipt({
+          assignmentId: issued.assignment.assignmentId,
+          report,
+          outcome: "accepted",
+        }),
+      ).toThrow(/collides with assigned scope/i);
+      expect(fixture.ledger.hasReceiptForAssignment(issued.assignment.assignmentId)).toBe(false);
+    } finally {
+      fixture.close();
+    }
+  });
+
   it("closes a legacy receipt whose validation was interrupted by restart", async () => {
     const fixture = createLedgerFixture();
     const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
@@ -1396,6 +1600,69 @@ describe("protected delegation ledger integrity", () => {
       closeLedgerForTest(restarted);
       fixture.close();
     }
+  });
+
+  it("blocks future initial receipts after terminal validation rejection", () => {
+    const fixture = createLedgerFixture();
+    try {
+      const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+      startAssignment({ fixture, ...issued });
+      fixture.ledger.appendRouteEvent({
+        assignmentId: issued.assignment.assignmentId,
+        kind: "validation_rejected",
+        payload: { code: "missing-accepted-report" },
+        createdAt: 1_000,
+      });
+      expect(() =>
+        fixture.ledger.appendReceipt({
+          assignmentId: issued.assignment.assignmentId,
+          report: makeCompleteReport({ assigned: issued.assignment.scopeUnits }),
+          createdAt: 1_001,
+        }),
+      ).toThrow(/arrived after its route/i);
+      expect(fixture.ledger.hasReceiptForAssignment(issued.assignment.assignmentId)).toBe(false);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("blocks reopen when historical rows contain an initial receipt after validation rejection", async () => {
+    const fixture = createLedgerFixture();
+    const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
+    startAssignment({ fixture, ...issued });
+    fixture.ledger.appendRouteEvent({
+      assignmentId: issued.assignment.assignmentId,
+      kind: "validation_rejected",
+      payload: { code: "missing-accepted-report" },
+      createdAt: 1_000,
+    });
+    const report = makeCompleteReport({ assigned: issued.assignment.scopeUnits });
+    unsafeDatabaseForTest(fixture.ledger)
+      .prepare(
+        `INSERT INTO receipts
+         (receipt_id, assignment_id, semantic_digest, report_json, correction_of, created_at)
+         VALUES ('historical-late-receipt', ?, ?, ?, NULL, 1001)`,
+      )
+      .run(
+        issued.assignment.assignmentId,
+        hashDelegationReportSemantics(report),
+        JSON.stringify(report),
+      );
+    closeLedgerForTest(fixture.ledger);
+
+    vi.resetModules();
+    const restartedModule = await import("./ledger.js");
+    expect(() =>
+      restartedModule.openDelegationLedger({
+        guard: fixture.guard,
+        policyDigest: fixture.policyDigest,
+        stateDir: fixture.stateDir,
+        reconcileGatewayTask: reconcileNoTestGatewayTask,
+      }),
+    ).toThrow(
+      new RegExp(`${issued.assignment.assignmentId}.*initial receipt.*operator action`, "i"),
+    );
+    fixture.close();
   });
 
   it("allows exactly one semantic-preserving format correction and resumes it", () => {
@@ -1452,23 +1719,24 @@ describe("protected delegation ledger integrity", () => {
     }
   });
 
-  it("persists structural rejection and preserves semantics across evidence-label repair", () => {
+  it("preserves semantics across a valid evidence-label format repair", () => {
     const fixture = createLedgerFixture();
     try {
       const issued = issueAssignment({ fixture, purpose: "discovery", role: "helper" });
       startAssignment({ fixture, ...issued });
       const rejectedReport = makeCompleteReport({ assigned: issued.assignment.scopeUnits });
       rejectedReport.artifacts.push({
-        evidenceId: "command-1",
+        evidenceId: "artifact-old",
         path: issued.assignment.scopeUnits[0],
         sha256: "a".repeat(64),
         kind: "scoped fixture content",
       });
+      rejectedReport.scope.inspected[0].evidenceIds.push("artifact-old");
 
       const rejected = fixture.ledger.appendRejectedReceipt({
         assignmentId: issued.assignment.assignmentId,
         report: rejectedReport,
-        issues: [{ code: "report-structure-invalid", message: "duplicate evidence ID" }],
+        issues: [{ code: "format", message: "evidence label requires normalization" }],
       });
       fixture.ledger.appendRouteEvent({
         assignmentId: issued.assignment.assignmentId,
@@ -1482,7 +1750,10 @@ describe("protected delegation ledger integrity", () => {
 
       const correctedReport = structuredClone(rejectedReport);
       correctedReport.artifacts[0].evidenceId = "artifact-1";
-      correctedReport.scope.inspected[0].evidenceIds.push("artifact-1");
+      correctedReport.scope.inspected[0].evidenceIds =
+        correctedReport.scope.inspected[0].evidenceIds.map((evidenceId) =>
+          evidenceId === "artifact-old" ? "artifact-1" : evidenceId,
+        );
       expect(hashDelegationReportSemantics(correctedReport)).toBe(rejected.semanticDigest);
 
       const correctedReceiptId = fixture.ledger.appendFormatCorrection({
@@ -1542,15 +1813,16 @@ describe("protected delegation ledger integrity", () => {
       });
       const rejectedReport = makeCompleteReport({ assigned: issued.assignment.scopeUnits });
       rejectedReport.artifacts.push({
-        evidenceId: "command-1",
+        evidenceId: "artifact-old",
         path: issued.assignment.scopeUnits[0],
         sha256: "a".repeat(64),
         kind: "scoped fixture content",
       });
+      rejectedReport.scope.inspected[0].evidenceIds.push("artifact-old");
       const rejected = fixture.ledger.appendRejectedReceipt({
         assignmentId: issued.assignment.assignmentId,
         report: rejectedReport,
-        issues: [{ code: "report-structure-invalid", message: "duplicate evidence ID" }],
+        issues: [{ code: "format", message: "evidence label requires normalization" }],
       });
       fixture.ledger.appendRouteEvent({
         assignmentId: issued.assignment.assignmentId,
@@ -1570,7 +1842,10 @@ describe("protected delegation ledger integrity", () => {
 
       const correctedReport = structuredClone(rejectedReport);
       correctedReport.artifacts[0].evidenceId = "artifact-1";
-      correctedReport.scope.inspected[0].evidenceIds.push("artifact-1");
+      correctedReport.scope.inspected[0].evidenceIds =
+        correctedReport.scope.inspected[0].evidenceIds.map((evidenceId) =>
+          evidenceId === "artifact-old" ? "artifact-1" : evidenceId,
+        );
       const correctedReceiptId = fixture.ledger.appendFormatCorrection({
         assignmentId: issued.assignment.assignmentId,
         originalReceiptId: rejected.receiptId,

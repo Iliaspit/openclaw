@@ -576,6 +576,39 @@ describe("agentCommand – LiveSessionModelSwitchError retry", () => {
     });
   });
 
+  it("emits ACP max_tokens before returning the terminal result", async () => {
+    state.acpManagerMock.resolveSession.mockReturnValue({
+      kind: "ready",
+      meta: { agent: "main" },
+    });
+    state.createAcpVisibleTextAccumulatorMock.mockReturnValue({
+      consume: vi.fn(),
+      finalize: vi.fn(() => "partial ACP result"),
+      finalizeRaw: vi.fn(() => "partial ACP result"),
+    });
+    state.acpManagerMock.runTurn.mockImplementationOnce(async (params: unknown) => {
+      (params as { onEvent(event: unknown): void }).onEvent({
+        type: "done",
+        stopReason: "max_tokens",
+      });
+    });
+    state.buildAcpResultMock.mockReturnValue({
+      payloads: [{ text: "partial ACP result" }],
+      meta: { stopReason: "max_tokens" },
+    });
+
+    await agentCommand({
+      message: "hi",
+      sessionKey: "agent:main",
+      senderIsOwner: true,
+    });
+
+    expect(state.emitAcpLifecycleEndMock).toHaveBeenCalledWith({
+      runId: "session-1",
+      stopReason: "max_tokens",
+    });
+  });
+
   it("updates hasSessionModelOverride for fallback resolution after switch", async () => {
     setupModelSwitchRetry({
       provider: "openai",

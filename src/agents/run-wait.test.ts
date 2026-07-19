@@ -174,6 +174,18 @@ describe("waitForAgentRun", () => {
       endedAt: 200,
     });
   });
+
+  it("preserves raw completion stop reason from agent.wait", async () => {
+    callGatewayMock.mockResolvedValue({
+      status: "ok",
+      rawCompletionStopReason: "length",
+    });
+
+    await expect(waitForAgentRun({ runId: "run-length", timeoutMs: 500 })).resolves.toMatchObject({
+      status: "ok",
+      rawCompletionStopReason: "length",
+    });
+  });
 });
 
 describe("waitForAgentRunAndReadUpdatedAssistantReply", () => {

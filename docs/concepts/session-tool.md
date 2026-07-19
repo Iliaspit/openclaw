@@ -151,13 +151,45 @@ The Gateway authorizes guarded child requests before consulting its generic
 idempotency cache and permits only one non-overlapping dispatch per assignment.
 Terminal routes, submitted reports, and prior dispatches invalidate every
 unused token or capability for that assignment. Durable task evidence remains
-held past normal retention until the protected ledger closes successful work;
-execution failures create immutable route-rejection evidence, while uncertain
-post-crash execution blocks recovery instead of risking duplicate side effects.
-New reports persist their receipt and validator result atomically, and restart
-reconciliation closes any older incomplete validation/finalization record.
+held past normal retention until the protected ledger closes successful work.
+Failures before accepted execution create immutable `route_rejected` evidence.
+Failures after accepted execution create `validation_rejected` evidence, and
+uncertain post-crash execution blocks recovery instead of risking duplicate
+side effects. New reports persist their receipt and validator result
+atomically, and restart reconciliation closes any older incomplete
+validation/finalization record.
 Rollback or validator-stack installation cannot advance the epoch while an
 assignment in the current epoch remains active.
+
+`delegation_report` rejects invalid scope bindings, report structure,
+`newlyDiscovered` scope, writable-scope drift, and candidate drift before it
+uses the assignment's report slot. The Gateway records that rejection and its
+assignment mapping in one append-only transaction without creating a receipt,
+validation, or terminal route event. The worker can correct and resubmit during
+the same run. If the worker exits first, its controller can retrieve bounded
+rejection metadata with `delegation_guard` `validate_completion`.
+
+Late dependencies belong in `scope.newlyDiscovered`. Use the same canonical
+repository-relative path for both `scopeId` and `path`, cite existing unique
+evidence IDs, and normally use the `follow-up` disposition. Assigned scope IDs
+remain for `inspected`, `omitted`, or `failed` coverage. A `covered` late path
+requires successful, nontruncated command evidence or matching path-bound
+artifact evidence.
+
+Format correction is available only after a rejected or blocked receipt and
+must preserve that receipt's semantic digest. A pre-receipt rejection has no
+receipt to correct. `validation_rejected` remains fail-closed and cannot
+authorize a recovery child; after any report failure, the controller creates a
+corrected new slice in the same epoch. OpenClaw does not automatically continue
+or replay the worker.
+
+The accepted protected report and ledger receipt are authoritative even when a
+worker's final prose is incomplete. OpenClaw classifies raw model stop reasons,
+marks `length` and `max_tokens` output as truncated, and appends a visible
+incomplete-handoff notice before freezing and hashing the result. Runtime
+capping at 100KB is recorded separately. A truncated prose handoff can still
+complete when its protected report was accepted, but the parent is explicitly
+shown that the prose is incomplete.
 
 The protected workflow is ordered:
 

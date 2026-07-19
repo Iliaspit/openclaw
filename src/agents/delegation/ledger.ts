@@ -7,6 +7,8 @@ import type { DelegationGuardConfig } from "../../config/types.agents.js";
 import { requireNodeSqlite } from "../../infra/node-sqlite.js";
 import {
   DELEGATION_CONTRACT_VERSION,
+  type DelegationPreReceiptRejection,
+  type DelegationReportErrorCode,
   type CanonicalDelegationScope,
   type DelegationAssignmentPurpose,
   type DelegationAssignmentRecord,
@@ -24,6 +26,12 @@ import {
   hashDelegationIdentity,
 } from "./identity.js";
 import { resolveDelegationGuardPrincipal } from "./policy.js";
+import {
+  boundDelegationReportText,
+  normalizeDelegationReportIssues,
+  resolveDelegationReportErrorCode,
+} from "./report-result.js";
+import { validateDelegationNewlyDiscovered } from "./report-validation.js";
 import { verifyPinnedDelegationValidator } from "./validator.js";
 
 const LEDGER_DIR_MODE = 0o700;
@@ -209,6 +217,13 @@ function ensureSchema(db: DatabaseSync) {
       epoch INTEGER NOT NULL,
       kind TEXT NOT NULL,
       payload_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS assignment_audit_events (
+      mapping_id TEXT PRIMARY KEY,
+      assignment_id TEXT NOT NULL REFERENCES assignments(assignment_id),
+      audit_event_id TEXT NOT NULL UNIQUE REFERENCES audit_events(event_id),
+      kind TEXT NOT NULL,
       created_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS slices (
@@ -413,6 +428,8 @@ function ensureSchema(db: DatabaseSync) {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_delegation_binding_identity
       ON assignment_bindings(assignment_id, child_session_key, COALESCE(run_id, ''));
     CREATE INDEX IF NOT EXISTS idx_delegation_receipts_assignment ON receipts(assignment_id);
+    CREATE INDEX IF NOT EXISTS idx_delegation_assignment_audit_lookup
+      ON assignment_audit_events(assignment_id, created_at DESC, audit_event_id DESC);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_delegation_initial_receipt
       ON receipts(assignment_id) WHERE correction_of IS NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_delegation_validation_receipt
@@ -423,6 +440,7 @@ function ensureSchema(db: DatabaseSync) {
   installAppendOnlyTriggers(db, [
     "epoch_events",
     "audit_events",
+    "assignment_audit_events",
     "slices",
     "candidates",
     "candidate_snapshots",
@@ -746,6 +764,36 @@ export class DelegationLedger {
     }
   }
 
+  private assignmentSettlementState(assignmentId: string): string {
+    const event = this.db
+      .prepare(
+        `SELECT kind FROM route_events
+         WHERE assignment_id = ?
+           AND kind IN ('completed', 'validation_rejected', 'timeout', 'route_rejected')
+         ORDER BY CASE kind
+           WHEN 'completed' THEN 1
+           WHEN 'validation_rejected' THEN 2
+           WHEN 'timeout' THEN 3
+           ELSE 4
+         END, created_at DESC, event_id DESC
+         LIMIT 1`,
+      )
+      .get(assignmentId) as { kind: string } | undefined;
+    if (event) {
+      return event.kind;
+    }
+    if (this.initialReceiptForAssignment(assignmentId)) {
+      return "reported";
+    }
+    return this.getAssignment(assignmentId) ? "pending" : "missing";
+  }
+
+  private correctedSliceRecoveryError(assignmentId: string, detail: string): Error {
+    return new Error(
+      `${detail} Blocking assignment ${assignmentId} has settlement state ${this.assignmentSettlementState(assignmentId)}. The controller must create a corrected new slice in the same epoch.`,
+    );
+  }
+
   private assertNoOpenAssignmentsForEpoch(epoch: number): void {
     const open = this.db
       .prepare(
@@ -802,6 +850,87 @@ export class DelegationLedger {
       )
       .run(eventId, this.currentEpoch(), params.kind, payloadJson, createdAt);
     return eventId;
+  }
+
+  appendPreReceiptReportRejection(params: {
+    assignmentId: string;
+    errorCode: DelegationReportErrorCode;
+    submittedSemanticDigest: string;
+    reportBytes: number;
+    message: string;
+    createdAt?: number;
+  }): DelegationPreReceiptRejection {
+    this.assertActiveStack();
+    const assignment = this.getAssignment(params.assignmentId);
+    if (!assignment || assignment.epoch !== this.currentEpoch()) {
+      throw new Error("Pre-receipt rejection cannot bind a missing or stale assignment.");
+    }
+    if (this.initialReceiptForAssignment(params.assignmentId)) {
+      throw new Error("Pre-receipt rejection cannot follow an immutable initial receipt.");
+    }
+    const createdAt = params.createdAt ?? Date.now();
+    const message = boundDelegationReportText(params.message, 1024);
+    const payload = {
+      assignmentId: assignment.assignmentId,
+      sliceId: assignment.sliceId,
+      routeFamilyId: assignment.routeFamilyId,
+      workerAgentId: assignment.workerAgentId,
+      errorCode: params.errorCode,
+      submittedSemanticDigest: params.submittedSemanticDigest,
+      reportBytes: params.reportBytes,
+      message,
+      createdAt,
+    };
+    return this.transaction(() => {
+      const auditEventId = this.appendAuditEvent({
+        kind: "delegation_report_rejected_before_receipt",
+        payload,
+        createdAt,
+      });
+      this.db
+        .prepare(
+          `INSERT INTO assignment_audit_events
+           (mapping_id, assignment_id, audit_event_id, kind, created_at)
+           VALUES (?, ?, ?, 'delegation_report_rejected_before_receipt', ?)`,
+        )
+        .run(
+          createDelegationRecordId("assignment-audit-event", {
+            assignmentId: assignment.assignmentId,
+            auditEventId,
+            createdAt,
+          }),
+          assignment.assignmentId,
+          auditEventId,
+          createdAt,
+        );
+      return { auditEventId, ...payload };
+    });
+  }
+
+  latestPreReceiptReportRejection(assignmentId: string): DelegationPreReceiptRejection | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT m.audit_event_id AS auditEventId, e.payload_json AS payloadJson
+         FROM assignment_audit_events m
+         JOIN audit_events e ON e.event_id = m.audit_event_id
+         WHERE m.assignment_id = ?
+           AND m.kind = 'delegation_report_rejected_before_receipt'
+           AND e.kind = 'delegation_report_rejected_before_receipt'
+         ORDER BY m.created_at DESC, m.audit_event_id DESC
+         LIMIT 1`,
+      )
+      .get(assignmentId) as { auditEventId: string; payloadJson: string } | undefined;
+    if (!row) {
+      return undefined;
+    }
+    const payload = JSON.parse(row.payloadJson) as Omit<
+      DelegationPreReceiptRejection,
+      "auditEventId"
+    >;
+    if (payload.assignmentId !== assignmentId) {
+      throw new Error(`Delegation audit mapping is corrupt for assignment ${assignmentId}.`);
+    }
+    return { auditEventId: row.auditEventId, ...payload };
   }
 
   createSlice(params: {
@@ -1507,14 +1636,19 @@ export class DelegationLedger {
     const rejectDuplicate = (purpose: DelegationAssignmentPurpose, role: string): void => {
       const duplicate = this.db
         .prepare(
-          `SELECT 1 FROM assignments
+          `SELECT assignment_id FROM assignments
            WHERE slice_id = ? AND purpose = ? AND role = ?
              AND COALESCE(wave_id, '') = COALESCE(?, '')
            LIMIT 1`,
         )
-        .get(assignmentParams.sliceId, purpose, role, assignmentParams.waveId ?? null);
+        .get(assignmentParams.sliceId, purpose, role, assignmentParams.waveId ?? null) as
+        | { assignment_id: string }
+        | undefined;
       if (duplicate && !recoveryOfAssignmentId) {
-        throw new Error(`A ${purpose}/${role} assignment already exists for this guarded phase.`);
+        throw this.correctedSliceRecoveryError(
+          duplicate.assignment_id,
+          `A ${purpose}/${role} assignment already exists for this guarded phase.`,
+        );
       }
     };
     switch (assignmentParams.purpose) {
@@ -1607,7 +1741,10 @@ export class DelegationLedger {
         original.candidateId !== assignmentParams.candidateId ||
         original.waveId !== assignmentParams.waveId
       ) {
-        throw new Error("Recovery assignment does not match the original guarded route.");
+        throw this.correctedSliceRecoveryError(
+          recoveryOfAssignmentId,
+          "Recovery assignment does not match the original guarded route.",
+        );
       }
       const rejected = this.db
         .prepare(
@@ -1616,13 +1753,19 @@ export class DelegationLedger {
         )
         .get(recoveryOfAssignmentId);
       if (!rejected) {
-        throw new Error("A recovery child requires terminal route-rejection evidence.");
+        throw this.correctedSliceRecoveryError(
+          recoveryOfAssignmentId,
+          "A recovery child requires terminal route-rejection evidence and validation_rejected remains fail-closed.",
+        );
       }
       const familyCount = this.db
         .prepare(`SELECT COUNT(*) AS count FROM assignments WHERE route_family_id = ?`)
         .get(original.routeFamilyId) as CountRow;
       if (toNumber(familyCount.count) >= 2) {
-        throw new Error("The guarded route family already used its one recovery child.");
+        throw this.correctedSliceRecoveryError(
+          recoveryOfAssignmentId,
+          "The guarded route family already used its one recovery child.",
+        );
       }
       routeFamilyId = original.routeFamilyId;
     }
@@ -3217,6 +3360,75 @@ export class DelegationLedger {
       : undefined;
   }
 
+  rejectedReceiptForAssignment(assignmentId: string):
+    | {
+        receiptId: string;
+        validationId: string;
+        semanticDigest: string;
+        outcome: Exclude<DelegationValidationOutcome, "accepted">;
+        errorCode: DelegationReportErrorCode;
+        message: string;
+        issues: ReturnType<typeof normalizeDelegationReportIssues>;
+      }
+    | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT r.receipt_id AS receiptId, r.semantic_digest AS semanticDigest,
+                v.validation_id AS validationId, v.outcome, v.issues_json AS issuesJson
+         FROM receipts r
+         JOIN validations v ON v.receipt_id = r.receipt_id
+         WHERE r.assignment_id = ? AND v.outcome IN ('rejected', 'blocked')
+         ORDER BY v.created_at DESC, v.validation_id DESC
+         LIMIT 1`,
+      )
+      .get(assignmentId) as
+      | {
+          receiptId: string;
+          semanticDigest: string;
+          validationId: string;
+          outcome: Exclude<DelegationValidationOutcome, "accepted">;
+          issuesJson: string;
+        }
+      | undefined;
+    if (!row) {
+      return undefined;
+    }
+    const issues = normalizeDelegationReportIssues(JSON.parse(row.issuesJson) as unknown[]);
+    const errorCode = resolveDelegationReportErrorCode({
+      fallback: row.outcome === "blocked" ? "validator_execution_failed" : "validator_rejected",
+      issues,
+    });
+    return {
+      receiptId: row.receiptId,
+      validationId: row.validationId,
+      semanticDigest: row.semanticDigest,
+      outcome: row.outcome,
+      errorCode,
+      message: issues[0]?.message ?? "Delegation report was rejected.",
+      issues,
+    };
+  }
+
+  assertNoLateInitialReceiptsAfterValidationRejection(): void {
+    const contradiction = this.db
+      .prepare(
+        `SELECT r.assignment_id AS assignmentId
+         FROM receipts r
+         JOIN route_events e ON e.assignment_id = r.assignment_id
+         WHERE r.correction_of IS NULL
+           AND e.kind = 'validation_rejected'
+           AND r.created_at > e.created_at
+         ORDER BY r.assignment_id
+         LIMIT 1`,
+      )
+      .get() as { assignmentId: string } | undefined;
+    if (contradiction) {
+      throw new Error(
+        `Delegation ledger corruption for assignment ${contradiction.assignmentId}: an initial receipt was created after terminal validation_rejected; operator action is required.`,
+      );
+    }
+  }
+
   reconcilePendingReceiptFinalizationAfterRestart(reconciledAt = Date.now()): number {
     this.assertActiveStack();
     const assignments = this.db
@@ -3848,7 +4060,12 @@ export class DelegationLedger {
     createdAt?: number;
   }): string {
     this.assertActiveStack();
+    const assignment = this.getAssignment(params.assignmentId);
     validateDelegationReportCoverage(params.report);
+    validateDelegationNewlyDiscovered({
+      report: params.report,
+      assignedScope: assignment?.scopeUnits ?? params.report.scope.assigned,
+    });
     return this.appendInitialReceiptRecord(params);
   }
 
@@ -3876,6 +4093,12 @@ export class DelegationLedger {
     createdAt?: number;
   }): { receiptId: string; validationId: string; semanticDigest: string } {
     this.assertActiveStack();
+    const assignment = this.getAssignment(params.assignmentId);
+    validateDelegationReportCoverage(params.report);
+    validateDelegationNewlyDiscovered({
+      report: params.report,
+      assignedScope: assignment?.scopeUnits ?? params.report.scope.assigned,
+    });
     return this.transaction(() => {
       const receiptId = this.appendInitialReceiptRecord(params);
       const validationId = this.appendValidation({
@@ -3932,7 +4155,9 @@ export class DelegationLedger {
     const terminalRoute = this.db
       .prepare(
         `SELECT 1 FROM route_events
-         WHERE assignment_id = ? AND kind IN ('route_rejected', 'timeout', 'completed') LIMIT 1`,
+         WHERE assignment_id = ?
+           AND kind IN ('route_rejected', 'validation_rejected', 'timeout', 'completed')
+         LIMIT 1`,
       )
       .get(params.assignmentId);
     const remediationFrozen =
@@ -4032,11 +4257,15 @@ export class DelegationLedger {
     createdAt?: number;
   }): string {
     this.assertActiveStack();
-    validateDelegationReportCoverage(params.report);
     const assignment = this.getAssignment(params.assignmentId);
     if (!assignment || assignment.epoch !== this.currentEpoch()) {
       throw new Error("Format correction cannot bind a missing or stale assignment.");
     }
+    validateDelegationReportCoverage(params.report);
+    validateDelegationNewlyDiscovered({
+      report: params.report,
+      assignedScope: assignment.scopeUnits,
+    });
     const semanticDigest = hashDelegationReportSemantics(params.report);
     const reportJson = canonicalDelegationJson(params.report);
     const original = this.db
@@ -4596,6 +4825,7 @@ export function openDelegationLedger(params: {
   try {
     ledger.assertActiveStack();
     if (existingEpoch) {
+      ledger.assertNoLateInitialReceiptsAfterValidationRejection();
       ledger.reconcilePendingReceiptFinalizationAfterRestart();
       ledger.reconcileGatewayDispatchesAfterRestart();
       ledger.reconcileInterruptedInitialSpawnsAfterRestart();

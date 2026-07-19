@@ -201,8 +201,9 @@ function buildProtectedDelegationAssignmentPrompt(
     `Runtime authority binds this session to assignment ${assignment.assignmentId} as ${assignment.role} for ${assignment.purpose}.`,
     "When calling delegation_report, report.scope.assigned MUST exactly equal the following JSON array:",
     assignedScopeJson,
-    "Copy those scope IDs byte-for-byte into inspected, omitted, failed, newlyDiscovered, command scopeIds, and finding scopeIds where applicable.",
-    "Do not add labels, aliases, descriptions, expectation annotations, or Markdown to a scope ID.",
+    "Copy those assigned scope IDs byte-for-byte only into inspected, omitted, and failed entries, plus command/finding scopeIds when they refer to assigned scope.",
+    "Do not add labels, aliases, descriptions, expectation annotations, or Markdown to an assigned scope ID.",
+    "Late dependencies belong under newlyDiscovered: use the canonical repository-relative path for both scopeId and path, normally with disposition follow-up.",
   ].join("\n");
 }
 

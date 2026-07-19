@@ -428,6 +428,36 @@ describe("subagent registry persistence", () => {
     expect(after.version).toBe(2);
   });
 
+  it("restores raw stop reason and model completion metadata", async () => {
+    await writePersistedRegistry({
+      version: 2,
+      runs: {
+        "run-truncated-restart": {
+          runId: "run-truncated-restart",
+          childSessionKey: "agent:main:subagent:truncated-restart",
+          requesterSessionKey: "agent:main:main",
+          requesterDisplayKey: "main",
+          task: "resume truncated evidence",
+          cleanup: "keep",
+          createdAt: 1,
+          endedAt: 2,
+          frozenResultText: "incomplete handoff",
+          rawCompletionStopReason: "max_tokens",
+          modelCompletion: "truncated",
+          frozenResultRuntimeCapped: false,
+          frozenResultOriginalBytes: 18,
+        },
+      },
+    });
+
+    expect(loadSubagentRegistryFromDisk().get("run-truncated-restart")).toMatchObject({
+      rawCompletionStopReason: "max_tokens",
+      modelCompletion: "truncated",
+      frozenResultRuntimeCapped: false,
+      frozenResultOriginalBytes: 18,
+    });
+  });
+
   it("normalizes persisted and newly registered session keys to canonical trimmed values", async () => {
     const persisted = {
       version: 2,

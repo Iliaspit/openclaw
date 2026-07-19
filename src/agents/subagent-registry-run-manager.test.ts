@@ -198,6 +198,13 @@ describe("subagent registry run manager", () => {
       delegationSliceId: "slice_original",
       delegationEpoch: 11,
     });
+    Object.assign(runs.get("run-protected") as SubagentRunRecord, {
+      frozenResultText: "old truncated result",
+      modelCompletion: "truncated",
+      rawCompletionStopReason: "length",
+      frozenResultRuntimeCapped: true,
+      frozenResultOriginalBytes: 200_000,
+    });
 
     expect(() =>
       manager.replaceSubagentRunAfterSteer({
@@ -222,6 +229,11 @@ describe("subagent registry run manager", () => {
       delegationAssignmentId: "assignment_replacement",
       delegationSliceId: "slice_replacement",
       delegationEpoch: 12,
+      frozenResultText: undefined,
+      modelCompletion: undefined,
+      rawCompletionStopReason: undefined,
+      frozenResultRuntimeCapped: undefined,
+      frozenResultOriginalBytes: undefined,
     });
   });
 
@@ -253,6 +265,26 @@ describe("subagent registry run manager", () => {
         reason: SUBAGENT_ENDED_REASON_ERROR,
         sendFarewell: true,
         triggerCleanup: true,
+      }),
+    );
+  });
+
+  it("threads agent.wait stop reasons into terminal result capture", async () => {
+    const entry = createRunEntry({ runId: "run-wait-stop" });
+    const completeSubagentRun = vi.fn(async () => {});
+    const manager = createManager({ entry, completeSubagentRun });
+    waitMocks.waitForAgentRun.mockResolvedValueOnce({
+      status: "ok",
+      endedAt: 4_000,
+      rawCompletionStopReason: "max_tokens",
+    });
+
+    await manager.waitForSubagentCompletion(entry.runId, 10_000, entry);
+
+    expect(completeSubagentRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: entry.runId,
+        rawCompletionStopReason: "max_tokens",
       }),
     );
   });
