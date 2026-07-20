@@ -43,6 +43,10 @@ export function collectPreparedPrepackErrors(
   return errors;
 }
 
+export function shouldUsePreparedPrepack(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.OPENCLAW_PREPACK_PREPARED === "1";
+}
+
 function collectPreparedFilePaths(reader: PreparedFileReader = { existsSync, readdirSync }): {
   files: Set<string>;
   assets: string[];
@@ -90,10 +94,10 @@ function ensurePreparedArtifacts(): void {
   process.exit(1);
 }
 
-function run(command: string, args: string[]): void {
+function run(command: string, args: string[], env: NodeJS.ProcessEnv = process.env): void {
   const result = spawnSync(command, args, {
     stdio: "inherit",
-    env: process.env,
+    env,
   });
   if (result.status === 0) {
     return;
@@ -111,10 +115,16 @@ async function writeDistInventory(): Promise<void> {
 
 async function main(): Promise<void> {
   const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-  run(pnpmCommand, ["build"]);
-  run(pnpmCommand, ["ui:build"]);
+  if (!shouldUsePreparedPrepack()) {
+    run(pnpmCommand, ["build"]);
+    run(pnpmCommand, ["ui:build"]);
+  }
   ensurePreparedArtifacts();
   await writeDistInventory();
+  run(process.execPath, ["scripts/write-build-provenance.mjs"], {
+    ...process.env,
+    OPENCLAW_BUILD_PROFILE: "npm-release",
+  });
   runBuildSmoke();
 }
 

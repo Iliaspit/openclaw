@@ -84,6 +84,11 @@ export const BUILD_ALL_STEPS = [
     kind: "node",
     args: ["--import", "tsx", "scripts/write-cli-compat.ts"],
   },
+  {
+    label: "write-build-provenance",
+    kind: "node",
+    args: ["scripts/write-build-provenance.mjs"],
+  },
 ];
 
 export const BUILD_ALL_PROFILES = {
@@ -102,6 +107,7 @@ export const BUILD_ALL_PROFILES = {
     "write-build-info",
     "write-cli-startup-metadata",
     "write-cli-compat",
+    "write-build-provenance",
   ],
   gatewayWatch: ["tsdown", "runtime-postbuild", "build-stamp"],
 };

@@ -41,15 +41,17 @@ export function listDescendantRunsForRequester(rootSessionKey: string): Subagent
 }
 
 export function getSubagentRunByChildSessionKey(childSessionKey: string): SubagentRunRecord | null {
-  const key = childSessionKey.trim();
-  if (!key) {
-    return null;
-  }
+  return getLatestSubagentRunByChildSessionKey(childSessionKey);
+}
 
+function getPersistedSessionDisplaySubagentRunByChildSessionKey(
+  childSessionKey: string,
+): SubagentRunRecord | null {
+  // Dashboard projection preserves cross-process active visibility; ownership stays latest-first.
   let latestActive: SubagentRunRecord | null = null;
   let latestEnded: SubagentRunRecord | null = null;
   for (const entry of getSubagentRunsSnapshotForRead(subagentRuns).values()) {
-    if (entry.childSessionKey !== key) {
+    if (entry.childSessionKey !== childSessionKey) {
       continue;
     }
     if (typeof entry.endedAt !== "number") {
@@ -62,7 +64,6 @@ export function getSubagentRunByChildSessionKey(childSessionKey: string): Subage
       latestEnded = entry;
     }
   }
-
   return latestActive ?? latestEnded;
 }
 
@@ -101,7 +102,7 @@ export function getSessionDisplaySubagentRunByChildSessionKey(
     return latestInMemoryActive ?? latestInMemoryEnded;
   }
 
-  return getSubagentRunByChildSessionKey(key);
+  return getPersistedSessionDisplaySubagentRunByChildSessionKey(key);
 }
 
 export function getLatestSubagentRunByChildSessionKey(

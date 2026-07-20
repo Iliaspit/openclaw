@@ -1108,29 +1108,7 @@ export function listDescendantRunsForRequester(rootSessionKey: string): Subagent
 }
 
 export function getSubagentRunByChildSessionKey(childSessionKey: string): SubagentRunRecord | null {
-  const key = childSessionKey.trim();
-  if (!key) {
-    return null;
-  }
-
-  let latestActive: SubagentRunRecord | null = null;
-  let latestEnded: SubagentRunRecord | null = null;
-  for (const entry of subagentRegistryDeps.getSubagentRunsSnapshotForRead(subagentRuns).values()) {
-    if (entry.childSessionKey !== key) {
-      continue;
-    }
-    if (typeof entry.endedAt !== "number") {
-      if (!latestActive || isSubagentRunNewer(entry, latestActive)) {
-        latestActive = entry;
-      }
-      continue;
-    }
-    if (!latestEnded || isSubagentRunNewer(entry, latestEnded)) {
-      latestEnded = entry;
-    }
-  }
-
-  return latestActive ?? latestEnded;
+  return getLatestSubagentRunByChildSessionKey(childSessionKey);
 }
 
 export function getLatestSubagentRunByChildSessionKey(

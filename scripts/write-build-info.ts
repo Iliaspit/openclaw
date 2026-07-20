@@ -1,7 +1,7 @@
-import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveBuildSourceRevision } from "./lib/build-provenance.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = path.join(rootDir, "dist");
@@ -17,30 +17,12 @@ const readPackageVersion = () => {
   }
 };
 
-const resolveCommit = () => {
-  const envCommit = process.env.GIT_COMMIT?.trim() || process.env.GIT_SHA?.trim();
-  if (envCommit) {
-    return envCommit;
-  }
-  try {
-    return execSync("git rev-parse HEAD", {
-      cwd: rootDir,
-      stdio: ["ignore", "pipe", "ignore"],
-    })
-      .toString()
-      .trim();
-  } catch {
-    return null;
-  }
-};
-
 const version = readPackageVersion();
-const commit = resolveCommit();
+const commit = resolveBuildSourceRevision({ cwd: rootDir });
 
 const buildInfo = {
   version,
   commit,
-  builtAt: new Date().toISOString(),
 };
 
 fs.mkdirSync(distDir, { recursive: true });

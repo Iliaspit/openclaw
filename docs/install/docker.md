@@ -99,7 +99,10 @@ Docker is **optional**. Use it only if you want a containerized gateway or to va
 If you prefer to run each step yourself instead of using the setup script:
 
 ```bash
-docker build --build-arg OPENCLAW_INSTALL_BROWSER=1 -t openclaw:local -f Dockerfile .
+OPENCLAW_BUILD_REVISION="$(git rev-parse --verify 'HEAD^{commit}')"
+OPENCLAW_PROVENANCE_IMAGE="openclaw:local-provenance"
+docker build --build-arg "OPENCLAW_SOURCE_REVISION=$OPENCLAW_BUILD_REVISION" --build-arg "OPENCLAW_PROVENANCE_ARTIFACT_URI=docker-image://$OPENCLAW_PROVENANCE_IMAGE" --build-arg OPENCLAW_INSTALL_BROWSER=1 -t openclaw:local -f Dockerfile .
+docker build --target provenance-artifacts --build-arg "OPENCLAW_SOURCE_REVISION=$OPENCLAW_BUILD_REVISION" --build-arg "OPENCLAW_PROVENANCE_ARTIFACT_URI=docker-image://$OPENCLAW_PROVENANCE_IMAGE" -t "$OPENCLAW_PROVENANCE_IMAGE" -f Dockerfile .
 docker compose run --rm --no-deps --entrypoint node openclaw-gateway \
   dist/index.js onboard --mode local --no-install-daemon
 docker compose run --rm --no-deps --entrypoint node openclaw-gateway \
@@ -112,6 +115,43 @@ Run `docker compose` from the repo root. If you enabled `OPENCLAW_EXTRA_MOUNTS`
 or `OPENCLAW_HOME_VOLUME`, the setup script writes `docker-compose.extra.yml`;
 include it with `-f docker-compose.yml -f docker-compose.extra.yml`.
 </Note>
+
+### Build provenance and retained source maps
+
+Every source build emits `dist/build-provenance.json`. The deterministic
+manifest binds the full 40-character source revision, build-profile options,
+hashed build inputs, every shipped runtime chunk, the build-info revision, the
+validator identity and digest, and each generated source map. Release and
+container builds fail closed when the revision or retained-artifact URI is
+missing, null, malformed, a placeholder, or inconsistent with an available Git
+checkout.
+
+Runtime containers still remove source maps. The matching
+`provenance-artifacts` image retains the manifest, validator, source maps, and a
+hash-bound copy of the runtime artifacts. Published container images carry the
+same revision in `org.opencontainers.image.revision`; official default and slim
+images point to variant- and architecture-specific provenance images. Npm
+release promotion likewise publishes the preflight bundle at the exact OCI URI
+recorded in the package manifest.
+
+For a source build, verify the current output before deployment with:
+
+```bash
+pnpm build:provenance:check
+```
+
+After runtime maps have been stripped, verify an extracted runtime against a
+retained bundle and the exact source checkout with:
+
+```bash
+node scripts/verify-build-provenance.mjs --root /absolute/runtime-root --manifest /absolute/runtime-root/dist/build-provenance.json --source-root /absolute/source-checkout --artifact-root /absolute/runtime-root --source-map-root /absolute/provenance-bundle/source-maps --validator-root /absolute/provenance-bundle/validator --expected-revision 0123456789abcdef0123456789abcdef01234567 --require-retained-source-maps
+```
+
+Keep the lifecycle boundaries explicit: a source build creates artifacts; an
+image rebuild packages them; deployment replaces the running image; installed
+QA proves what is actually running. A green source check or implementation
+status alone is not evidence that an image was rebuilt, deployed, restarted, or
+validated in the installed environment.
 
 <Note>
 Because `openclaw-cli` shares `openclaw-gateway`'s network namespace, it is a
@@ -137,7 +177,7 @@ How to interpret it:
   is `openclaw:local`, you are using the local-image flow. Rebuild with:
 
   ```bash
-  docker build --build-arg OPENCLAW_INSTALL_BROWSER=1 -t openclaw:local -f Dockerfile .
+  ./scripts/docker/setup.sh
   docker compose -f docker-compose.yml -f docker-compose.extra.yml up -d --force-recreate openclaw-gateway
   ```
 
@@ -185,16 +225,16 @@ start and pass basic health checks.
 
 The setup script accepts these optional environment variables:
 
-| Variable                       | Purpose                                                          |
-| ------------------------------ | ---------------------------------------------------------------- |
-| `OPENCLAW_IMAGE`               | Use a remote image instead of building locally                   |
-| `OPENCLAW_DOCKER_APT_PACKAGES` | Install extra apt packages during build (space-separated)        |
-| `OPENCLAW_EXTENSIONS`          | Pre-install extension deps at build time (space-separated names) |
+| Variable                       | Purpose                                                                               |
+| ------------------------------ | ------------------------------------------------------------------------------------- |
+| `OPENCLAW_IMAGE`               | Use a remote image instead of building locally                                        |
+| `OPENCLAW_DOCKER_APT_PACKAGES` | Install extra apt packages during build (space-separated)                             |
+| `OPENCLAW_EXTENSIONS`          | Pre-install extension deps at build time (space-separated names)                      |
 | `OPENCLAW_INSTALL_BROWSER`     | Bake Chromium and Linux browser deps into local builds (default `1`; set `0` to skip) |
-| `OPENCLAW_EXTRA_MOUNTS`        | Extra host bind mounts (comma-separated `source:target[:opts]`)  |
-| `OPENCLAW_HOME_VOLUME`         | Persist `/home/node` in a named Docker volume                    |
-| `OPENCLAW_SANDBOX`             | Opt in to sandbox bootstrap (`1`, `true`, `yes`, `on`)           |
-| `OPENCLAW_DOCKER_SOCKET`       | Override Docker socket path                                      |
+| `OPENCLAW_EXTRA_MOUNTS`        | Extra host bind mounts (comma-separated `source:target[:opts]`)                       |
+| `OPENCLAW_HOME_VOLUME`         | Persist `/home/node` in a named Docker volume                                         |
+| `OPENCLAW_SANDBOX`             | Opt in to sandbox bootstrap (`1`, `true`, `yes`, `on`)                                |
+| `OPENCLAW_DOCKER_SOCKET`       | Override Docker socket path                                                           |
 
 ### Health checks
 
@@ -343,7 +383,7 @@ See [ClawDock](/install/clawdock) for the full helper guide.
     3. **Bake browser automation deps**: Docker setup does this by default for
        local builds. For manual builds, pass the same build arg:
        ```bash
-       docker build --build-arg OPENCLAW_INSTALL_BROWSER=1 -t openclaw:local -f Dockerfile .
+       ./scripts/docker/setup.sh
        ```
        The image uses the repo-pinned `playwright-core` installer with
        `install --with-deps chromium`, so Chromium and required Linux shared
@@ -360,7 +400,9 @@ See [ClawDock](/install/clawdock) for the full helper guide.
   <Accordion title="Base image metadata">
     The main Docker image uses `node:24-bookworm` and publishes OCI base-image
     annotations including `org.opencontainers.image.base.name`,
-    `org.opencontainers.image.source`, and others. See
+    `org.opencontainers.image.source`, `org.opencontainers.image.revision`, and
+    others. The revision matches `dist/build-info.json` and
+    `dist/build-provenance.json`. See
     [OCI image annotations](https://github.com/opencontainers/image-spec/blob/main/annotations.md).
   </Accordion>
 </AccordionGroup>

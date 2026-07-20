@@ -24,6 +24,9 @@ import { PACKAGE_DIST_INVENTORY_RELATIVE_PATH } from "../src/infra/package-dist-
 
 const REQUIRED_PACKED_PATHS = [
   PACKAGE_DIST_INVENTORY_RELATIVE_PATH,
+  "dist/build-provenance.json",
+  "scripts/lib/build-provenance.mjs",
+  "scripts/verify-build-provenance.mjs",
   ...WORKSPACE_TEMPLATE_PACK_PATHS,
 ] as const;
 

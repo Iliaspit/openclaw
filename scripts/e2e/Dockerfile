@@ -31,12 +31,23 @@ RUN --mount=type=cache,id=openclaw-pnpm-store,target=/home/appuser/.local/share/
 
 FROM deps AS build
 
+ARG OPENCLAW_SOURCE_REVISION
+ARG OPENCLAW_PROVENANCE_ARTIFACT_URI
+ENV OPENCLAW_SOURCE_REVISION=${OPENCLAW_SOURCE_REVISION} \
+    OPENCLAW_PROVENANCE_ARTIFACT_URI=${OPENCLAW_PROVENANCE_ARTIFACT_URI} \
+    OPENCLAW_REQUIRE_SOURCE_REVISION=1 \
+    OPENCLAW_BUILD_PROFILE=container-e2e \
+    OPENCLAW_BUILD_DOCKERFILE=scripts/e2e/Dockerfile
+LABEL org.opencontainers.image.source="https://github.com/openclaw/openclaw" \
+  org.opencontainers.image.revision="${OPENCLAW_SOURCE_REVISION}"
+
 COPY --chown=appuser:appuser tsconfig.json tsconfig.plugin-sdk.dts.json tsdown.config.ts vitest.config.ts openclaw.mjs ./
 COPY --chown=appuser:appuser src ./src
 COPY --chown=appuser:appuser test ./test
 COPY --chown=appuser:appuser scripts ./scripts
 COPY --chown=appuser:appuser docs ./docs
 COPY --chown=appuser:appuser packages ./packages
+COPY --chown=appuser:appuser qa ./qa
 COPY --chown=appuser:appuser skills ./skills
 COPY --chown=appuser:appuser ui ./ui
 COPY --chown=appuser:appuser extensions ./extensions
@@ -49,6 +60,7 @@ RUN pnpm build
 # asset-existence check to pass so configure/onboard can continue.
 RUN mkdir -p dist/control-ui \
   && printf '%s\n' '<!doctype html><title>OpenClaw Control UI</title>' > dist/control-ui/index.html
+RUN node scripts/write-build-provenance.mjs && pnpm build:provenance:check
 
 # Playwright browser automation (e.g. Control UI / web E2E) needs OS packages.
 # Bake Chromium + deps at build time as root so non-root runs never need

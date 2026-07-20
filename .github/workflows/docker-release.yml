@@ -150,6 +150,22 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Resolve source provenance (amd64)
+        id: source
+        shell: bash
+        env:
+          PROVENANCE_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-provenance
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]] || [[ "$source_sha" == "0000000000000000000000000000000000000000" ]]; then
+            echo "::error::Invalid source revision: ${source_sha:-<missing>}"
+            exit 1
+          fi
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "artifact=${PROVENANCE_IMAGE}:${source_sha}-amd64" >> "$GITHUB_OUTPUT"
+          echo "slim_artifact=${PROVENANCE_IMAGE}:${source_sha}-slim-amd64" >> "$GITHUB_OUTPUT"
+
       - name: Build and push amd64 image
         id: build
         # WARNING: KEEP THE OFFICIAL DOCKER ACTION HERE; DO NOT SWITCH THIS BACK TO BLACKSMITH BLINDLY.
@@ -159,6 +175,9 @@ jobs:
           platforms: linux/amd64
           cache-from: type=gha,scope=docker-release-amd64
           cache-to: type=gha,mode=max,scope=docker-release-amd64
+          build-args: |
+            OPENCLAW_SOURCE_REVISION=${{ steps.source.outputs.sha }}
+            OPENCLAW_PROVENANCE_ARTIFACT_URI=oci://${{ steps.source.outputs.artifact }}
           tags: ${{ steps.tags.outputs.value }}
           labels: ${{ steps.labels.outputs.value }}
           provenance: false
@@ -175,7 +194,40 @@ jobs:
           cache-to: type=gha,mode=max,scope=docker-release-amd64
           build-args: |
             OPENCLAW_VARIANT=slim
+            OPENCLAW_SOURCE_REVISION=${{ steps.source.outputs.sha }}
+            OPENCLAW_PROVENANCE_ARTIFACT_URI=oci://${{ steps.source.outputs.slim_artifact }}
           tags: ${{ steps.tags.outputs.slim }}
+          labels: ${{ steps.labels.outputs.value }}
+          provenance: false
+          push: true
+
+      - name: Build and push amd64 provenance artifact
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          target: provenance-artifacts
+          platforms: linux/amd64
+          cache-from: type=gha,scope=docker-release-amd64
+          build-args: |
+            OPENCLAW_SOURCE_REVISION=${{ steps.source.outputs.sha }}
+            OPENCLAW_PROVENANCE_ARTIFACT_URI=oci://${{ steps.source.outputs.artifact }}
+          tags: ${{ steps.source.outputs.artifact }}
+          labels: ${{ steps.labels.outputs.value }}
+          provenance: false
+          push: true
+
+      - name: Build and push amd64 slim provenance artifact
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          target: provenance-artifacts
+          platforms: linux/amd64
+          cache-from: type=gha,scope=docker-release-amd64
+          build-args: |
+            OPENCLAW_VARIANT=slim
+            OPENCLAW_SOURCE_REVISION=${{ steps.source.outputs.sha }}
+            OPENCLAW_PROVENANCE_ARTIFACT_URI=oci://${{ steps.source.outputs.slim_artifact }}
+          tags: ${{ steps.source.outputs.slim_artifact }}
           labels: ${{ steps.labels.outputs.value }}
           provenance: false
           push: true
@@ -267,6 +319,22 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Resolve source provenance (arm64)
+        id: source
+        shell: bash
+        env:
+          PROVENANCE_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-provenance
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]] || [[ "$source_sha" == "0000000000000000000000000000000000000000" ]]; then
+            echo "::error::Invalid source revision: ${source_sha:-<missing>}"
+            exit 1
+          fi
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "artifact=${PROVENANCE_IMAGE}:${source_sha}-arm64" >> "$GITHUB_OUTPUT"
+          echo "slim_artifact=${PROVENANCE_IMAGE}:${source_sha}-slim-arm64" >> "$GITHUB_OUTPUT"
+
       - name: Build and push arm64 image
         id: build
         # WARNING: KEEP THE OFFICIAL DOCKER ACTION HERE; DO NOT SWITCH THIS BACK TO BLACKSMITH BLINDLY.
@@ -276,6 +344,9 @@ jobs:
           platforms: linux/arm64
           cache-from: type=gha,scope=docker-release-arm64
           cache-to: type=gha,mode=max,scope=docker-release-arm64
+          build-args: |
+            OPENCLAW_SOURCE_REVISION=${{ steps.source.outputs.sha }}
+            OPENCLAW_PROVENANCE_ARTIFACT_URI=oci://${{ steps.source.outputs.artifact }}
           tags: ${{ steps.tags.outputs.value }}
           labels: ${{ steps.labels.outputs.value }}
           provenance: false
@@ -292,7 +363,40 @@ jobs:
           cache-to: type=gha,mode=max,scope=docker-release-arm64
           build-args: |
             OPENCLAW_VARIANT=slim
+            OPENCLAW_SOURCE_REVISION=${{ steps.source.outputs.sha }}
+            OPENCLAW_PROVENANCE_ARTIFACT_URI=oci://${{ steps.source.outputs.slim_artifact }}
           tags: ${{ steps.tags.outputs.slim }}
+          labels: ${{ steps.labels.outputs.value }}
+          provenance: false
+          push: true
+
+      - name: Build and push arm64 provenance artifact
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          target: provenance-artifacts
+          platforms: linux/arm64
+          cache-from: type=gha,scope=docker-release-arm64
+          build-args: |
+            OPENCLAW_SOURCE_REVISION=${{ steps.source.outputs.sha }}
+            OPENCLAW_PROVENANCE_ARTIFACT_URI=oci://${{ steps.source.outputs.artifact }}
+          tags: ${{ steps.source.outputs.artifact }}
+          labels: ${{ steps.labels.outputs.value }}
+          provenance: false
+          push: true
+
+      - name: Build and push arm64 slim provenance artifact
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          target: provenance-artifacts
+          platforms: linux/arm64
+          cache-from: type=gha,scope=docker-release-arm64
+          build-args: |
+            OPENCLAW_VARIANT=slim
+            OPENCLAW_SOURCE_REVISION=${{ steps.source.outputs.sha }}
+            OPENCLAW_PROVENANCE_ARTIFACT_URI=oci://${{ steps.source.outputs.slim_artifact }}
+          tags: ${{ steps.source.outputs.slim_artifact }}
           labels: ${{ steps.labels.outputs.value }}
           provenance: false
           push: true

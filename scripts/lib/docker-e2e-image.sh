@@ -48,10 +48,16 @@ docker_e2e_build_or_reuse() {
   fi
 
   echo "Building Docker image: $image_name"
+  local source_revision
+  source_revision="$(git -C "$ROOT_DIR" rev-parse --verify 'HEAD^{commit}')"
   local build_cmd=(docker build)
   if [ -n "$target" ]; then
     build_cmd+=(--target "$target")
   fi
-  build_cmd+=(-t "$image_name" -f "$dockerfile" "$context")
+  build_cmd+=(
+    --build-arg "OPENCLAW_SOURCE_REVISION=$source_revision"
+    --build-arg "OPENCLAW_PROVENANCE_ARTIFACT_URI=docker-image://$image_name#dist"
+    -t "$image_name" -f "$dockerfile" "$context"
+  )
   run_logged "$label-build" "${build_cmd[@]}"
 }

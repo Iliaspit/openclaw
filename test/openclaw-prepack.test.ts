@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { collectPreparedPrepackErrors } from "../scripts/openclaw-prepack.ts";
+import {
+  collectPreparedPrepackErrors,
+  shouldUsePreparedPrepack,
+} from "../scripts/openclaw-prepack.ts";
 
 describe("collectPreparedPrepackErrors", () => {
   it("accepts prepared release artifacts", () => {
@@ -17,5 +20,13 @@ describe("collectPreparedPrepackErrors", () => {
       "missing required prepared artifact: dist/control-ui/index.html",
       "missing prepared Control UI asset payload under dist/control-ui/assets/",
     ]);
+  });
+});
+
+describe("shouldUsePreparedPrepack", () => {
+  it("uses prepared artifacts only for the explicit release workflow flag", () => {
+    expect(shouldUsePreparedPrepack({ OPENCLAW_PREPACK_PREPARED: "1" })).toBe(true);
+    expect(shouldUsePreparedPrepack({ OPENCLAW_PREPACK_PREPARED: "0" })).toBe(false);
+    expect(shouldUsePreparedPrepack({})).toBe(false);
   });
 });

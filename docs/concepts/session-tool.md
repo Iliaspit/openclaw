@@ -221,6 +221,56 @@ expectations. The Gateway stores the append-only ledger separately from agent
 workspaces and executes a digest-pinned, read-only validator bundle from
 protected state.
 
+### Ledger integrity and narrow repair
+
+Normal guarded operation never skips ledger validation. Completed format
+corrections require one exact `validation_rejected` event, bound to the original
+receipt and validation and causally located between the original and corrected
+receipt append records. Missing, duplicate, earlier, later, corrected-receipt,
+or unrelated rejection evidence remains fail-closed.
+
+One historical contradiction has a forward-only maintenance path: a completed
+format correction whose otherwise exact ledger is missing only that one
+superseded rejection event. The repair does not recreate the missing event,
+delete or update prior rows, or introduce a generic ignore flag. It appends one
+repair event and one receipt. Ordinary ledger open accepts the correction only
+when both records bind the assignment, full corruption fingerprint, pre-repair
+ledger head, exact correction and terminal state, expected missing event and
+causal window, active validator identity and digest, operator identity,
+reason/ticket, and one-shot idempotency key.
+
+This is stopped-gateway maintenance, not a controller tool or normal recovery
+route. Stop the Gateway and every other ledger writer, preserve a backup, and
+use a source checkout containing the maintenance code. Never inspect or repair
+the SQLite database or its WAL while a Gateway owns it.
+
+First create an exclusive inspection record:
+
+```bash
+pnpm delegation:ledger:repair inspect --state-dir /absolute/openclaw-state --assignment assignment_example --output /absolute/secure/inspection.json
+```
+
+After independent operator review, create a new authorization file. The command
+refuses to overwrite an existing file:
+
+```bash
+pnpm delegation:ledger:repair authorize --inspection /absolute/secure/inspection.json --operator-id operator@example.com --reason "Approved exact historical correction repair" --ticket OPS-4242 --idempotency-key repair-assignment-example-1 --output /absolute/secure/authorization.json
+```
+
+Apply exactly that authorization while the Gateway remains stopped:
+
+```bash
+pnpm delegation:ledger:repair apply --state-dir /absolute/openclaw-state --authorization /absolute/secure/authorization.json
+```
+
+The event and receipt commit together under an exclusive, synchronous
+transaction. An interrupted write rolls both back. Repeating the byte-equivalent
+authorization returns the original receipt without another append; a changed,
+stale, replayed, conflicting, or concurrent request fails. Afterward, restart
+through the normal service path and confirm strict ledger open before beginning
+runtime QA. Source implementation of the repair does not mean any installed
+ledger was repaired or any deployed Gateway was validated.
+
 Every guarded controller and worker must use a per-session Docker sandbox.
 Controller and verification workspaces are read-only; only the implementer is
 read-write. Guarded sandboxes reject inherited extra bind mounts, injected

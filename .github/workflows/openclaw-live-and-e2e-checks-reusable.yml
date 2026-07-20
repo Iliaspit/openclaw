@@ -632,6 +632,9 @@ jobs:
           platforms: linux/amd64
           cache-from: type=gha,scope=docker-e2e
           cache-to: type=gha,mode=max,scope=docker-e2e
+          build-args: |
+            OPENCLAW_SOURCE_REVISION=${{ needs.validate_selected_ref.outputs.selected_sha }}
+            OPENCLAW_PROVENANCE_ARTIFACT_URI=docker-image://${{ steps.image.outputs.image }}#dist
           tags: ${{ steps.image.outputs.image }}
           provenance: false
           push: true

@@ -36,6 +36,9 @@ publish_tag="${publish_plan[1]}"
 publish_cmd=(npm publish)
 if [[ -n "${publish_target}" ]]; then
   publish_cmd+=("${publish_target}")
+  # The promoted tarball was already built, packed, and provenance-verified in
+  # preflight. Do not let publish-time lifecycle hooks rebuild different bytes.
+  publish_cmd+=(--ignore-scripts)
 fi
 publish_cmd+=(--access public --tag "${publish_tag}" --provenance)
 

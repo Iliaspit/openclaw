@@ -548,6 +548,10 @@ describe("sendControlledSubagentMessage", () => {
       runId: "run-followup-stale-send",
       replyText: undefined,
     });
+    expect(getSubagentRunByChildSessionKey(childSessionKey)).toMatchObject({
+      runId: "run-followup-stale-send",
+      task: "continue",
+    });
   });
 
   it("does not return the previous assistant reply when no new assistant message appears", async () => {
@@ -1629,6 +1633,10 @@ describe("steerControlledSubagentRun", () => {
       mode: "restart",
       label: "current ended steer task",
       text: "steered current ended steer task.",
+    });
+    expect(getSubagentRunByChildSessionKey(childSessionKey)).toMatchObject({
+      runId: "run-followup-steer",
+      task: "updated direction",
     });
   });
 });

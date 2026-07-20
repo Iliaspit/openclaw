@@ -142,6 +142,7 @@ describe("resolveBuildAllSteps", () => {
       "write-build-info",
       "write-cli-startup-metadata",
       "write-cli-compat",
+      "write-build-provenance",
     ]);
   });
 

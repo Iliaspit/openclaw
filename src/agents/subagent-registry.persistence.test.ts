@@ -731,7 +731,7 @@ describe("subagent registry persistence", () => {
     expect(after.runs?.["run-orphan-attachments"]).toBeUndefined();
   });
 
-  it("prefers active runs and can resolve them from persisted registry snapshots", async () => {
+  it("selects the newest generation when an older persisted row is stale-active", async () => {
     const childSessionKey = "agent:main:subagent:disk-active";
     await writePersistedRegistry(
       {
@@ -771,13 +771,13 @@ describe("subagent registry persistence", () => {
     );
 
     expect(resolved).toMatchObject({
-      runId: "run-active",
+      runId: "run-complete",
       childSessionKey,
     });
-    expect(resolved?.endedAt).toBeUndefined();
+    expect(resolved?.endedAt).toBe(220);
   });
 
-  it("can resolve the newest child-session row even when an older stale row is still active", async () => {
+  it("keeps the latest-run alias aligned when an older stale row is still active", async () => {
     const childSessionKey = "agent:main:subagent:disk-latest";
     await writePersistedRegistry(
       {
@@ -812,15 +812,46 @@ describe("subagent registry persistence", () => {
 
     resetSubagentRegistryForTests({ persist: false });
 
-    const resolved = withEnv({ VITEST: undefined, NODE_ENV: "development" }, () =>
-      getLatestSubagentRunByChildSessionKey(childSessionKey),
-    );
+    const { resolved, aliased } = withEnv({ VITEST: undefined, NODE_ENV: "development" }, () => ({
+      resolved: getLatestSubagentRunByChildSessionKey(childSessionKey),
+      aliased: getSubagentRunByChildSessionKey(childSessionKey),
+    }));
 
     expect(resolved).toMatchObject({
       runId: "run-current-ended",
       childSessionKey,
     });
     expect(resolved?.endedAt).toBe(220);
+    expect(aliased?.runId).toBe(resolved?.runId);
+  });
+
+  it("keeps a genuinely newer active generation current after an older run ended", () => {
+    const childSessionKey = "agent:main:subagent:new-active-generation";
+    addSubagentRunForTests({
+      runId: "run-ended-old",
+      childSessionKey,
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "old generation",
+      cleanup: "keep",
+      createdAt: 100,
+      startedAt: 110,
+      endedAt: 120,
+      outcome: { status: "ok" },
+    });
+    addSubagentRunForTests({
+      runId: "run-active-new",
+      childSessionKey,
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "new generation",
+      cleanup: "keep",
+      createdAt: 200,
+      startedAt: 210,
+    });
+
+    expect(getSubagentRunByChildSessionKey(childSessionKey)?.runId).toBe("run-active-new");
+    expect(getSubagentRunByChildSessionKey(childSessionKey)?.endedAt).toBeUndefined();
   });
 
   it("resume guard prunes orphan runs before announce retry", async () => {

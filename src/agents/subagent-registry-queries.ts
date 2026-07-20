@@ -102,29 +102,7 @@ export function getSubagentRunByChildSessionKeyFromRuns(
   runs: Map<string, SubagentRunRecord>,
   childSessionKey: string,
 ): SubagentRunRecord | null {
-  const key = childSessionKey.trim();
-  if (!key) {
-    return null;
-  }
-
-  let latestActive: SubagentRunRecord | null = null;
-  let latestEnded: SubagentRunRecord | null = null;
-  for (const entry of runs.values()) {
-    if (entry.childSessionKey !== key) {
-      continue;
-    }
-    if (typeof entry.endedAt !== "number") {
-      if (!latestActive || entry.createdAt > latestActive.createdAt) {
-        latestActive = entry;
-      }
-      continue;
-    }
-    if (!latestEnded || entry.createdAt > latestEnded.createdAt) {
-      latestEnded = entry;
-    }
-  }
-
-  return latestActive ?? latestEnded;
+  return findLatestRunForChildSession(runs, childSessionKey) ?? null;
 }
 
 export function resolveRequesterForChildSessionFromRuns(

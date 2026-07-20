@@ -108,6 +108,9 @@ jobs:
           file: ./scripts/e2e/Dockerfile
           target: build
           platforms: linux/amd64
+          build-args: |
+            OPENCLAW_SOURCE_REVISION=${{ github.sha }}
+            OPENCLAW_PROVENANCE_ARTIFACT_URI=docker-image://${{ steps.image.outputs.image }}#dist
           tags: ${{ steps.image.outputs.image }}
           provenance: false
           push: true

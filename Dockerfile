@@ -16,6 +16,8 @@ ARG OPENCLAW_EXTENSIONS=""
 ARG OPENCLAW_VARIANT=default
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR=extensions
 ARG OPENCLAW_DOCKER_APT_UPGRADE=1
+ARG OPENCLAW_SOURCE_REVISION
+ARG OPENCLAW_PROVENANCE_ARTIFACT_URI
 ARG OPENCLAW_NODE_BOOKWORM_IMAGE="node:24-bookworm@sha256:3a09aa6354567619221ef6c45a5051b671f953f0a1924d1f819ffb236e520e6b"
 ARG OPENCLAW_NODE_BOOKWORM_DIGEST="sha256:3a09aa6354567619221ef6c45a5051b671f953f0a1924d1f819ffb236e520e6b"
 ARG OPENCLAW_NODE_BOOKWORM_SLIM_IMAGE="node:24-bookworm-slim@sha256:e8e2e91b1378f83c5b2dd15f0247f34110e2fe895f6ca7719dbb780f929368eb"
@@ -43,6 +45,17 @@ RUN mkdir -p /out && \
 FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS build
 ARG OPENCLAW_EXTENSIONS
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR
+ARG OPENCLAW_SOURCE_REVISION
+ARG OPENCLAW_PROVENANCE_ARTIFACT_URI
+ARG OPENCLAW_VARIANT
+ENV OPENCLAW_SOURCE_REVISION=${OPENCLAW_SOURCE_REVISION} \
+    OPENCLAW_PROVENANCE_ARTIFACT_URI=${OPENCLAW_PROVENANCE_ARTIFACT_URI} \
+    OPENCLAW_REQUIRE_SOURCE_REVISION=1 \
+    OPENCLAW_BUILD_PROFILE=container \
+    OPENCLAW_BUILD_DOCKERFILE=Dockerfile \
+    OPENCLAW_VARIANT=${OPENCLAW_VARIANT}
+LABEL org.opencontainers.image.source="https://github.com/openclaw/openclaw" \
+  org.opencontainers.image.revision="${OPENCLAW_SOURCE_REVISION}"
 
 # Install Bun (required for build scripts). Retry the whole bootstrap flow to
 # tolerate transient 5xx failures from bun.sh/GitHub during CI image builds.
@@ -138,6 +151,17 @@ RUN pnpm build:docker
 ENV OPENCLAW_PREFER_PNPM=1
 RUN pnpm ui:build
 RUN pnpm qa:lab:build
+RUN node scripts/write-build-provenance.mjs && pnpm build:provenance:check
+
+# Source maps are retained in a separate provenance target. The runtime stage
+# below continues to remove them, while auditors can retrieve this target and
+# verify it against dist/build-provenance.json from the installed image.
+FROM scratch AS provenance-artifacts
+ARG OPENCLAW_SOURCE_REVISION
+LABEL org.opencontainers.image.source="https://github.com/openclaw/openclaw" \
+  org.opencontainers.image.revision="${OPENCLAW_SOURCE_REVISION}" \
+  org.opencontainers.image.title="OpenClaw build provenance"
+COPY --from=build /app/.artifacts/build-provenance/ /
 
 # Prune dev dependencies and strip build-only metadata before copying
 # runtime assets into the final image.
@@ -157,7 +181,7 @@ RUN --mount=type=cache,id=openclaw-pnpm-store,target=/root/.local/share/pnpm/sto
     cp /tmp/pnpm-workspace.runtime.yaml pnpm-workspace.yaml && \
     CI=true NPM_CONFIG_FROZEN_LOCKFILE=false pnpm prune --prod && \
     NPM_CONFIG_OMIT=optional npm_config_omit=optional node scripts/postinstall-bundled-plugins.mjs && \
-    find dist -type f \( -name '*.d.ts' -o -name '*.d.mts' -o -name '*.d.cts' -o -name '*.map' \) -delete
+    find dist -type f \( -name '*.d.ts' -o -name '*.d.mts' -o -name '*.d.cts' -o -name '*.map' -o -name '.buildstamp' \) -delete
 
 # ── Runtime base images ─────────────────────────────────────────
 FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS base-default
@@ -175,12 +199,14 @@ FROM base-${OPENCLAW_VARIANT}
 ARG OPENCLAW_VARIANT
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR
 ARG OPENCLAW_DOCKER_APT_UPGRADE
+ARG OPENCLAW_SOURCE_REVISION
 
 # OCI base-image metadata for downstream image consumers.
 # If you change these annotations, also update:
 # - docs/install/docker.md ("Base image metadata" section)
 # - https://docs.openclaw.ai/install/docker
 LABEL org.opencontainers.image.source="https://github.com/openclaw/openclaw" \
+  org.opencontainers.image.revision="${OPENCLAW_SOURCE_REVISION}" \
   org.opencontainers.image.url="https://openclaw.ai" \
   org.opencontainers.image.documentation="https://docs.openclaw.ai/install/docker" \
   org.opencontainers.image.licenses="MIT" \

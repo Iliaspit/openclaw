@@ -36,6 +36,9 @@ function isPackagedDistPath(relativePath: string): boolean {
   if (relativePath === PACKAGE_DIST_INVENTORY_RELATIVE_PATH) {
     return false;
   }
+  if (relativePath === "dist/.buildstamp") {
+    return false;
+  }
   if (relativePath.endsWith(".map")) {
     return false;
   }

@@ -633,7 +633,7 @@ If your Gateway runs in Docker, avoid `npx playwright` in the running container
 behind). Bake browser support into the local image instead:
 
 ```bash
-docker build --build-arg OPENCLAW_INSTALL_BROWSER=1 -t openclaw:local -f Dockerfile .
+./scripts/docker/setup.sh
 ```
 
 The Dockerfile uses the bundled `playwright-core` CLI with

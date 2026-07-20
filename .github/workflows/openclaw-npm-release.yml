@@ -120,10 +120,32 @@ jobs:
         run: pnpm check:architecture
 
       - name: Build
-        run: pnpm build
+        run: |
+          set -euo pipefail
+          source_revision="$(git rev-parse --verify 'HEAD^{commit}')"
+          repository="${GITHUB_REPOSITORY,,}"
+          provenance_uri="oci://ghcr.io/${repository}-provenance:${source_revision}-npm"
+          OPENCLAW_SOURCE_REVISION="$source_revision" \
+          OPENCLAW_PROVENANCE_ARTIFACT_URI="$provenance_uri" \
+          OPENCLAW_REQUIRE_SOURCE_REVISION=1 \
+          OPENCLAW_BUILD_PROFILE=npm-release \
+            pnpm build
 
       - name: Build Control UI
-        run: pnpm ui:build
+        run: |
+          set -euo pipefail
+          source_revision="$(git rev-parse --verify 'HEAD^{commit}')"
+          repository="${GITHUB_REPOSITORY,,}"
+          provenance_uri="oci://ghcr.io/${repository}-provenance:${source_revision}-npm"
+          pnpm ui:build
+          OPENCLAW_SOURCE_REVISION="$source_revision" \
+          OPENCLAW_PROVENANCE_ARTIFACT_URI="$provenance_uri" \
+          OPENCLAW_REQUIRE_SOURCE_REVISION=1 \
+          OPENCLAW_BUILD_PROFILE=npm-release \
+            node scripts/write-build-provenance.mjs
+          OPENCLAW_SOURCE_REVISION="$source_revision" \
+          OPENCLAW_REQUIRE_SOURCE_REVISION=1 \
+            pnpm build:provenance:check
 
       - name: Validate release metadata
         if: ${{ inputs.preflight_run_id == '' }}
@@ -172,6 +194,12 @@ jobs:
           RELEASE_NPM_DIST_TAG: ${{ inputs.npm_dist_tag }}
         run: |
           set -euo pipefail
+          source_revision="$(git rev-parse --verify 'HEAD^{commit}')"
+          repository="${GITHUB_REPOSITORY,,}"
+          export OPENCLAW_SOURCE_REVISION="$source_revision"
+          export OPENCLAW_PROVENANCE_ARTIFACT_URI="oci://ghcr.io/${repository}-provenance:${source_revision}-npm"
+          export OPENCLAW_REQUIRE_SOURCE_REVISION=1
+          export OPENCLAW_BUILD_PROFILE=npm-release
           PACK_OUTPUT="$RUNNER_TEMP/npm-pack-output.txt"
           npm pack --json 2>&1 | tee "$PACK_OUTPUT"
           PACK_PATH="$(node - "$PACK_OUTPUT" <<'NODE'
@@ -238,6 +266,7 @@ jobs:
           rm -rf "$ARTIFACT_DIR"
           mkdir -p "$ARTIFACT_DIR"
           cp "$PACK_PATH" "$ARTIFACT_DIR/"
+          cp -R .artifacts/build-provenance "$ARTIFACT_DIR/provenance"
           printf '%s\n' "$RELEASE_TAG" > "$ARTIFACT_DIR/release-tag.txt"
           printf '%s\n' "$RELEASE_SHA" > "$ARTIFACT_DIR/release-sha.txt"
           printf '%s\n' "$RELEASE_NPM_DIST_TAG" > "$ARTIFACT_DIR/release-npm-dist-tag.txt"
@@ -287,6 +316,7 @@ jobs:
       actions: read
       contents: read
       id-token: write
+      packages: write
     steps:
       - name: Validate tag input format
         env:
@@ -406,9 +436,67 @@ jobs:
           fi
           echo "path=$TARBALL_PATH" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve build provenance artifact
+        id: provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_revision="$(git rev-parse --verify 'HEAD^{commit}')"
+          repository="${GITHUB_REPOSITORY,,}"
+          tag="ghcr.io/${repository}-provenance:${source_revision}-npm"
+          echo "source_revision=$source_revision" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "uri=oci://$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Verify prepared build provenance
+        env:
+          PROVENANCE_BUNDLE: preflight-tarball/provenance
+          PUBLISH_TARBALL_PATH: ${{ steps.publish_tarball.outputs.path }}
+          SOURCE_REVISION: ${{ steps.provenance.outputs.source_revision }}
+          RETAINED_ARTIFACT_URI: ${{ steps.provenance.outputs.uri }}
+        run: |
+          set -euo pipefail
+          package_root="$RUNNER_TEMP/openclaw-prepared-package"
+          packed_manifest="$RUNNER_TEMP/openclaw-packed-build-provenance.json"
+          rm -rf "$package_root"
+          mkdir -p "$package_root"
+          tar -xzf "$PUBLISH_TARBALL_PATH" -C "$package_root"
+          tar -xOf "$PUBLISH_TARBALL_PATH" package/dist/build-provenance.json > "$packed_manifest"
+          cmp "$packed_manifest" "$PROVENANCE_BUNDLE/build-provenance.json"
+          node scripts/verify-build-provenance.mjs \
+            --root "$GITHUB_WORKSPACE" \
+            --manifest "$PROVENANCE_BUNDLE/build-provenance.json" \
+            --source-root "$GITHUB_WORKSPACE" \
+            --artifact-root "$package_root/package" \
+            --source-map-root "$PROVENANCE_BUNDLE/source-maps" \
+            --validator-root "$PROVENANCE_BUNDLE/validator" \
+            --expected-revision "$SOURCE_REVISION" \
+            --expected-retained-artifact-uri "$RETAINED_ARTIFACT_URI" \
+            --require-retained-source-maps
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Builder
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+
+      - name: Publish npm provenance artifact
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: preflight-tarball/provenance
+          file: preflight-tarball/provenance/Dockerfile
+          build-args: |
+            OPENCLAW_SOURCE_REVISION=${{ steps.provenance.outputs.source_revision }}
+          tags: ${{ steps.provenance.outputs.tag }}
+          provenance: false
+          push: true
+
       - name: Publish
         env:
-          OPENCLAW_PREPACK_PREPARED: "1"
           OPENCLAW_NPM_PUBLISH_TAG: ${{ inputs.npm_dist_tag }}
           PUBLISH_TARBALL_PATH: ${{ steps.publish_tarball.outputs.path }}
         run: |

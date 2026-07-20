@@ -155,6 +155,13 @@ cleanup/TTL or a gateway restart that cannot restore the run), fire-and-forget
 `subagents(action="steer")` while the child is still listed, or start a fresh
 tracked child with `sessions_spawn`.
 
+When one child session has multiple run generations, the newest generation is
+current by deterministic creation/start/run-id ordering. An older row that is
+still marked active cannot eclipse a newer ended or restarted run. Follow-up
+registration happens before waiting, so the restarted run remains the selected
+generation even if that wait times out; a genuinely newer active generation
+still remains current.
+
 ### Unhealthy Child Handoff Runbook
 
 Use this checklist when a planner or orchestrator appears idle after assigning

@@ -92,6 +92,10 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
+      - name: Resolve source revision
+        id: source
+        run: echo "sha=$(git rev-parse --verify 'HEAD^{commit}')" >> "$GITHUB_OUTPUT"
+
       - name: Set up Blacksmith Docker Builder
         uses: useblacksmith/setup-docker-builder@ac083cc84672d01c60d5e8561d0a939b697de542 # v1
 
@@ -105,9 +109,27 @@ jobs:
           build-args: |
             OPENCLAW_DOCKER_APT_UPGRADE=0
             OPENCLAW_EXTENSIONS=matrix
+            OPENCLAW_SOURCE_REVISION=${{ steps.source.outputs.sha }}
+            OPENCLAW_PROVENANCE_ARTIFACT_URI=docker-image://openclaw-dockerfile-smoke-provenance:local
           tags: |
             openclaw-dockerfile-smoke:local
             openclaw-ext-smoke:local
+          load: true
+          push: false
+          provenance: false
+
+      - name: Retain root Dockerfile smoke provenance
+        uses: useblacksmith/build-push-action@cbd1f60d194a98cb3be5523b15134501eaf0fbf3 # v2
+        with:
+          context: .
+          file: ./Dockerfile
+          target: provenance-artifacts
+          build-args: |
+            OPENCLAW_DOCKER_APT_UPGRADE=0
+            OPENCLAW_EXTENSIONS=matrix
+            OPENCLAW_SOURCE_REVISION=${{ steps.source.outputs.sha }}
+            OPENCLAW_PROVENANCE_ARTIFACT_URI=docker-image://openclaw-dockerfile-smoke-provenance:local
+          tags: openclaw-dockerfile-smoke-provenance:local
           load: true
           push: false
           provenance: false
@@ -180,6 +202,10 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
+      - name: Resolve source revision
+        id: source
+        run: echo "sha=$(git rev-parse --verify 'HEAD^{commit}')" >> "$GITHUB_OUTPUT"
+
       - name: Set up Blacksmith Docker Builder
         uses: useblacksmith/setup-docker-builder@ac083cc84672d01c60d5e8561d0a939b697de542 # v1
 
@@ -190,8 +216,8 @@ jobs:
           OPENCLAW_QR_SMOKE_FORCE_INSTALL: "1"
         run: bash scripts/e2e/qr-import-docker.sh
 
-      # Build once with the matrix extension and tag both smoke names. This
-      # keeps the build-arg coverage without a second Blacksmith build action.
+      # Build the runtime once with the matrix extension and tag both smoke
+      # names. The retained provenance target below reuses the same build cache.
       - name: Build root Dockerfile smoke image
         uses: useblacksmith/build-push-action@cbd1f60d194a98cb3be5523b15134501eaf0fbf3 # v2
         with:
@@ -200,9 +226,27 @@ jobs:
           build-args: |
             OPENCLAW_DOCKER_APT_UPGRADE=0
             OPENCLAW_EXTENSIONS=matrix
+            OPENCLAW_SOURCE_REVISION=${{ steps.source.outputs.sha }}
+            OPENCLAW_PROVENANCE_ARTIFACT_URI=docker-image://openclaw-dockerfile-smoke-provenance:local
           tags: |
             openclaw-dockerfile-smoke:local
             openclaw-ext-smoke:local
+          load: true
+          push: false
+          provenance: false
+
+      - name: Retain root Dockerfile smoke provenance
+        uses: useblacksmith/build-push-action@cbd1f60d194a98cb3be5523b15134501eaf0fbf3 # v2
+        with:
+          context: .
+          file: ./Dockerfile
+          target: provenance-artifacts
+          build-args: |
+            OPENCLAW_DOCKER_APT_UPGRADE=0
+            OPENCLAW_EXTENSIONS=matrix
+            OPENCLAW_SOURCE_REVISION=${{ steps.source.outputs.sha }}
+            OPENCLAW_PROVENANCE_ARTIFACT_URI=docker-image://openclaw-dockerfile-smoke-provenance:local
+          tags: openclaw-dockerfile-smoke-provenance:local
           load: true
           push: false
           provenance: false

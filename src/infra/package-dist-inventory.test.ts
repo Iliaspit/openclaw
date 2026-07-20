@@ -72,6 +72,7 @@ describe("package dist inventory", () => {
         "color-support",
       );
       const omittedMap = path.join(packageRoot, "dist", "feature.runtime.js.map");
+      const omittedBuildStamp = path.join(packageRoot, "dist", ".buildstamp");
       await fs.mkdir(path.dirname(packagedQaRuntime), { recursive: true });
       await fs.mkdir(path.dirname(omittedQaMatrixChunk), { recursive: true });
       await fs.mkdir(path.dirname(omittedQaLabTypes), { recursive: true });
@@ -88,6 +89,7 @@ describe("package dist inventory", () => {
         omittedExtensionNodeModuleSymlink,
       );
       await fs.writeFile(omittedMap, "{}", "utf8");
+      await fs.writeFile(omittedBuildStamp, "{}", "utf8");
 
       await expect(writePackageDistInventory(packageRoot)).resolves.toEqual([
         "dist/extensions/qa-channel/runtime-api.js",

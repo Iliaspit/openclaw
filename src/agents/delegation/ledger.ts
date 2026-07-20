@@ -25,6 +25,13 @@ import {
   createDelegationRecordId,
   hashDelegationIdentity,
 } from "./identity.js";
+import {
+  DELEGATION_LEDGER_REPAIR_KIND,
+  DELEGATION_LEDGER_REPAIR_OUTCOME,
+  hashDelegationLedgerCorruption,
+  hashDelegationLedgerRepairAuthorization,
+  parseDelegationLedgerRepairAuthorization,
+} from "./ledger-repair-contract.js";
 import { resolveDelegationGuardPrincipal } from "./policy.js";
 import {
   boundDelegationReportText,
@@ -314,7 +321,7 @@ function assertCompleteV1AppendOrder(db: DatabaseSync): void {
   }
 }
 
-function ensureSchema(db: DatabaseSync) {
+export function ensureDelegationLedgerSchema(db: DatabaseSync) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS epoch_events (
       event_id TEXT PRIMARY KEY,
@@ -537,6 +544,36 @@ function ensureSchema(db: DatabaseSync) {
       semantic_digest TEXT NOT NULL,
       created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS delegation_ledger_repair_events (
+      repair_event_id TEXT PRIMARY KEY,
+      assignment_id TEXT NOT NULL UNIQUE REFERENCES assignments(assignment_id),
+      repair_kind TEXT NOT NULL CHECK(
+        repair_kind = 'completed-format-correction-missing-superseded-rejection-v1'
+      ),
+      authorization_json TEXT NOT NULL,
+      authorization_digest TEXT NOT NULL UNIQUE,
+      corruption_fingerprint TEXT NOT NULL,
+      pre_repair_ledger_head TEXT NOT NULL,
+      expected_state_json TEXT NOT NULL,
+      expected_missing_event_json TEXT NOT NULL,
+      validator_id TEXT NOT NULL,
+      validator_version TEXT NOT NULL,
+      validator_digest TEXT NOT NULL,
+      operator_id TEXT NOT NULL,
+      operator_reason TEXT NOT NULL,
+      operator_ticket TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS delegation_ledger_repair_receipts (
+      repair_receipt_id TEXT PRIMARY KEY,
+      repair_event_id TEXT NOT NULL UNIQUE REFERENCES delegation_ledger_repair_events(repair_event_id),
+      assignment_id TEXT NOT NULL UNIQUE REFERENCES assignments(assignment_id),
+      authorization_digest TEXT NOT NULL UNIQUE,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      outcome TEXT NOT NULL CHECK(outcome = 'supersession-restored'),
+      created_at INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS ledger_schema_migrations (
       migration_id TEXT PRIMARY KEY
     );
@@ -684,6 +721,8 @@ function ensureSchema(db: DatabaseSync) {
     "terminal_receipts",
     "remediation_revisions",
     "correction_uses",
+    "delegation_ledger_repair_events",
+    "delegation_ledger_repair_receipts",
     "ledger_schema_migrations",
     "ledger_record_appends_v2",
   ]);
@@ -3516,6 +3555,370 @@ export class DelegationLedger {
     });
   }
 
+  private repairedCorrectionSupersession(params: {
+    assignmentId: string;
+    correctedReceiptId: string;
+  }): SupersededRejectedValidation | undefined {
+    const rows = this.db
+      .prepare(
+        `SELECT e.repair_event_id AS repairEventId,
+                e.repair_kind AS repairKind,
+                e.authorization_json AS authorizationJson,
+                e.authorization_digest AS authorizationDigest,
+                e.corruption_fingerprint AS corruptionFingerprint,
+                e.pre_repair_ledger_head AS preRepairLedgerHead,
+                e.expected_state_json AS expectedStateJson,
+                e.expected_missing_event_json AS expectedMissingEventJson,
+                e.validator_id AS repairValidatorId,
+                e.validator_version AS repairValidatorVersion,
+                e.validator_digest AS repairValidatorDigest,
+                e.operator_id AS operatorId,
+                e.operator_reason AS operatorReason,
+                e.operator_ticket AS operatorTicket,
+                e.idempotency_key AS repairIdempotencyKey,
+                rr.repair_receipt_id AS repairReceiptId,
+                rr.authorization_digest AS receiptAuthorizationDigest,
+                rr.idempotency_key AS receiptIdempotencyKey,
+                rr.outcome AS repairOutcome,
+                a.epoch AS assignmentEpoch,
+                epoch.validator_id AS epochValidatorId,
+                epoch.validator_version AS epochValidatorVersion,
+                epoch.validator_digest AS epochValidatorDigest,
+                c.correction_id AS correctionId,
+                c.original_receipt_id AS originalReceiptId,
+                c.corrected_receipt_id AS correctedReceiptId,
+                c.semantic_digest AS correctionSemanticDigest,
+                original.semantic_digest AS originalSemanticDigest,
+                corrected.semantic_digest AS correctedSemanticDigest,
+                corrected.correction_of AS correctedCorrectionOf,
+                original_validation.validation_id AS originalValidationId,
+                original_validation.outcome AS originalValidationOutcome,
+                original_validation.issues_json AS originalValidationIssuesJson,
+                original_validation.validator_id AS originalValidatorId,
+                original_validation.validator_version AS originalValidatorVersion,
+                original_validation.validator_digest AS originalValidatorDigest,
+                corrected_validation.validation_id AS correctedValidationId,
+                corrected_validation.outcome AS correctedValidationOutcome,
+                corrected_validation.validator_id AS correctedValidatorId,
+                corrected_validation.validator_version AS correctedValidatorVersion,
+                corrected_validation.validator_digest AS correctedValidatorDigest,
+                original_order.append_sequence AS originalAppendSequence,
+                corrected_order.append_sequence AS correctedAppendSequence,
+                tr.terminal_result_id AS terminalResultId,
+                tr.run_id AS terminalResultRunId,
+                tr.result_receipt_id AS terminalResultReceiptId,
+                tr.result_receipt_sha256 AS terminalResultReceiptSha256,
+                tr.result_receipt_bytes AS terminalResultReceiptBytes,
+                tr.result_receipt_captured_at AS terminalResultReceiptCapturedAt,
+                t.terminal_receipt_id AS terminalReceiptId,
+                t.run_id AS terminalReceiptRunId,
+                t.accepted_receipt_id AS terminalAcceptedReceiptId,
+                t.accepted_semantic_digest AS terminalAcceptedSemanticDigest,
+                t.result_receipt_id AS acceptedResultReceiptId,
+                t.result_receipt_sha256 AS acceptedResultReceiptSha256,
+                t.result_receipt_bytes AS acceptedResultReceiptBytes,
+                t.result_receipt_captured_at AS acceptedResultReceiptCapturedAt,
+                completed.event_id AS completedEventId,
+                completed.payload_json AS completedPayloadJson,
+                (SELECT COUNT(*) FROM receipts
+                  WHERE assignment_id = e.assignment_id) AS receiptCount,
+                (SELECT COUNT(*) FROM validations v
+                   JOIN receipts r ON r.receipt_id = v.receipt_id
+                  WHERE r.assignment_id = e.assignment_id) AS validationCount,
+                (SELECT COUNT(*) FROM correction_uses
+                  WHERE assignment_id = e.assignment_id) AS correctionCount,
+                (SELECT COUNT(*) FROM terminal_results
+                  WHERE assignment_id = e.assignment_id) AS terminalResultCount,
+                (SELECT COUNT(*) FROM terminal_receipts
+                  WHERE assignment_id = e.assignment_id) AS terminalReceiptCount,
+                (SELECT COUNT(*) FROM route_events
+                  WHERE assignment_id = e.assignment_id) AS routeEventCount,
+                (SELECT COUNT(*) FROM route_events
+                  WHERE assignment_id = e.assignment_id AND kind = 'accepted')
+                  AS acceptedEventCount,
+                (SELECT COUNT(*) FROM route_events
+                  WHERE assignment_id = e.assignment_id AND kind = 'completed')
+                  AS completedEventCount,
+                (SELECT COUNT(*) FROM route_events
+                  WHERE assignment_id = e.assignment_id AND kind = 'validation_rejected')
+                  AS rejectionEventCount,
+                (SELECT COUNT(*) FROM route_events
+                  WHERE assignment_id = e.assignment_id AND kind IN ('route_rejected', 'timeout'))
+                  AS otherTerminalEventCount,
+                (SELECT COUNT(*) FROM delegation_ledger_repair_events
+                  WHERE assignment_id = e.assignment_id) AS repairEventCount,
+                (SELECT COUNT(*) FROM delegation_ledger_repair_receipts
+                  WHERE assignment_id = e.assignment_id) AS repairReceiptCount
+         FROM delegation_ledger_repair_events e
+         LEFT JOIN delegation_ledger_repair_receipts rr
+           ON rr.repair_event_id = e.repair_event_id
+          AND rr.assignment_id = e.assignment_id
+         JOIN assignments a ON a.assignment_id = e.assignment_id
+         JOIN epoch_events epoch ON epoch.epoch = a.epoch
+         JOIN correction_uses c ON c.assignment_id = e.assignment_id
+         JOIN receipts original ON original.receipt_id = c.original_receipt_id
+         JOIN receipts corrected ON corrected.receipt_id = c.corrected_receipt_id
+         JOIN validations original_validation
+           ON original_validation.receipt_id = original.receipt_id
+         JOIN validations corrected_validation
+           ON corrected_validation.receipt_id = corrected.receipt_id
+         JOIN ledger_record_appends_v2 original_order
+           ON original_order.assignment_id = e.assignment_id
+          AND original_order.record_kind = 'receipt'
+          AND original_order.record_id = original.receipt_id
+         JOIN ledger_record_appends_v2 corrected_order
+           ON corrected_order.assignment_id = e.assignment_id
+          AND corrected_order.record_kind = 'receipt'
+          AND corrected_order.record_id = corrected.receipt_id
+         JOIN terminal_results tr ON tr.assignment_id = e.assignment_id
+         JOIN terminal_receipts t
+           ON t.assignment_id = e.assignment_id
+          AND t.accepted_receipt_id = corrected.receipt_id
+         JOIN route_events completed
+           ON completed.assignment_id = e.assignment_id
+          AND completed.kind = 'completed'
+         WHERE e.assignment_id = ? AND c.corrected_receipt_id = ?`,
+      )
+      .all(params.assignmentId, params.correctedReceiptId) as Array<{
+      repairEventId: string;
+      repairKind: string;
+      authorizationJson: string;
+      authorizationDigest: string;
+      corruptionFingerprint: string;
+      preRepairLedgerHead: string;
+      expectedStateJson: string;
+      expectedMissingEventJson: string;
+      repairValidatorId: string;
+      repairValidatorVersion: string;
+      repairValidatorDigest: string;
+      operatorId: string;
+      operatorReason: string;
+      operatorTicket: string;
+      repairIdempotencyKey: string;
+      repairReceiptId: string | null;
+      receiptAuthorizationDigest: string | null;
+      receiptIdempotencyKey: string | null;
+      repairOutcome: string | null;
+      assignmentEpoch: number | bigint;
+      epochValidatorId: string;
+      epochValidatorVersion: string;
+      epochValidatorDigest: string;
+      correctionId: string;
+      originalReceiptId: string;
+      correctedReceiptId: string;
+      correctionSemanticDigest: string;
+      originalSemanticDigest: string;
+      correctedSemanticDigest: string;
+      correctedCorrectionOf: string | null;
+      originalValidationId: string;
+      originalValidationOutcome: DelegationValidationOutcome;
+      originalValidationIssuesJson: string;
+      originalValidatorId: string;
+      originalValidatorVersion: string;
+      originalValidatorDigest: string;
+      correctedValidationId: string;
+      correctedValidationOutcome: DelegationValidationOutcome;
+      correctedValidatorId: string;
+      correctedValidatorVersion: string;
+      correctedValidatorDigest: string;
+      originalAppendSequence: number | bigint;
+      correctedAppendSequence: number | bigint;
+      terminalResultId: string;
+      terminalResultRunId: string;
+      terminalResultReceiptId: string;
+      terminalResultReceiptSha256: string;
+      terminalResultReceiptBytes: number | bigint;
+      terminalResultReceiptCapturedAt: number | bigint;
+      terminalReceiptId: string;
+      terminalReceiptRunId: string;
+      terminalAcceptedReceiptId: string;
+      terminalAcceptedSemanticDigest: string;
+      acceptedResultReceiptId: string;
+      acceptedResultReceiptSha256: string;
+      acceptedResultReceiptBytes: number | bigint;
+      acceptedResultReceiptCapturedAt: number | bigint;
+      completedEventId: string;
+      completedPayloadJson: string;
+      receiptCount: number | bigint;
+      validationCount: number | bigint;
+      correctionCount: number | bigint;
+      terminalResultCount: number | bigint;
+      terminalReceiptCount: number | bigint;
+      routeEventCount: number | bigint;
+      acceptedEventCount: number | bigint;
+      completedEventCount: number | bigint;
+      rejectionEventCount: number | bigint;
+      otherTerminalEventCount: number | bigint;
+      repairEventCount: number | bigint;
+      repairReceiptCount: number | bigint;
+    }>;
+    if (rows.length === 0) {
+      return undefined;
+    }
+    if (rows.length !== 1) {
+      throw new Error(
+        `Delegation ledger repair evidence is ambiguous for assignment ${params.assignmentId}.`,
+      );
+    }
+    const row = rows[0];
+    let authorization;
+    let completedPayload: unknown;
+    let originalValidationIssues: unknown;
+    try {
+      authorization = parseDelegationLedgerRepairAuthorization(JSON.parse(row.authorizationJson));
+      completedPayload = JSON.parse(row.completedPayloadJson) as unknown;
+      originalValidationIssues = JSON.parse(row.originalValidationIssuesJson) as unknown;
+    } catch {
+      throw new Error(
+        `Delegation ledger repair evidence is malformed for assignment ${params.assignmentId}.`,
+      );
+    }
+    const actualState = {
+      assignmentEpoch: toNumber(row.assignmentEpoch),
+      correctionId: row.correctionId,
+      originalReceiptId: row.originalReceiptId,
+      originalValidationId: row.originalValidationId,
+      originalReceiptAppendSequence: toNumber(row.originalAppendSequence),
+      correctedReceiptId: row.correctedReceiptId,
+      correctedValidationId: row.correctedValidationId,
+      correctedReceiptAppendSequence: toNumber(row.correctedAppendSequence),
+      semanticDigest: row.correctionSemanticDigest,
+      terminalResultId: row.terminalResultId,
+      terminalReceiptId: row.terminalReceiptId,
+      completedEventId: row.completedEventId,
+    };
+    const completed =
+      completedPayload && typeof completedPayload === "object"
+        ? (completedPayload as {
+            runId?: unknown;
+            terminalReceiptId?: unknown;
+            acceptedReceiptId?: unknown;
+            acceptedSemanticDigest?: unknown;
+            resultReceipt?: {
+              receiptId?: unknown;
+              sha256?: unknown;
+              bytes?: unknown;
+              capturedAt?: unknown;
+            };
+          })
+        : undefined;
+    const authorizationDigest = hashDelegationLedgerRepairAuthorization(authorization);
+    const corruptionFingerprint = hashDelegationLedgerCorruption({
+      repairKind: authorization.repairKind,
+      assignmentId: authorization.assignmentId,
+      expectedLedgerHead: authorization.expectedLedgerHead,
+      expectedState: authorization.expectedState,
+      expectedMissingEvent: authorization.expectedMissingEvent,
+      validator: authorization.validator,
+    });
+    const expectedRepairEventId = createDelegationRecordId("ledger-repair-event", {
+      authorizationDigest,
+    });
+    const expectedRepairReceiptId = createDelegationRecordId("ledger-repair-receipt", {
+      authorizationDigest,
+    });
+    const validatorMatchesEpoch =
+      authorization.validator.id === row.epochValidatorId &&
+      authorization.validator.version === row.epochValidatorVersion &&
+      authorization.validator.sha256 === row.epochValidatorDigest;
+    const validationsMatchEpoch =
+      row.originalValidatorId === row.epochValidatorId &&
+      row.originalValidatorVersion === row.epochValidatorVersion &&
+      row.originalValidatorDigest === row.epochValidatorDigest &&
+      row.correctedValidatorId === row.epochValidatorId &&
+      row.correctedValidatorVersion === row.epochValidatorVersion &&
+      row.correctedValidatorDigest === row.epochValidatorDigest;
+    const terminalResultMatches =
+      row.terminalResultRunId === row.terminalReceiptRunId &&
+      row.terminalResultReceiptId === row.acceptedResultReceiptId &&
+      row.terminalResultReceiptSha256 === row.acceptedResultReceiptSha256 &&
+      toNumber(row.terminalResultReceiptBytes) === toNumber(row.acceptedResultReceiptBytes) &&
+      toNumber(row.terminalResultReceiptCapturedAt) ===
+        toNumber(row.acceptedResultReceiptCapturedAt);
+    const completedEventMatches =
+      completed?.runId === row.terminalReceiptRunId &&
+      completed.terminalReceiptId === row.terminalReceiptId &&
+      completed.acceptedReceiptId === row.correctedReceiptId &&
+      completed.acceptedSemanticDigest === row.correctionSemanticDigest &&
+      completed.resultReceipt?.receiptId === row.acceptedResultReceiptId &&
+      completed.resultReceipt.sha256 === row.acceptedResultReceiptSha256 &&
+      completed.resultReceipt.bytes === toNumber(row.acceptedResultReceiptBytes) &&
+      completed.resultReceipt.capturedAt === toNumber(row.acceptedResultReceiptCapturedAt);
+    const countsMatch =
+      toNumber(row.receiptCount) === 2 &&
+      toNumber(row.validationCount) === 2 &&
+      toNumber(row.correctionCount) === 1 &&
+      toNumber(row.terminalResultCount) === 1 &&
+      toNumber(row.terminalReceiptCount) === 1 &&
+      toNumber(row.routeEventCount) === 2 &&
+      toNumber(row.acceptedEventCount) === 1 &&
+      toNumber(row.completedEventCount) === 1 &&
+      toNumber(row.rejectionEventCount) === 0 &&
+      toNumber(row.otherTerminalEventCount) === 0 &&
+      toNumber(row.repairEventCount) === 1 &&
+      toNumber(row.repairReceiptCount) === 1;
+    const valid =
+      row.repairKind === DELEGATION_LEDGER_REPAIR_KIND &&
+      authorization.repairKind === DELEGATION_LEDGER_REPAIR_KIND &&
+      authorization.assignmentId === params.assignmentId &&
+      row.repairEventId === expectedRepairEventId &&
+      row.repairReceiptId === expectedRepairReceiptId &&
+      row.authorizationJson === canonicalDelegationJson(authorization) &&
+      row.authorizationDigest === authorizationDigest &&
+      row.receiptAuthorizationDigest === authorizationDigest &&
+      row.corruptionFingerprint === authorization.corruptionFingerprint &&
+      authorization.corruptionFingerprint === corruptionFingerprint &&
+      row.preRepairLedgerHead === authorization.expectedLedgerHead &&
+      row.expectedStateJson === canonicalDelegationJson(authorization.expectedState) &&
+      row.expectedMissingEventJson ===
+        canonicalDelegationJson(authorization.expectedMissingEvent) &&
+      row.repairValidatorId === authorization.validator.id &&
+      row.repairValidatorVersion === authorization.validator.version &&
+      row.repairValidatorDigest === authorization.validator.sha256 &&
+      row.operatorId === authorization.operator.id &&
+      row.operatorReason === authorization.operator.reason &&
+      row.operatorTicket === authorization.operator.ticket &&
+      row.repairIdempotencyKey === authorization.idempotencyKey &&
+      row.receiptIdempotencyKey === authorization.idempotencyKey &&
+      row.repairOutcome === DELEGATION_LEDGER_REPAIR_OUTCOME &&
+      canonicalDelegationJson(authorization.expectedState) ===
+        canonicalDelegationJson(actualState) &&
+      authorization.expectedMissingEvent.kind === "validation_rejected" &&
+      authorization.expectedMissingEvent.receiptId === row.originalReceiptId &&
+      authorization.expectedMissingEvent.validationId === row.originalValidationId &&
+      authorization.expectedMissingEvent.afterAppendSequence ===
+        toNumber(row.originalAppendSequence) &&
+      authorization.expectedMissingEvent.beforeAppendSequence ===
+        toNumber(row.correctedAppendSequence) &&
+      authorization.expectedMissingEvent.afterAppendSequence <
+        authorization.expectedMissingEvent.beforeAppendSequence &&
+      validatorMatchesEpoch &&
+      validationsMatchEpoch &&
+      (row.originalValidationOutcome === "rejected" ||
+        row.originalValidationOutcome === "blocked") &&
+      Array.isArray(originalValidationIssues) &&
+      originalValidationIssues.length > 0 &&
+      row.correctedValidationOutcome === "accepted" &&
+      row.correctedCorrectionOf === row.originalReceiptId &&
+      row.correctionSemanticDigest === row.originalSemanticDigest &&
+      row.correctionSemanticDigest === row.correctedSemanticDigest &&
+      row.terminalAcceptedReceiptId === row.correctedReceiptId &&
+      row.terminalAcceptedSemanticDigest === row.correctionSemanticDigest &&
+      terminalResultMatches &&
+      completedEventMatches &&
+      countsMatch;
+    if (!valid) {
+      throw new Error(
+        `Delegation ledger repair evidence does not match the protected correction for assignment ${params.assignmentId}.`,
+      );
+    }
+    return {
+      originalReceiptId: row.originalReceiptId,
+      originalValidationId: row.originalValidationId,
+      rejectionEventId: `ledger-repair:${row.repairReceiptId}`,
+    };
+  }
+
   private correctionSupersessionForReceipt(
     assignmentId: string,
     correctedReceiptId: string,
@@ -3567,6 +3970,16 @@ export class DelegationLedger {
       validationId: correction.originalValidationId,
       beforeAppendSequence: toNumber(correction.correctedAppendSequence),
     });
+    const repaired = this.repairedCorrectionSupersession({
+      assignmentId,
+      correctedReceiptId,
+    });
+    if (repaired) {
+      if (matchingEvents.length !== 0) {
+        return { correctionExists: true };
+      }
+      return { correctionExists: true, superseded: repaired };
+    }
     if (matchingEvents.length !== 1) {
       return { correctionExists: true };
     }
@@ -5208,7 +5621,7 @@ export function openDelegationLedger(params: {
   db.exec(`PRAGMA busy_timeout = 5000;`);
   db.exec(`BEGIN IMMEDIATE; COMMIT;`);
   try {
-    ensureSchema(db);
+    ensureDelegationLedgerSchema(db);
   } catch (error) {
     db.close();
     throw error;

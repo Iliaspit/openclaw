@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
+import { resolveBuildSourceRevision } from "./lib/build-provenance.mjs";
 
 export function resolveGitHead(params = {}) {
   const cwd = params.cwd ?? process.cwd();
@@ -28,12 +29,16 @@ export function writeBuildStamp(params = {}) {
   const cwd = params.cwd ?? process.cwd();
   const fsImpl = params.fs ?? fs;
   const now = params.now ?? Date.now;
+  const env = params.env ?? process.env;
   const distRoot = path.join(cwd, "dist");
   const buildStampPath = path.join(distRoot, ".buildstamp");
-  const head = resolveGitHead({
-    cwd,
-    spawnSync: params.spawnSync,
-  });
+  const requiresProvenanceRevision =
+    env.OPENCLAW_SOURCE_REVISION !== undefined || env.OPENCLAW_REQUIRE_SOURCE_REVISION === "1";
+  const head = params.resolveSourceRevision
+    ? params.resolveSourceRevision({ cwd })
+    : requiresProvenanceRevision
+      ? resolveBuildSourceRevision({ cwd, env })
+      : resolveGitHead({ cwd, spawnSync: params.spawnSync });
 
   fsImpl.mkdirSync(distRoot, { recursive: true });
   fsImpl.writeFileSync(buildStampPath, `${JSON.stringify({ builtAt: now(), head })}\n`, "utf8");

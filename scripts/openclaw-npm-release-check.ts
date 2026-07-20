@@ -61,7 +61,10 @@ const EXPECTED_REPOSITORY_URL = "https://github.com/openclaw/openclaw";
 const MAX_CALVER_DISTANCE_DAYS = 2;
 const REQUIRED_PACKED_PATHS = [
   PACKAGE_DIST_INVENTORY_RELATIVE_PATH,
+  "dist/build-provenance.json",
   "dist/control-ui/index.html",
+  "scripts/lib/build-provenance.mjs",
+  "scripts/verify-build-provenance.mjs",
   ...WORKSPACE_TEMPLATE_PACK_PATHS,
 ];
 const CONTROL_UI_ASSET_PREFIX = "dist/control-ui/assets/";

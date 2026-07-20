@@ -62,9 +62,12 @@ const requiredPathGroups = [
   "scripts/npm-runner.mjs",
   "scripts/preinstall-package-manager-warning.mjs",
   "scripts/postinstall-bundled-plugins.mjs",
+  "scripts/verify-build-provenance.mjs",
+  "scripts/lib/build-provenance.mjs",
   "dist/plugin-sdk/compat.js",
   "dist/plugin-sdk/root-alias.cjs",
   "dist/build-info.json",
+  "dist/build-provenance.json",
   "dist/channel-catalog.json",
   "dist/control-ui/index.html",
 ];
@@ -455,13 +458,17 @@ function runPackedCliSmoke(params: {
 
   for (const args of PACKED_CLI_SMOKE_COMMANDS) {
     if (process.platform === "win32") {
-      execFileSync(trustedCmdPath, ["/d", "/s", "/c", buildCmdExeCommandLine(binaryPath, [...args])], {
-        cwd: params.cwd,
-        stdio: "inherit",
-        env,
-        shell: false,
-        windowsVerbatimArguments: true,
-      });
+      execFileSync(
+        trustedCmdPath,
+        ["/d", "/s", "/c", buildCmdExeCommandLine(binaryPath, [...args])],
+        {
+          cwd: params.cwd,
+          stdio: "inherit",
+          env,
+          shell: false,
+          windowsVerbatimArguments: true,
+        },
+      );
       continue;
     }
     execFileSync(binaryPath, [...args], {
