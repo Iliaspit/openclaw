@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   copyStaticExtensionAssets,
   listStaticExtensionAssetOutputs,
+  writeMissingRootRuntimeSourceMaps,
   writeStableRootRuntimeAliases,
 } from "../../scripts/runtime-postbuild.mjs";
 import { createScriptTestHarness } from "./test-helpers.js";
@@ -78,5 +79,37 @@ describe("runtime postbuild static assets", () => {
       'export * from "./runtime-tts.runtime-AbCd1234.js";\n',
     );
     await expect(fs.stat(path.join(distDir, "library.js"))).rejects.toThrow();
+  });
+
+  it("fills source-map gaps for generated root runtime facades without replacing compiler maps", async () => {
+    const rootDir = createTempDir("openclaw-runtime-postbuild-");
+    const distDir = path.join(rootDir, "dist");
+    const facadeSource = 'export * from "./runtime-model-auth.runtime-XyZ987.js";\n';
+    const compilerMap = '{"version":3,"sources":["../src/index.ts"]}\n';
+    await fs.mkdir(distDir, { recursive: true });
+    await fs.writeFile(path.join(distDir, "runtime-model-auth.runtime.js"), facadeSource, "utf8");
+    await fs.writeFile(path.join(distDir, "index.js"), "export const index = true;\n", "utf8");
+    await fs.writeFile(path.join(distDir, "index.js.map"), compilerMap, "utf8");
+
+    writeMissingRootRuntimeSourceMaps({ rootDir });
+
+    const fallbackMap = JSON.parse(
+      await fs.readFile(path.join(distDir, "runtime-model-auth.runtime.js.map"), "utf8"),
+    ) as {
+      file: string;
+      mappings: string;
+      sources: string[];
+      sourcesContent: string[];
+      x_openclaw_generated_runtime_fallback: boolean;
+    };
+    expect(fallbackMap).toMatchObject({
+      version: 3,
+      file: "runtime-model-auth.runtime.js",
+      sources: ["generated/runtime-model-auth.runtime.js"],
+      sourcesContent: [facadeSource],
+      mappings: "AAAA;AACA",
+      x_openclaw_generated_runtime_fallback: true,
+    });
+    expect(await fs.readFile(path.join(distDir, "index.js.map"), "utf8")).toBe(compilerMap);
   });
 });

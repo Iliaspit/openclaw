@@ -81,6 +81,49 @@ export function writeStableRootRuntimeAliases(params = {}) {
   }
 }
 
+function createGeneratedRuntimeSourceMap(fileName, source) {
+  const lineCount = source.split("\n").length;
+  return {
+    version: 3,
+    file: fileName,
+    names: [],
+    sources: [`generated/${fileName}`],
+    sourcesContent: [source],
+    mappings: Array.from({ length: lineCount }, (_, index) => (index === 0 ? "AAAA" : "AACA")).join(
+      ";",
+    ),
+    x_openclaw_generated_runtime_fallback: true,
+  };
+}
+
+export function writeMissingRootRuntimeSourceMaps(params = {}) {
+  const rootDir = params.rootDir ?? ROOT;
+  const distDir = path.join(rootDir, "dist");
+  const fsImpl = params.fs ?? fs;
+  let entries = [];
+  try {
+    entries = fsImpl.readdirSync(distDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".js")) {
+      continue;
+    }
+    const sourceMapPath = path.join(distDir, `${entry.name}.map`);
+    if (fsImpl.existsSync(sourceMapPath)) {
+      continue;
+    }
+    const source = fsImpl.readFileSync(path.join(distDir, entry.name), "utf8");
+    fsImpl.writeFileSync(
+      sourceMapPath,
+      `${JSON.stringify(createGeneratedRuntimeSourceMap(entry.name, source))}\n`,
+      "utf8",
+    );
+  }
+}
+
 export function runRuntimePostBuild(params = {}) {
   copyPluginSdkRootAlias(params);
   copyBundledPluginMetadata(params);
@@ -88,6 +131,7 @@ export function runRuntimePostBuild(params = {}) {
   stageBundledPluginRuntimeDeps(params);
   stageBundledPluginRuntime(params);
   writeStableRootRuntimeAliases(params);
+  writeMissingRootRuntimeSourceMaps(params);
   copyStaticExtensionAssets(params);
 }
 
