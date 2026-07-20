@@ -9,16 +9,23 @@ import {
 } from "./identity.js";
 import {
   canonicalDelegationLedgerRepairAuthorization,
+  delegationLedgerRepairExpectedEvidence,
   DELEGATION_LEDGER_REPAIR_INSPECTION_VERSION,
   DELEGATION_LEDGER_REPAIR_KIND,
+  DELEGATION_LEDGER_REPAIR_OBSERVED_COMPLETION_CASE,
+  DELEGATION_LEDGER_REPAIR_OBSERVED_COMPLETION_INSPECTION_VERSION,
   DELEGATION_LEDGER_REPAIR_OUTCOME,
   hashDelegationLedgerCorruption,
+  hashDelegationLedgerObservedCompletionCorruption,
   hashDelegationLedgerRepairAuthorization,
   parseDelegationLedgerRepairAuthorization,
   type DelegationLedgerRepairAuthorization,
   type DelegationLedgerRepairExpectedState,
   type DelegationLedgerRepairInspection,
   type DelegationLedgerRepairMissingEvent,
+  type DelegationLedgerRepairObservedCompletionCounts,
+  type DelegationLedgerRepairObservedCompletionEvents,
+  type DelegationLedgerRepairObservedCompletionExpectedState,
   type DelegationLedgerRepairValidator,
 } from "./ledger-repair-contract.js";
 import { ensureDelegationLedgerSchema } from "./ledger.js";
@@ -57,6 +64,9 @@ type SupportedContradictionRow = {
   terminalResultReceiptSha256: string;
   terminalResultReceiptBytes: number | bigint;
   terminalResultReceiptCapturedAt: number | bigint;
+  terminalResultCreatedAt: number | bigint;
+  terminalRunBindingCount: number | bigint;
+  terminalChildSessionKey: string | null;
   terminalReceiptId: string;
   terminalReceiptRunId: string;
   terminalAcceptedReceiptId: string;
@@ -78,6 +88,14 @@ type SupportedContradictionRow = {
   rejectionEventCount: number | bigint;
   otherTerminalEventCount: number | bigint;
   existingRepairCount: number | bigint;
+};
+
+type SupportedRouteEventRow = {
+  eventId: string;
+  kind: string;
+  payloadJson: string;
+  createdAt: number | bigint;
+  appendSequence: number | bigint;
 };
 
 export type DelegationLedgerRepairResult = {
@@ -203,6 +221,13 @@ function supportedContradictionRows(
               tr.result_receipt_sha256 AS terminalResultReceiptSha256,
               tr.result_receipt_bytes AS terminalResultReceiptBytes,
               tr.result_receipt_captured_at AS terminalResultReceiptCapturedAt,
+              tr.created_at AS terminalResultCreatedAt,
+              (SELECT COUNT(*) FROM assignment_bindings b
+                WHERE b.assignment_id = a.assignment_id AND b.run_id = tr.run_id)
+                AS terminalRunBindingCount,
+              (SELECT b.child_session_key FROM assignment_bindings b
+                WHERE b.assignment_id = a.assignment_id AND b.run_id = tr.run_id
+                ORDER BY b.bound_at, b.binding_id LIMIT 1) AS terminalChildSessionKey,
               t.terminal_receipt_id AS terminalReceiptId,
               t.run_id AS terminalReceiptRunId,
               t.accepted_receipt_id AS terminalAcceptedReceiptId,
@@ -264,6 +289,60 @@ function supportedContradictionRows(
        WHERE a.assignment_id = ?`,
     )
     .all(assignmentId) as SupportedContradictionRow[];
+}
+
+function supportedRouteEventRows(db: DatabaseSync, assignmentId: string): SupportedRouteEventRow[] {
+  return db
+    .prepare(
+      `SELECT e.event_id AS eventId, e.kind, e.payload_json AS payloadJson,
+              e.created_at AS createdAt, o.append_sequence AS appendSequence
+       FROM route_events e
+       JOIN ledger_record_appends_v2 o
+         ON o.assignment_id = e.assignment_id
+        AND o.record_kind = 'route_event'
+        AND o.record_id = e.event_id
+       WHERE e.assignment_id = ?
+       ORDER BY o.append_sequence`,
+    )
+    .all(assignmentId) as SupportedRouteEventRow[];
+}
+
+function parseRoutePayload(row: SupportedRouteEventRow): Record<string, unknown> | undefined {
+  try {
+    const payload = JSON.parse(row.payloadJson) as unknown;
+    return payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function exactRoutePayload(
+  row: SupportedRouteEventRow,
+  expected: Record<string, unknown>,
+): boolean {
+  const payload = parseRoutePayload(row);
+  return Boolean(payload && canonicalDelegationJson(payload) === canonicalDelegationJson(expected));
+}
+
+function observedCompletionCounts(
+  row: SupportedContradictionRow,
+): DelegationLedgerRepairObservedCompletionCounts {
+  return {
+    receipts: toNumber(row.receiptCount),
+    validations: toNumber(row.validationCount),
+    corrections: toNumber(row.correctionCount),
+    terminalRunBindings: toNumber(row.terminalRunBindingCount),
+    terminalResults: toNumber(row.terminalResultCount),
+    terminalReceipts: toNumber(row.terminalReceiptCount),
+    routeEvents: toNumber(row.routeEventCount),
+    acceptedEvents: toNumber(row.acceptedEventCount),
+    completedEvents: toNumber(row.completedEventCount),
+    rejectionEvents: toNumber(row.rejectionEventCount),
+    otherTerminalEvents: toNumber(row.otherTerminalEventCount),
+    existingRepairEvents: toNumber(row.existingRepairCount),
+  };
 }
 
 function parseCompletedPayload(row: SupportedContradictionRow) {
@@ -329,7 +408,7 @@ function inspectSupportedContradiction(
     afterAppendSequence: toNumber(row.originalAppendSequence),
     beforeAppendSequence: toNumber(row.correctedAppendSequence),
   };
-  const countsMatch =
+  const missingEventCountsMatch =
     toNumber(row.receiptCount) === 2 &&
     toNumber(row.validationCount) === 2 &&
     toNumber(row.correctionCount) === 1 &&
@@ -374,34 +453,185 @@ function inspectSupportedContradiction(
     completed.resultReceipt.sha256 === row.acceptedResultReceiptSha256 &&
     completed.resultReceipt.bytes === toNumber(row.acceptedResultReceiptBytes) &&
     completed.resultReceipt.capturedAt === toNumber(row.acceptedResultReceiptCapturedAt);
+  const commonStateMatches =
+    validatorsMatch && correctionMatches && terminalResultMatches && terminalMatches;
+  const expectedLedgerHead = computeDelegationLedgerHead(db);
+  if (commonStateMatches && missingEventCountsMatch) {
+    const corruptionFingerprint = hashDelegationLedgerCorruption({
+      repairKind: DELEGATION_LEDGER_REPAIR_KIND,
+      assignmentId,
+      expectedLedgerHead,
+      expectedState,
+      expectedMissingEvent,
+      validator,
+    });
+    return {
+      version: DELEGATION_LEDGER_REPAIR_INSPECTION_VERSION,
+      repairKind: DELEGATION_LEDGER_REPAIR_KIND,
+      assignmentId,
+      corruptionFingerprint,
+      expectedLedgerHead,
+      expectedState,
+      expectedMissingEvent,
+      validator,
+    };
+  }
+
+  const expectedCounts = observedCompletionCounts(row);
+  const observedCompletionCountsMatch =
+    expectedCounts.receipts === 2 &&
+    expectedCounts.validations === 2 &&
+    expectedCounts.corrections === 1 &&
+    expectedCounts.terminalRunBindings === 1 &&
+    expectedCounts.terminalResults === 1 &&
+    expectedCounts.terminalReceipts === 1 &&
+    expectedCounts.routeEvents === 4 &&
+    expectedCounts.acceptedEvents === 1 &&
+    expectedCounts.completedEvents === 1 &&
+    expectedCounts.rejectionEvents === 2 &&
+    expectedCounts.otherTerminalEvents === 0 &&
+    expectedCounts.existingRepairEvents === 0;
+  const routeRows = supportedRouteEventRows(db, assignmentId);
+  const accepted = routeRows.find((event) => event.kind === "accepted");
+  const supersededRejection = routeRows.find(
+    (event) =>
+      event.kind === "validation_rejected" &&
+      exactRoutePayload(event, {
+        code: "report-structure-invalid",
+        receiptId: row.originalReceiptId,
+        validationId: row.originalValidationId,
+      }),
+  );
+  const prematureCompletionRejection = routeRows.find(
+    (event) =>
+      event.kind === "validation_rejected" &&
+      exactRoutePayload(event, {
+        code: "missing-accepted-report",
+        runId: row.terminalResultRunId,
+      }),
+  );
+  const completedRoute = routeRows.find(
+    (event) =>
+      event.kind === "completed" &&
+      event.eventId === row.completedEventId &&
+      exactRoutePayload(event, {
+        runId: row.terminalReceiptRunId,
+        terminalReceiptId: row.terminalReceiptId,
+        acceptedReceiptId: row.correctedReceiptId,
+        acceptedSemanticDigest: row.correctionSemanticDigest,
+        resultReceipt: {
+          receiptId: row.acceptedResultReceiptId,
+          sha256: row.acceptedResultReceiptSha256,
+          bytes: toNumber(row.acceptedResultReceiptBytes),
+          capturedAt: toNumber(row.acceptedResultReceiptCapturedAt),
+        },
+      }),
+  );
+  const acceptedPayload = accepted ? parseRoutePayload(accepted) : undefined;
+  const acceptedChildSessionKey =
+    typeof acceptedPayload?.childSessionKey === "string"
+      ? acceptedPayload.childSessionKey
+      : undefined;
+  const acceptedPayloadKeys = acceptedPayload ? Object.keys(acceptedPayload).toSorted() : [];
+  const observedCompletionMatches = Boolean(
+    commonStateMatches &&
+    observedCompletionCountsMatch &&
+    routeRows.length === 4 &&
+    accepted &&
+    supersededRejection &&
+    prematureCompletionRejection &&
+    completedRoute &&
+    acceptedPayload?.runId === row.terminalResultRunId &&
+    acceptedChildSessionKey &&
+    acceptedChildSessionKey === row.terminalChildSessionKey &&
+    canonicalDelegationJson(acceptedPayloadKeys) ===
+      canonicalDelegationJson(["childSessionKey", "runId"]) &&
+    toNumber(accepted.appendSequence) + 1 === toNumber(row.originalAppendSequence) &&
+    toNumber(row.originalAppendSequence) + 1 === toNumber(supersededRejection.appendSequence) &&
+    toNumber(supersededRejection.appendSequence) + 1 ===
+      toNumber(prematureCompletionRejection.appendSequence) &&
+    toNumber(prematureCompletionRejection.appendSequence) + 1 ===
+      toNumber(row.correctedAppendSequence) &&
+    toNumber(row.correctedAppendSequence) + 1 === toNumber(completedRoute.appendSequence) &&
+    toNumber(prematureCompletionRejection.createdAt) === toNumber(row.terminalResultCreatedAt),
+  );
   if (
-    !countsMatch ||
-    !validatorsMatch ||
-    !correctionMatches ||
-    !terminalResultMatches ||
-    !terminalMatches
+    !observedCompletionMatches ||
+    !accepted ||
+    !supersededRejection ||
+    !prematureCompletionRejection ||
+    !completedRoute ||
+    !acceptedChildSessionKey
   ) {
     throw new Error(
       `Assignment ${assignmentId} has different or additional ledger corruption; the narrow repair is not authorized.`,
     );
   }
-  const expectedLedgerHead = computeDelegationLedgerHead(db);
-  const corruptionFingerprint = hashDelegationLedgerCorruption({
+
+  const observedExpectedState: DelegationLedgerRepairObservedCompletionExpectedState = {
+    ...expectedState,
+    terminalRunId: row.terminalResultRunId,
+    terminalResultCreatedAt: toNumber(row.terminalResultCreatedAt),
+  };
+  const expectedEvents: DelegationLedgerRepairObservedCompletionEvents = {
+    accepted: {
+      eventId: accepted.eventId,
+      appendSequence: toNumber(accepted.appendSequence),
+      createdAt: toNumber(accepted.createdAt),
+      childSessionKey: acceptedChildSessionKey,
+      runId: row.terminalResultRunId,
+    },
+    supersededRejection: {
+      eventId: supersededRejection.eventId,
+      appendSequence: toNumber(supersededRejection.appendSequence),
+      createdAt: toNumber(supersededRejection.createdAt),
+      code: "report-structure-invalid",
+      receiptId: row.originalReceiptId,
+      validationId: row.originalValidationId,
+    },
+    prematureCompletionRejection: {
+      eventId: prematureCompletionRejection.eventId,
+      appendSequence: toNumber(prematureCompletionRejection.appendSequence),
+      createdAt: toNumber(prematureCompletionRejection.createdAt),
+      code: "missing-accepted-report",
+      runId: row.terminalResultRunId,
+    },
+    completed: {
+      eventId: completedRoute.eventId,
+      appendSequence: toNumber(completedRoute.appendSequence),
+      createdAt: toNumber(completedRoute.createdAt),
+      runId: row.terminalResultRunId,
+      terminalReceiptId: row.terminalReceiptId,
+      acceptedReceiptId: row.correctedReceiptId,
+      acceptedSemanticDigest: row.correctionSemanticDigest,
+      resultReceipt: {
+        receiptId: row.acceptedResultReceiptId,
+        sha256: row.acceptedResultReceiptSha256,
+        bytes: toNumber(row.acceptedResultReceiptBytes),
+        capturedAt: toNumber(row.acceptedResultReceiptCapturedAt),
+      },
+    },
+  };
+  const corruptionFingerprint = hashDelegationLedgerObservedCompletionCorruption({
     repairKind: DELEGATION_LEDGER_REPAIR_KIND,
+    repairCase: DELEGATION_LEDGER_REPAIR_OBSERVED_COMPLETION_CASE,
     assignmentId,
     expectedLedgerHead,
-    expectedState,
-    expectedMissingEvent,
+    expectedState: observedExpectedState,
+    expectedEvents,
+    expectedCounts,
     validator,
   });
   return {
-    version: DELEGATION_LEDGER_REPAIR_INSPECTION_VERSION,
+    version: DELEGATION_LEDGER_REPAIR_OBSERVED_COMPLETION_INSPECTION_VERSION,
     repairKind: DELEGATION_LEDGER_REPAIR_KIND,
+    repairCase: DELEGATION_LEDGER_REPAIR_OBSERVED_COMPLETION_CASE,
     assignmentId,
     corruptionFingerprint,
     expectedLedgerHead,
-    expectedState,
-    expectedMissingEvent,
+    expectedState: observedExpectedState,
+    expectedEvents,
+    expectedCounts,
     validator,
   };
 }
@@ -544,7 +774,7 @@ export function applyDelegationLedgerRepair(params: {
         canonicalDelegationLedgerRepairAuthorization(authorization)
       ) {
         throw new Error(
-          "Delegation ledger repair authorization does not match the assignment, expected state, missing event, or validator.",
+          "Delegation ledger repair authorization does not match the assignment, expected state, rejection evidence, or validator.",
         );
       }
       const createdAt = params.createdAt ?? Date.now();
@@ -571,7 +801,7 @@ export function applyDelegationLedgerRepair(params: {
         authorization.corruptionFingerprint,
         authorization.expectedLedgerHead,
         canonicalDelegationJson(authorization.expectedState),
-        canonicalDelegationJson(authorization.expectedMissingEvent),
+        canonicalDelegationJson(delegationLedgerRepairExpectedEvidence(authorization)),
         authorization.validator.id,
         authorization.validator.version,
         authorization.validator.sha256,

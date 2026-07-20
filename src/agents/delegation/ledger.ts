@@ -26,9 +26,14 @@ import {
   hashDelegationIdentity,
 } from "./identity.js";
 import {
+  delegationLedgerRepairExpectedEvidence,
+  DELEGATION_LEDGER_REPAIR_AUTHORIZATION_VERSION,
   DELEGATION_LEDGER_REPAIR_KIND,
+  DELEGATION_LEDGER_REPAIR_OBSERVED_COMPLETION_AUTHORIZATION_VERSION,
+  DELEGATION_LEDGER_REPAIR_OBSERVED_COMPLETION_CASE,
   DELEGATION_LEDGER_REPAIR_OUTCOME,
   hashDelegationLedgerCorruption,
+  hashDelegationLedgerObservedCompletionCorruption,
   hashDelegationLedgerRepairAuthorization,
   parseDelegationLedgerRepairAuthorization,
 } from "./ledger-repair-contract.js";
@@ -134,6 +139,14 @@ type SupersededRejectedValidation = {
   originalReceiptId: string;
   originalValidationId: string;
   rejectionEventId: string;
+  repairedMissingEvent?: boolean;
+  additionalRejection?: {
+    eventId: string;
+    payload: {
+      code: "missing-accepted-report";
+      runId: string;
+    };
+  };
 };
 
 type CorrectionSupersessionResolution = {
@@ -160,6 +173,13 @@ function isSupersededRejectedValidationRoute(
   payload: unknown,
   superseded: SupersededRejectedValidation | undefined,
 ): boolean {
+  if (
+    superseded?.additionalRejection?.eventId === eventId &&
+    canonicalDelegationJson(payload) ===
+      canonicalDelegationJson(superseded.additionalRejection.payload)
+  ) {
+    return true;
+  }
   return Boolean(
     superseded &&
     eventId === superseded.rejectionEventId &&
@@ -3610,6 +3630,13 @@ export class DelegationLedger {
                 tr.result_receipt_sha256 AS terminalResultReceiptSha256,
                 tr.result_receipt_bytes AS terminalResultReceiptBytes,
                 tr.result_receipt_captured_at AS terminalResultReceiptCapturedAt,
+                tr.created_at AS terminalResultCreatedAt,
+                (SELECT COUNT(*) FROM assignment_bindings b
+                  WHERE b.assignment_id = e.assignment_id AND b.run_id = tr.run_id)
+                  AS terminalRunBindingCount,
+                (SELECT b.child_session_key FROM assignment_bindings b
+                  WHERE b.assignment_id = e.assignment_id AND b.run_id = tr.run_id
+                  ORDER BY b.bound_at, b.binding_id LIMIT 1) AS terminalChildSessionKey,
                 t.terminal_receipt_id AS terminalReceiptId,
                 t.run_id AS terminalReceiptRunId,
                 t.accepted_receipt_id AS terminalAcceptedReceiptId,
@@ -3729,6 +3756,9 @@ export class DelegationLedger {
       terminalResultReceiptSha256: string;
       terminalResultReceiptBytes: number | bigint;
       terminalResultReceiptCapturedAt: number | bigint;
+      terminalResultCreatedAt: number | bigint;
+      terminalRunBindingCount: number | bigint;
+      terminalChildSessionKey: string | null;
       terminalReceiptId: string;
       terminalReceiptRunId: string;
       terminalAcceptedReceiptId: string;
@@ -3773,7 +3803,7 @@ export class DelegationLedger {
         `Delegation ledger repair evidence is malformed for assignment ${params.assignmentId}.`,
       );
     }
-    const actualState = {
+    const baseActualState = {
       assignmentEpoch: toNumber(row.assignmentEpoch),
       correctionId: row.correctionId,
       originalReceiptId: row.originalReceiptId,
@@ -3802,15 +3832,153 @@ export class DelegationLedger {
             };
           })
         : undefined;
-    const authorizationDigest = hashDelegationLedgerRepairAuthorization(authorization);
-    const corruptionFingerprint = hashDelegationLedgerCorruption({
-      repairKind: authorization.repairKind,
-      assignmentId: authorization.assignmentId,
-      expectedLedgerHead: authorization.expectedLedgerHead,
-      expectedState: authorization.expectedState,
-      expectedMissingEvent: authorization.expectedMissingEvent,
-      validator: authorization.validator,
+    const repairRouteRows = this.db
+      .prepare(
+        `SELECT e.event_id AS eventId, e.kind, e.payload_json AS payloadJson,
+                e.created_at AS createdAt, o.append_sequence AS appendSequence
+         FROM route_events e
+         JOIN ledger_record_appends_v2 o
+           ON o.assignment_id = e.assignment_id
+          AND o.record_kind = 'route_event'
+          AND o.record_id = e.event_id
+         WHERE e.assignment_id = ?
+         ORDER BY o.append_sequence`,
+      )
+      .all(params.assignmentId) as Array<{
+      eventId: string;
+      kind: string;
+      payloadJson: string;
+      createdAt: number | bigint;
+      appendSequence: number | bigint;
+    }>;
+    const routePayload = (event: (typeof repairRouteRows)[number] | undefined) => {
+      if (!event) {
+        return undefined;
+      }
+      try {
+        const payload = JSON.parse(event.payloadJson) as unknown;
+        return payload && typeof payload === "object" && !Array.isArray(payload)
+          ? (payload as Record<string, unknown>)
+          : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    const acceptedEvent = repairRouteRows.find((event) => event.kind === "accepted");
+    const supersededRejectionEvent = repairRouteRows.find((event) => {
+      if (event.kind !== "validation_rejected") {
+        return false;
+      }
+      return (
+        canonicalDelegationJson(routePayload(event)) ===
+        canonicalDelegationJson({
+          code: "report-structure-invalid",
+          receiptId: row.originalReceiptId,
+          validationId: row.originalValidationId,
+        })
+      );
     });
+    const prematureCompletionRejectionEvent = repairRouteRows.find((event) => {
+      if (event.kind !== "validation_rejected") {
+        return false;
+      }
+      return (
+        canonicalDelegationJson(routePayload(event)) ===
+        canonicalDelegationJson({
+          code: "missing-accepted-report",
+          runId: row.terminalResultRunId,
+        })
+      );
+    });
+    const completedRouteEvent = repairRouteRows.find(
+      (event) => event.kind === "completed" && event.eventId === row.completedEventId,
+    );
+    const acceptedPayload = routePayload(acceptedEvent);
+    const acceptedChildSessionKey =
+      typeof acceptedPayload?.childSessionKey === "string"
+        ? acceptedPayload.childSessionKey
+        : undefined;
+    const actualObservedEvents =
+      acceptedEvent &&
+      supersededRejectionEvent &&
+      prematureCompletionRejectionEvent &&
+      completedRouteEvent &&
+      acceptedChildSessionKey
+        ? {
+            accepted: {
+              eventId: acceptedEvent.eventId,
+              appendSequence: toNumber(acceptedEvent.appendSequence),
+              createdAt: toNumber(acceptedEvent.createdAt),
+              childSessionKey: acceptedChildSessionKey,
+              runId: row.terminalResultRunId,
+            },
+            supersededRejection: {
+              eventId: supersededRejectionEvent.eventId,
+              appendSequence: toNumber(supersededRejectionEvent.appendSequence),
+              createdAt: toNumber(supersededRejectionEvent.createdAt),
+              code: "report-structure-invalid" as const,
+              receiptId: row.originalReceiptId,
+              validationId: row.originalValidationId,
+            },
+            prematureCompletionRejection: {
+              eventId: prematureCompletionRejectionEvent.eventId,
+              appendSequence: toNumber(prematureCompletionRejectionEvent.appendSequence),
+              createdAt: toNumber(prematureCompletionRejectionEvent.createdAt),
+              code: "missing-accepted-report" as const,
+              runId: row.terminalResultRunId,
+            },
+            completed: {
+              eventId: completedRouteEvent.eventId,
+              appendSequence: toNumber(completedRouteEvent.appendSequence),
+              createdAt: toNumber(completedRouteEvent.createdAt),
+              runId: row.terminalResultRunId,
+              terminalReceiptId: row.terminalReceiptId,
+              acceptedReceiptId: row.correctedReceiptId,
+              acceptedSemanticDigest: row.correctionSemanticDigest,
+              resultReceipt: {
+                receiptId: row.acceptedResultReceiptId,
+                sha256: row.acceptedResultReceiptSha256,
+                bytes: toNumber(row.acceptedResultReceiptBytes),
+                capturedAt: toNumber(row.acceptedResultReceiptCapturedAt),
+              },
+            },
+          }
+        : undefined;
+    const actualObservedCounts = {
+      receipts: toNumber(row.receiptCount),
+      validations: toNumber(row.validationCount),
+      corrections: toNumber(row.correctionCount),
+      terminalRunBindings: toNumber(row.terminalRunBindingCount),
+      terminalResults: toNumber(row.terminalResultCount),
+      terminalReceipts: toNumber(row.terminalReceiptCount),
+      routeEvents: toNumber(row.routeEventCount),
+      acceptedEvents: toNumber(row.acceptedEventCount),
+      completedEvents: toNumber(row.completedEventCount),
+      rejectionEvents: toNumber(row.rejectionEventCount),
+      otherTerminalEvents: toNumber(row.otherTerminalEventCount),
+      existingRepairEvents: 0,
+    };
+    const authorizationDigest = hashDelegationLedgerRepairAuthorization(authorization);
+    const corruptionFingerprint =
+      authorization.version === DELEGATION_LEDGER_REPAIR_AUTHORIZATION_VERSION
+        ? hashDelegationLedgerCorruption({
+            repairKind: authorization.repairKind,
+            assignmentId: authorization.assignmentId,
+            expectedLedgerHead: authorization.expectedLedgerHead,
+            expectedState: authorization.expectedState,
+            expectedMissingEvent: authorization.expectedMissingEvent,
+            validator: authorization.validator,
+          })
+        : hashDelegationLedgerObservedCompletionCorruption({
+            repairKind: authorization.repairKind,
+            repairCase: authorization.repairCase,
+            assignmentId: authorization.assignmentId,
+            expectedLedgerHead: authorization.expectedLedgerHead,
+            expectedState: authorization.expectedState,
+            expectedEvents: authorization.expectedEvents,
+            expectedCounts: authorization.expectedCounts,
+            validator: authorization.validator,
+          });
     const expectedRepairEventId = createDelegationRecordId("ledger-repair-event", {
       authorizationDigest,
     });
@@ -3844,7 +4012,7 @@ export class DelegationLedger {
       completed.resultReceipt.sha256 === row.acceptedResultReceiptSha256 &&
       completed.resultReceipt.bytes === toNumber(row.acceptedResultReceiptBytes) &&
       completed.resultReceipt.capturedAt === toNumber(row.acceptedResultReceiptCapturedAt);
-    const countsMatch =
+    const missingEventCountsMatch =
       toNumber(row.receiptCount) === 2 &&
       toNumber(row.validationCount) === 2 &&
       toNumber(row.correctionCount) === 1 &&
@@ -3857,7 +4025,7 @@ export class DelegationLedger {
       toNumber(row.otherTerminalEventCount) === 0 &&
       toNumber(row.repairEventCount) === 1 &&
       toNumber(row.repairReceiptCount) === 1;
-    const valid =
+    const commonValid =
       row.repairKind === DELEGATION_LEDGER_REPAIR_KIND &&
       authorization.repairKind === DELEGATION_LEDGER_REPAIR_KIND &&
       authorization.assignmentId === params.assignmentId &&
@@ -3871,7 +4039,7 @@ export class DelegationLedger {
       row.preRepairLedgerHead === authorization.expectedLedgerHead &&
       row.expectedStateJson === canonicalDelegationJson(authorization.expectedState) &&
       row.expectedMissingEventJson ===
-        canonicalDelegationJson(authorization.expectedMissingEvent) &&
+        canonicalDelegationJson(delegationLedgerRepairExpectedEvidence(authorization)) &&
       row.repairValidatorId === authorization.validator.id &&
       row.repairValidatorVersion === authorization.validator.version &&
       row.repairValidatorDigest === authorization.validator.sha256 &&
@@ -3881,17 +4049,6 @@ export class DelegationLedger {
       row.repairIdempotencyKey === authorization.idempotencyKey &&
       row.receiptIdempotencyKey === authorization.idempotencyKey &&
       row.repairOutcome === DELEGATION_LEDGER_REPAIR_OUTCOME &&
-      canonicalDelegationJson(authorization.expectedState) ===
-        canonicalDelegationJson(actualState) &&
-      authorization.expectedMissingEvent.kind === "validation_rejected" &&
-      authorization.expectedMissingEvent.receiptId === row.originalReceiptId &&
-      authorization.expectedMissingEvent.validationId === row.originalValidationId &&
-      authorization.expectedMissingEvent.afterAppendSequence ===
-        toNumber(row.originalAppendSequence) &&
-      authorization.expectedMissingEvent.beforeAppendSequence ===
-        toNumber(row.correctedAppendSequence) &&
-      authorization.expectedMissingEvent.afterAppendSequence <
-        authorization.expectedMissingEvent.beforeAppendSequence &&
       validatorMatchesEpoch &&
       validationsMatchEpoch &&
       (row.originalValidationOutcome === "rejected" ||
@@ -3905,17 +4062,101 @@ export class DelegationLedger {
       row.terminalAcceptedReceiptId === row.correctedReceiptId &&
       row.terminalAcceptedSemanticDigest === row.correctionSemanticDigest &&
       terminalResultMatches &&
-      completedEventMatches &&
-      countsMatch;
+      completedEventMatches;
+    const missingEventValid =
+      authorization.version === DELEGATION_LEDGER_REPAIR_AUTHORIZATION_VERSION &&
+      canonicalDelegationJson(authorization.expectedState) ===
+        canonicalDelegationJson(baseActualState) &&
+      authorization.expectedMissingEvent.kind === "validation_rejected" &&
+      authorization.expectedMissingEvent.receiptId === row.originalReceiptId &&
+      authorization.expectedMissingEvent.validationId === row.originalValidationId &&
+      authorization.expectedMissingEvent.afterAppendSequence ===
+        toNumber(row.originalAppendSequence) &&
+      authorization.expectedMissingEvent.beforeAppendSequence ===
+        toNumber(row.correctedAppendSequence) &&
+      authorization.expectedMissingEvent.afterAppendSequence <
+        authorization.expectedMissingEvent.beforeAppendSequence &&
+      missingEventCountsMatch;
+    const observedCompletionActualState = {
+      ...baseActualState,
+      terminalRunId: row.terminalResultRunId,
+      terminalResultCreatedAt: toNumber(row.terminalResultCreatedAt),
+    };
+    const acceptedPayloadKeys = acceptedPayload ? Object.keys(acceptedPayload).toSorted() : [];
+    const observedCompletionValid =
+      authorization.version ===
+        DELEGATION_LEDGER_REPAIR_OBSERVED_COMPLETION_AUTHORIZATION_VERSION &&
+      authorization.repairCase === DELEGATION_LEDGER_REPAIR_OBSERVED_COMPLETION_CASE &&
+      canonicalDelegationJson(authorization.expectedState) ===
+        canonicalDelegationJson(observedCompletionActualState) &&
+      actualObservedEvents !== undefined &&
+      canonicalDelegationJson(authorization.expectedEvents) ===
+        canonicalDelegationJson(actualObservedEvents) &&
+      canonicalDelegationJson(authorization.expectedCounts) ===
+        canonicalDelegationJson(actualObservedCounts) &&
+      actualObservedCounts.receipts === 2 &&
+      actualObservedCounts.validations === 2 &&
+      actualObservedCounts.corrections === 1 &&
+      actualObservedCounts.terminalRunBindings === 1 &&
+      actualObservedCounts.terminalResults === 1 &&
+      actualObservedCounts.terminalReceipts === 1 &&
+      actualObservedCounts.routeEvents === 4 &&
+      actualObservedCounts.acceptedEvents === 1 &&
+      actualObservedCounts.completedEvents === 1 &&
+      actualObservedCounts.rejectionEvents === 2 &&
+      actualObservedCounts.otherTerminalEvents === 0 &&
+      toNumber(row.repairEventCount) === 1 &&
+      toNumber(row.repairReceiptCount) === 1 &&
+      repairRouteRows.length === 4 &&
+      acceptedPayload?.runId === row.terminalResultRunId &&
+      acceptedChildSessionKey !== undefined &&
+      acceptedChildSessionKey.length > 0 &&
+      acceptedChildSessionKey === row.terminalChildSessionKey &&
+      canonicalDelegationJson(acceptedPayloadKeys) ===
+        canonicalDelegationJson(["childSessionKey", "runId"]) &&
+      actualObservedEvents.accepted.appendSequence + 1 === toNumber(row.originalAppendSequence) &&
+      toNumber(row.originalAppendSequence) + 1 ===
+        actualObservedEvents.supersededRejection.appendSequence &&
+      actualObservedEvents.supersededRejection.appendSequence + 1 ===
+        actualObservedEvents.prematureCompletionRejection.appendSequence &&
+      actualObservedEvents.prematureCompletionRejection.appendSequence + 1 ===
+        toNumber(row.correctedAppendSequence) &&
+      toNumber(row.correctedAppendSequence) + 1 === actualObservedEvents.completed.appendSequence &&
+      canonicalDelegationJson(routePayload(completedRouteEvent)) ===
+        canonicalDelegationJson({
+          runId: actualObservedEvents.completed.runId,
+          terminalReceiptId: actualObservedEvents.completed.terminalReceiptId,
+          acceptedReceiptId: actualObservedEvents.completed.acceptedReceiptId,
+          acceptedSemanticDigest: actualObservedEvents.completed.acceptedSemanticDigest,
+          resultReceipt: actualObservedEvents.completed.resultReceipt,
+        }) &&
+      actualObservedEvents.prematureCompletionRejection.createdAt ===
+        toNumber(row.terminalResultCreatedAt);
+    const valid = commonValid && (missingEventValid || observedCompletionValid);
     if (!valid) {
       throw new Error(
         `Delegation ledger repair evidence does not match the protected correction for assignment ${params.assignmentId}.`,
       );
     }
+    if (authorization.version === DELEGATION_LEDGER_REPAIR_AUTHORIZATION_VERSION) {
+      return {
+        originalReceiptId: row.originalReceiptId,
+        originalValidationId: row.originalValidationId,
+        rejectionEventId: `ledger-repair:${row.repairReceiptId}`,
+        repairedMissingEvent: true,
+      };
+    }
     return {
       originalReceiptId: row.originalReceiptId,
       originalValidationId: row.originalValidationId,
-      rejectionEventId: `ledger-repair:${row.repairReceiptId}`,
+      rejectionEventId: authorization.expectedEvents.supersededRejection.eventId,
+      additionalRejection: {
+        eventId: authorization.expectedEvents.prematureCompletionRejection.eventId,
+        payload: {
+          code: "missing-accepted-report",
+          runId: authorization.expectedEvents.prematureCompletionRejection.runId,
+        },
+      },
     };
   }
 
@@ -3975,7 +4216,10 @@ export class DelegationLedger {
       correctedReceiptId,
     });
     if (repaired) {
-      if (matchingEvents.length !== 0) {
+      const originalEventMatches = repaired.repairedMissingEvent
+        ? matchingEvents.length === 0
+        : matchingEvents.length === 1 && matchingEvents[0].eventId === repaired.rejectionEventId;
+      if (!originalEventMatches) {
         return { correctionExists: true };
       }
       return { correctionExists: true, superseded: repaired };

@@ -229,15 +229,23 @@ receipt and validation and causally located between the original and corrected
 receipt append records. Missing, duplicate, earlier, later, corrected-receipt,
 or unrelated rejection evidence remains fail-closed.
 
-One historical contradiction has a forward-only maintenance path: a completed
-format correction whose otherwise exact ledger is missing only that one
-superseded rejection event. The repair does not recreate the missing event,
-delete or update prior rows, or introduce a generic ignore flag. It appends one
-repair event and one receipt. Ordinary ledger open accepts the correction only
-when both records bind the assignment, full corruption fingerprint, pre-repair
-ledger head, exact correction and terminal state, expected missing event and
-causal window, active validator identity and digest, operator identity,
-reason/ticket, and one-shot idempotency key.
+Two exact historical contradictions have a forward-only maintenance path. The
+first is a completed format correction whose otherwise exact ledger is missing
+only its superseded rejection event. The second is one observed legacy sequence:
+an accepted route, rejected receipt, receipt-bound rejection, same-run
+`missing-accepted-report` observation at the terminal-result timestamp, corrected
+receipt, and completion, in that exact append order. The second case also requires
+one unique terminal-run binding and binds its child-session identity. A later,
+reordered, differently identified, differently shaped, or additional rejection is
+not repairable by this path.
+
+The repair never recreates an event, deletes or updates prior rows, or introduces
+a generic ignore flag. It appends one repair event and one receipt. Ordinary
+ledger open accepts the correction only when both records bind the assignment,
+full corruption fingerprint, pre-repair ledger head, exact correction and
+terminal state, the complete case-specific event/count evidence, active validator
+identity and digest, operator identity, reason/ticket, and one-shot idempotency
+key.
 
 This is stopped-gateway maintenance, not a controller tool or normal recovery
 route. Stop the Gateway and every other ledger writer, preserve a backup, and
