@@ -101,8 +101,8 @@ If you prefer to run each step yourself instead of using the setup script:
 ```bash
 OPENCLAW_BUILD_REVISION="$(git rev-parse --verify 'HEAD^{commit}')"
 OPENCLAW_PROVENANCE_IMAGE="openclaw:local-provenance"
-docker build --build-arg "OPENCLAW_SOURCE_REVISION=$OPENCLAW_BUILD_REVISION" --build-arg "OPENCLAW_PROVENANCE_ARTIFACT_URI=docker-image://$OPENCLAW_PROVENANCE_IMAGE" --build-arg OPENCLAW_INSTALL_BROWSER=1 -t openclaw:local -f Dockerfile .
-docker build --target provenance-artifacts --build-arg "OPENCLAW_SOURCE_REVISION=$OPENCLAW_BUILD_REVISION" --build-arg "OPENCLAW_PROVENANCE_ARTIFACT_URI=docker-image://$OPENCLAW_PROVENANCE_IMAGE" -t "$OPENCLAW_PROVENANCE_IMAGE" -f Dockerfile .
+docker build --build-arg "OPENCLAW_SOURCE_REVISION=$OPENCLAW_BUILD_REVISION" --build-arg "OPENCLAW_PROVENANCE_ARTIFACT_URI=embedded:/opt/openclaw/build-provenance" --build-arg OPENCLAW_INSTALL_BROWSER=1 -t openclaw:local -f Dockerfile .
+docker build --target provenance-artifacts --build-arg "OPENCLAW_SOURCE_REVISION=$OPENCLAW_BUILD_REVISION" --build-arg "OPENCLAW_PROVENANCE_ARTIFACT_URI=embedded:/opt/openclaw/build-provenance" -t "$OPENCLAW_PROVENANCE_IMAGE" -f Dockerfile .
 docker compose run --rm --no-deps --entrypoint node openclaw-gateway \
   dist/index.js onboard --mode local --no-install-daemon
 docker compose run --rm --no-deps --entrypoint node openclaw-gateway \
@@ -126,13 +126,14 @@ container builds fail closed when the revision or retained-artifact URI is
 missing, null, malformed, a placeholder, or inconsistent with an available Git
 checkout.
 
-Runtime containers still remove source maps. The matching
-`provenance-artifacts` image retains the manifest, validator, source maps, and a
-hash-bound copy of the runtime artifacts. Published container images carry the
-same revision in `org.opencontainers.image.revision`; official default and slim
-images point to variant- and architecture-specific provenance images. Npm
-release promotion likewise publishes the preflight bundle at the exact OCI URI
-recorded in the package manifest.
+Runtime containers remove source maps from `dist`, but retain a root-owned,
+read-only verification copy of the source maps and provenance validator under
+`/opt/openclaw/build-provenance`. The matching `provenance-artifacts` image also
+retains the manifest, validator, source maps, and a hash-bound copy of the
+runtime artifacts. Published container images carry the same revision in
+`org.opencontainers.image.revision` and bind the recorded retained-artifact URI
+in `ai.openclaw.provenance.uri`. Npm release promotion likewise publishes the
+preflight bundle at the exact OCI URI recorded in the package manifest.
 
 For a source build, verify the current output before deployment with:
 

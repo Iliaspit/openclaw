@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { DELEGATION_REPORT_ERROR_CODES } from "../delegation/contracts.js";
+import {
+  DELEGATION_REPORT_ERROR_CODES,
+  type DelegationAssignmentRecord,
+} from "../delegation/contracts.js";
+import { bindDelegationEvidenceToAssignment } from "../delegation/evidence-identity.js";
 import { makeCompleteReport } from "../delegation/ledger.test-helpers.js";
 import {
   createDelegationReportFailureResult,
@@ -7,7 +11,132 @@ import {
   resolveDelegationReportErrorCode,
 } from "../delegation/report-result.js";
 import { validateDelegationNewlyDiscovered } from "../delegation/report-validation.js";
-import { bindDelegationReportToAssignmentScope } from "./delegation-report-tool.js";
+import {
+  bindDelegationReportToAssignmentScope,
+  prepareDelegationReportForAssignment,
+} from "./delegation-report-tool.js";
+
+function assignment(assignmentId: string): DelegationAssignmentRecord {
+  return {
+    assignmentId,
+    sliceId: "slice-1",
+    candidateId: "candidate-1",
+    waveId: "wave-1",
+    controllerAgentId: "planner",
+    controllerSessionKey: "agent:planner:main",
+    workerAgentId: "tester",
+    role: "tester",
+    requiredThinking: "medium",
+    requiredModel: "openai/gpt-5.4",
+    workspaceAccess: "ro",
+    scopeUnits: ["src/one.ts"],
+    routeFamilyId: "route-family-1",
+    purpose: "verification",
+    epoch: 14,
+    issuedAt: 1,
+  };
+}
+
+describe("delegation assignment-scoped evidence identity", () => {
+  it("canonicalizes every reference deterministically without mutating worker-local input", () => {
+    const report = makeCompleteReport({ assigned: ["src/one.ts"] });
+    report.commands[0].evidenceId = "E1";
+    report.scope.inspected[0].evidenceIds = ["E1"];
+    report.findings.push({
+      localId: "F1",
+      severity: "warning",
+      summary: "bounded observation",
+      proposedProvenance: "indeterminate",
+      scopeIds: ["src/one.ts"],
+      evidenceIds: ["E1"],
+      discoveryTrigger: "targeted inspection",
+    });
+
+    const first = bindDelegationEvidenceToAssignment({
+      assignment: assignment("assignment-a"),
+      report,
+    });
+    const second = bindDelegationEvidenceToAssignment({
+      assignment: assignment("assignment-a"),
+      report,
+    });
+    const canonicalId = first.identity.mapping[0]?.canonicalId;
+
+    expect(first).toEqual(second);
+    expect(canonicalId).toMatch(/^evidence_[a-f0-9]{16}_[a-f0-9]{64}$/u);
+    expect(first.report.commands[0].evidenceId).toBe(canonicalId);
+    expect(first.report.scope.inspected[0].evidenceIds).toEqual([canonicalId]);
+    expect(first.report.findings[0].evidenceIds).toEqual([canonicalId]);
+    expect(report.commands[0].evidenceId).toBe("E1");
+  });
+
+  it("keeps the same local ID distinct across assignments", () => {
+    const report = makeCompleteReport({ assigned: ["src/one.ts"] });
+    report.commands[0].evidenceId = "E1";
+    report.scope.inspected[0].evidenceIds = ["E1"];
+
+    const left = bindDelegationEvidenceToAssignment({
+      assignment: assignment("assignment-a"),
+      report,
+    });
+    const right = bindDelegationEvidenceToAssignment({
+      assignment: assignment("assignment-b"),
+      report,
+    });
+
+    expect(left.identity.mapping[0]?.canonicalId).not.toBe(right.identity.mapping[0]?.canonicalId);
+  });
+
+  it.each([
+    [
+      "duplicate producer",
+      (report: ReturnType<typeof makeCompleteReport>) =>
+        report.artifacts.push({
+          evidenceId: report.commands[0].evidenceId,
+          sha256: "a".repeat(64),
+          kind: "duplicate",
+        }),
+    ],
+    [
+      "missing reference",
+      (report: ReturnType<typeof makeCompleteReport>) => {
+        report.scope.inspected[0].evidenceIds = ["missing"];
+      },
+    ],
+    [
+      "forged namespace",
+      (report: ReturnType<typeof makeCompleteReport>) => {
+        report.commands[0].evidenceId = `evidence_${"a".repeat(16)}_${"b".repeat(64)}`;
+        report.scope.inspected[0].evidenceIds = [report.commands[0].evidenceId];
+      },
+    ],
+  ])("fails closed for %s", (_label, mutate) => {
+    const report = makeCompleteReport({ assigned: ["src/one.ts"] });
+    mutate(report);
+    expect(() =>
+      bindDelegationEvidenceToAssignment({ assignment: assignment("assignment-a"), report }),
+    ).toThrow(
+      expect.objectContaining<Partial<DelegationReportContractError>>({
+        errorCode: "evidence_identity_invalid",
+      }),
+    );
+  });
+
+  it("uses the same scope and evidence preparation contract for preflight and submit", () => {
+    const report = makeCompleteReport({ assigned: ["local-one"] });
+    report.scope.inspected[0].path = "src/one.ts";
+    report.commands[0].scopeIds = ["local-one"];
+    const prepared = prepareDelegationReportForAssignment({
+      assignment: assignment("assignment-a"),
+      report,
+    });
+    expect(prepared.report.scope.assigned).toEqual(["src/one.ts"]);
+    expect(prepared.report.commands[0].scopeIds).toEqual(["src/one.ts"]);
+    expect(prepared.report.commands[0].evidenceId).toBe(
+      prepared.evidenceIdentity.mapping[0]?.canonicalId,
+    );
+  });
+});
 
 describe("delegation report scope binding", () => {
   it("binds unambiguous worker-local scope labels to protected canonical paths", () => {

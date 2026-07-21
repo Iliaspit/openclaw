@@ -7,6 +7,10 @@ export const DELEGATION_SCOPE_VERSION = "openclaw-scope-v1" as const;
 export const DELEGATION_CONTRACT_VERSION = "openclaw-delegation-v1" as const;
 export const DELEGATION_REPORT_VERSION = "openclaw-delegation-report-v1" as const;
 export const DELEGATION_VALIDATOR_PROTOCOL = "openclaw-delegation-validator-v1" as const;
+export const DELEGATION_EVIDENCE_NAMESPACE_VERSION =
+  "openclaw-delegation-evidence-namespace-v1" as const;
+export const DELEGATION_RUNTIME_EVIDENCE_VERSION =
+  "openclaw-delegation-runtime-evidence-v1" as const;
 
 export type DelegationScopeExpectation = "existing" | "may-create";
 
@@ -203,12 +207,15 @@ export type DelegationValidatorResponse = {
 export type DelegationValidationOutcome = "accepted" | "rejected" | "blocked";
 
 export const DELEGATION_REPORT_ERROR_CODES = [
+  "evidence_identity_invalid",
   "scope_path_outside_assignment",
   "scope_id_ambiguous",
   "scope_partition_mismatch",
   "newly_discovered_invalid",
   "writable_scope_drift",
   "report_structure_invalid",
+  "report_slot_closed",
+  "report_slot_conflict",
   "candidate_drift",
   "validator_execution_failed",
   "validator_rejected",

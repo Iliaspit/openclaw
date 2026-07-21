@@ -481,10 +481,11 @@ upsert_env "$ENV_FILE" \
 if [[ "$IMAGE_NAME" == "openclaw:local" ]]; then
   SOURCE_REVISION="$(git -C "$ROOT_DIR" rev-parse --verify 'HEAD^{commit}')"
   PROVENANCE_IMAGE="${IMAGE_NAME}-provenance"
+  PROVENANCE_URI="embedded:/opt/openclaw/build-provenance"
   echo "==> Building Docker image: $IMAGE_NAME"
   run_docker_build \
     --build-arg "OPENCLAW_SOURCE_REVISION=${SOURCE_REVISION}" \
-    --build-arg "OPENCLAW_PROVENANCE_ARTIFACT_URI=docker-image://${PROVENANCE_IMAGE}" \
+    --build-arg "OPENCLAW_PROVENANCE_ARTIFACT_URI=${PROVENANCE_URI}" \
     --build-arg "OPENCLAW_DOCKER_APT_PACKAGES=${OPENCLAW_DOCKER_APT_PACKAGES}" \
     --build-arg "OPENCLAW_EXTENSIONS=${OPENCLAW_EXTENSIONS}" \
     --build-arg "OPENCLAW_INSTALL_BROWSER=${OPENCLAW_INSTALL_BROWSER}" \
@@ -496,7 +497,7 @@ if [[ "$IMAGE_NAME" == "openclaw:local" ]]; then
   run_docker_build \
     --target provenance-artifacts \
     --build-arg "OPENCLAW_SOURCE_REVISION=${SOURCE_REVISION}" \
-    --build-arg "OPENCLAW_PROVENANCE_ARTIFACT_URI=docker-image://${PROVENANCE_IMAGE}" \
+    --build-arg "OPENCLAW_PROVENANCE_ARTIFACT_URI=${PROVENANCE_URI}" \
     --build-arg "OPENCLAW_EXTENSIONS=${OPENCLAW_EXTENSIONS}" \
     --build-arg "OPENCLAW_INSTALL_BROWSER=${OPENCLAW_INSTALL_BROWSER}" \
     -t "$PROVENANCE_IMAGE" \

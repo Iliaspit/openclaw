@@ -441,6 +441,10 @@
         }
       }
     },
+    "delegation_evidence": {
+      "emoji": "🔎",
+      "title": "Delegation Evidence"
+    },
     "delegation_report": {
       "emoji": "🧾",
       "title": "Delegation Report",

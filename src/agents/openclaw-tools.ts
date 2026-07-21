@@ -24,6 +24,7 @@ import { createCanvasTool } from "./tools/canvas-tool.js";
 import { createCatalogTool } from "./tools/catalog-tool.js";
 import type { AnyAgentTool } from "./tools/common.js";
 import { createCronTool } from "./tools/cron-tool.js";
+import { createDelegationEvidenceTool } from "./tools/delegation-evidence-tool.js";
 import { createDelegationGuardTool } from "./tools/delegation-guard-tool.js";
 import { createDelegationReportTool } from "./tools/delegation-report-tool.js";
 import { createEmbeddedCallGateway } from "./tools/embedded-gateway-stub.js";
@@ -292,6 +293,16 @@ export function createOpenClawTools(
       : []),
     ...(resolvedConfig && delegationPrincipal?.kind === "worker"
       ? [
+          ...(delegationPrincipal.role === "tester" || delegationPrincipal.role === "reviewer"
+            ? [
+                createDelegationEvidenceTool({
+                  config: resolvedConfig,
+                  agentSessionKey: options?.agentSessionKey,
+                  requesterAgentIdOverride: options?.requesterAgentIdOverride,
+                  effectiveThinking: options?.effectiveThinking,
+                }),
+              ]
+            : []),
           createDelegationReportTool({
             config: resolvedConfig,
             agentSessionKey: options?.agentSessionKey,

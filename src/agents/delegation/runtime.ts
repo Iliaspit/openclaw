@@ -26,6 +26,7 @@ import {
   type DelegationGatewayDispatchClaim,
   type DelegationGatewayDispatchOutcome,
   type DelegationLedger,
+  getCachedDelegationLedger,
 } from "./ledger.js";
 import {
   assertDelegationController,
@@ -113,6 +114,23 @@ export function resolveDelegationRuntime(
       ...(options.stateDir ? { stateDir: options.stateDir } : {}),
     }),
   };
+}
+
+export function resolveInitializedDelegationRuntime(
+  config: OpenClawConfig,
+  options: { stateDir?: string } = {},
+): DelegationRuntime | undefined {
+  const guard = resolveDelegationGuardConfig(config);
+  if (!guard) {
+    return undefined;
+  }
+  const policyDigest = resolveDelegationPolicyDigest(guard);
+  const ledger = getCachedDelegationLedger({
+    guard,
+    policyDigest,
+    ...(options.stateDir ? { stateDir: options.stateDir } : {}),
+  });
+  return ledger ? { guard, policyDigest, ledger } : undefined;
 }
 
 export async function resolveDelegationRepositoryRoot(repoPath: string): Promise<string> {

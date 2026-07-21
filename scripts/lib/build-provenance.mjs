@@ -77,6 +77,10 @@ function sha256(data) {
   return createHash("sha256").update(data).digest("hex");
 }
 
+function compareStrings(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function normalizePath(value) {
   return value.split(path.sep).join("/");
 }
@@ -87,7 +91,7 @@ export function canonicalBuildProvenanceJson(value) {
   }
   if (value && typeof value === "object") {
     return `{${Object.keys(value)
-      .toSorted((left, right) => left.localeCompare(right))
+      .toSorted(compareStrings)
       .map((key) => `${JSON.stringify(key)}:${canonicalBuildProvenanceJson(value[key])}`)
       .join(",")}}`;
   }
@@ -199,7 +203,7 @@ function listFilesRecursively(rootPath, fsImpl = fs, scanRoot = rootPath) {
       files.push(entryPath);
     }
   }
-  return files.toSorted((left, right) => normalizePath(left).localeCompare(normalizePath(right)));
+  return files.toSorted((left, right) => compareStrings(normalizePath(left), normalizePath(right)));
 }
 
 function listBuildInputFilesRecursively(rootPath, fsImpl = fs) {
@@ -226,7 +230,7 @@ function listBuildInputFilesRecursively(rootPath, fsImpl = fs) {
       files.push(entryPath);
     }
   }
-  return files.toSorted((left, right) => normalizePath(left).localeCompare(normalizePath(right)));
+  return files.toSorted((left, right) => compareStrings(normalizePath(left), normalizePath(right)));
 }
 
 function describeFile(rootDir, absolutePath, fsImpl = fs) {
@@ -325,15 +329,13 @@ function isRuntimeArtifact(relativePath, env) {
 
 function readBuildInputs(rootDir, env, fsImpl = fs, inputPaths = BUILD_INPUT_PATHS) {
   const dockerfile = env.OPENCLAW_BUILD_DOCKERFILE?.trim() || "Dockerfile";
-  return [dockerfile, ...inputPaths]
-    .toSorted((left, right) => left.localeCompare(right))
-    .map((relativePath) => {
-      const absolutePath = path.join(rootDir, relativePath);
-      if (!fsImpl.existsSync(absolutePath)) {
-        throw new Error(`Build provenance input is missing: ${relativePath}`);
-      }
-      return describeBuildInput(rootDir, relativePath, fsImpl);
-    });
+  return [dockerfile, ...inputPaths].toSorted(compareStrings).map((relativePath) => {
+    const absolutePath = path.join(rootDir, relativePath);
+    if (!fsImpl.existsSync(absolutePath)) {
+      throw new Error(`Build provenance input is missing: ${relativePath}`);
+    }
+    return describeBuildInput(rootDir, relativePath, fsImpl);
+  });
 }
 
 function resolveBuildInputPaths(env, inputPaths) {
@@ -359,9 +361,7 @@ function ensureManifestInDistInventory(rootDir, fsImpl = fs) {
   if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
     throw new Error(`Build provenance cannot update malformed ${DIST_INVENTORY_PATH}.`);
   }
-  const inventory = [...new Set([...parsed, BUILD_PROVENANCE_MANIFEST])].toSorted((left, right) =>
-    left.localeCompare(right),
-  );
+  const inventory = [...new Set([...parsed, BUILD_PROVENANCE_MANIFEST])].toSorted(compareStrings);
   fsImpl.writeFileSync(inventoryPath, `${JSON.stringify(inventory, null, 2)}\n`, "utf8");
 }
 
@@ -404,7 +404,7 @@ function assertSortedUniquePaths(entries, label) {
   ) {
     throw new Error(`Build provenance ${label} contain an unsafe or non-canonical path.`);
   }
-  const sorted = paths.toSorted((left, right) => left.localeCompare(right));
+  const sorted = paths.toSorted(compareStrings);
   if (
     new Set(paths).size !== paths.length ||
     paths.some((entry, index) => entry !== sorted[index])

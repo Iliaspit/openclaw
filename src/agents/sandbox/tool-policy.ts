@@ -243,19 +243,24 @@ export function resolveSandboxToolPolicyForAgent(
     delegationGuard && agentId
       ? resolveDelegationGuardPrincipal(delegationGuard, agentId)
       : undefined;
-  const protectedDelegationTool =
+  const protectedDelegationTools =
     delegationPrincipal?.kind === "controller"
-      ? "delegation_guard"
+      ? ["delegation_guard"]
       : delegationPrincipal?.kind === "worker"
-        ? "delegation_report"
-        : undefined;
+        ? [
+            "delegation_report",
+            ...(delegationPrincipal.role === "tester" || delegationPrincipal.role === "reviewer"
+              ? ["delegation_evidence"]
+              : []),
+          ]
+        : [];
   const configuredAllow = mergeAllowlist(allowConfig.values, alsoAllowConfig.values);
   // Guarded principals must retain their runtime-authority tool through both the
   // general profile filter and the independent sandbox policy filter. Preserve
   // the existing empty-list meaning (allow all) when it is configured explicitly.
   const resolvedAllow =
-    protectedDelegationTool && configuredAllow.length > 0
-      ? Array.from(new Set([...configuredAllow, protectedDelegationTool]))
+    protectedDelegationTools.length > 0 && configuredAllow.length > 0
+      ? Array.from(new Set([...configuredAllow, ...protectedDelegationTools]))
       : configuredAllow;
   const resolvedDeny = Array.isArray(denyConfig.values)
     ? [...denyConfig.values]

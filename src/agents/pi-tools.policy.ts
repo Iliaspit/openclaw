@@ -349,19 +349,24 @@ export function resolveEffectiveToolPolicy(params: {
     delegationGuard && agentId
       ? resolveDelegationGuardPrincipal(delegationGuard, agentId)
       : undefined;
-  const protectedDelegationTool =
+  const protectedDelegationTools =
     delegationPrincipal?.kind === "controller"
-      ? "delegation_guard"
+      ? ["delegation_guard"]
       : delegationPrincipal?.kind === "worker"
-        ? "delegation_report"
-        : undefined;
+        ? [
+            "delegation_report",
+            ...(delegationPrincipal.role === "tester" || delegationPrincipal.role === "reviewer"
+              ? ["delegation_evidence"]
+              : []),
+          ]
+        : [];
   const profileAlsoAllow =
-    explicitProfileAlsoAllow || implicitProfileAlsoAllow || protectedDelegationTool
+    explicitProfileAlsoAllow || implicitProfileAlsoAllow || protectedDelegationTools.length > 0
       ? Array.from(
           new Set([
             ...(explicitProfileAlsoAllow ?? []),
             ...(implicitProfileAlsoAllow ?? []),
-            ...(protectedDelegationTool ? [protectedDelegationTool] : []),
+            ...protectedDelegationTools,
           ]),
         )
       : undefined;

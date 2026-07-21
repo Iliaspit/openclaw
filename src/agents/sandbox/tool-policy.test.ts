@@ -14,6 +14,10 @@ describe("sandbox/tool-policy", () => {
 
     expect(resolveSandboxToolPolicyForAgent(cfg, "planner").allow).toContain("delegation_guard");
     expect(resolveSandboxToolPolicyForAgent(cfg, "helper").allow).toContain("delegation_report");
+    expect(resolveSandboxToolPolicyForAgent(cfg, "tester").allow).toContain("delegation_evidence");
+    expect(resolveSandboxToolPolicyForAgent(cfg, "helper").allow).not.toContain(
+      "delegation_evidence",
+    );
     expect(resolveSandboxToolPolicyForAgent(cfg, "outsider").allow).not.toContain(
       "delegation_guard",
     );

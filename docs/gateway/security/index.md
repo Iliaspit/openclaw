@@ -1085,6 +1085,10 @@ If you allow session tools, treat delegated sub-agent runs as another boundary d
 - Keep `agents.defaults.subagents.allowAgents` and any per-agent `agents.list[].subagents.allowAgents` overrides restricted to known-safe target agents.
 - For any workflow that must remain sandboxed, call `sessions_spawn` with `sandbox: "require"` (default is `inherit`).
 - `sandbox: "require"` fails fast when the target child runtime is not sandboxed.
+- Guarded tester and reviewer lanes that need installed-runtime proof should use
+  `delegation_evidence`. It binds its fixed read-only probes to the authenticated
+  assignment and returns digests and bounded facts, not a Docker socket, raw
+  ledger access, filesystem access, or a host-command surface.
 
 ## Browser control risks
 

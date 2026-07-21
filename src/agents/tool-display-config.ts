@@ -289,6 +289,10 @@ export const TOOL_DISPLAY_CONFIG: ToolDisplayConfig = {
         status: { label: "status" },
       },
     },
+    delegation_evidence: {
+      emoji: "🔎",
+      title: "Delegation Evidence",
+    },
     delegation_report: {
       emoji: "🧾",
       title: "Delegation Report",

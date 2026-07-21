@@ -249,6 +249,12 @@ describe("resolveEffectiveToolPolicy", () => {
     expect(resolveEffectiveToolPolicy({ config, agentId: "helper" }).profileAlsoAllow).toContain(
       "delegation_report",
     );
+    expect(resolveEffectiveToolPolicy({ config, agentId: "tester" }).profileAlsoAllow).toContain(
+      "delegation_evidence",
+    );
+    expect(
+      resolveEffectiveToolPolicy({ config, agentId: "helper" }).profileAlsoAllow,
+    ).not.toContain("delegation_evidence");
     expect(
       resolveEffectiveToolPolicy({ config, agentId: "outsider" }).profileAlsoAllow,
     ).toBeUndefined();

@@ -32,11 +32,15 @@ describe("delegation tool exposure", () => {
     expect(delegationToolNames("planner2")).toEqual(["delegation_guard"]);
   });
 
-  it.each(["helper", "implementer", "tester", "reviewer", "qa"])(
-    "exposes delegation_report only to the guarded %s worker",
-    (agentId) => {
-      expect(delegationToolNames(agentId)).toEqual(["delegation_report"]);
-    },
+  it.each(["helper", "implementer", "qa"])(
+    "exposes only delegation_report to the guarded %s worker",
+    (agentId) => expect(delegationToolNames(agentId)).toEqual(["delegation_report"]),
+  );
+
+  it.each(["tester", "reviewer"])(
+    "adds bounded runtime evidence only to the guarded %s lane",
+    (agentId) =>
+      expect(delegationToolNames(agentId)).toEqual(["delegation_evidence", "delegation_report"]),
   );
 
   it("does not expose protected delegation tools to unclassified agents", () => {

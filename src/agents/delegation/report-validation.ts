@@ -48,7 +48,7 @@ export function validateDelegationNewlyDiscovered(params: {
     if (evidence.has(command.evidenceId)) {
       throw new DelegationReportContractError(
         "newly_discovered_invalid",
-        `Delegation report evidence ID is not globally unique: ${command.evidenceId}`,
+        `Delegation report evidence ID is duplicated within one report: ${command.evidenceId}`,
       );
     }
     evidence.set(command.evidenceId, { kind: "command", value: command });
@@ -57,7 +57,7 @@ export function validateDelegationNewlyDiscovered(params: {
     if (evidence.has(artifact.evidenceId)) {
       throw new DelegationReportContractError(
         "newly_discovered_invalid",
-        `Delegation report evidence ID is not globally unique: ${artifact.evidenceId}`,
+        `Delegation report evidence ID is duplicated within one report: ${artifact.evidenceId}`,
       );
     }
     evidence.set(artifact.evidenceId, { kind: "artifact", value: artifact });

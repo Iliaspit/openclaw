@@ -200,6 +200,9 @@ ARG OPENCLAW_VARIANT
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR
 ARG OPENCLAW_DOCKER_APT_UPGRADE
 ARG OPENCLAW_SOURCE_REVISION
+ARG OPENCLAW_PROVENANCE_ARTIFACT_URI
+ENV OPENCLAW_SOURCE_REVISION=${OPENCLAW_SOURCE_REVISION} \
+    OPENCLAW_PROVENANCE_ARTIFACT_URI=${OPENCLAW_PROVENANCE_ARTIFACT_URI}
 
 # OCI base-image metadata for downstream image consumers.
 # If you change these annotations, also update:
@@ -211,7 +214,8 @@ LABEL org.opencontainers.image.source="https://github.com/openclaw/openclaw" \
   org.opencontainers.image.documentation="https://docs.openclaw.ai/install/docker" \
   org.opencontainers.image.licenses="MIT" \
   org.opencontainers.image.title="OpenClaw" \
-  org.opencontainers.image.description="OpenClaw gateway and CLI runtime container image"
+  org.opencontainers.image.description="OpenClaw gateway and CLI runtime container image" \
+  ai.openclaw.provenance.uri="${OPENCLAW_PROVENANCE_ARTIFACT_URI}"
 
 WORKDIR /app
 
@@ -230,7 +234,9 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
 
 RUN chown node:node /app
 
-COPY --from=runtime-assets --chown=node:node /app/dist ./dist
+COPY --from=runtime-assets /app/dist ./dist
+COPY --from=build /app/.artifacts/build-provenance/source-maps /opt/openclaw/build-provenance/source-maps
+COPY --from=build /app/.artifacts/build-provenance/validator /opt/openclaw/build-provenance/validator
 COPY --from=runtime-assets --chown=node:node /app/node_modules ./node_modules
 COPY --from=runtime-assets --chown=node:node /app/package.json .
 COPY --from=runtime-assets --chown=node:node /app/openclaw.mjs .
@@ -317,6 +323,14 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
 # Expose the CLI binary without requiring npm global writes as non-root.
 RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
  && chmod 755 /app/openclaw.mjs
+
+# Runtime evidence hashes these retained source maps, validator files, and
+# installed chunks directly. Keep their parent paths root-owned and read-only
+# so the unprivileged gateway cannot replace them between verification calls.
+RUN chown -R root:root /app/dist /opt/openclaw/build-provenance \
+ && chmod -R a-w /app/dist /opt/openclaw/build-provenance \
+ && chown root:root /app \
+ && chmod 0755 /app
 
 ENV NODE_ENV=production
 

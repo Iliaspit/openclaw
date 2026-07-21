@@ -136,8 +136,10 @@ When enabled, the Gateway becomes the authority for slice scope, assignments,
 candidate and wave identity, exact model and thinking policy, route ownership,
 receipts, correction budgets, remediation revisions, and rollback epochs. A
 guarded controller receives `delegation_guard`, while a guarded worker receives
-`delegation_report`. Workers cannot create authority records or approve their
-own report.
+`delegation_report`. Guarded tester and reviewer lanes also receive
+`delegation_evidence`, a bounded read-only view of their own protected
+assignment and installed runtime. Workers cannot create authority records or
+approve their own report.
 
 Guarded `sessions_spawn`, `sessions_send`, and `subagents` steer operations need
 an opaque, one-use delegation token. The Gateway binds each token to the exact
@@ -161,13 +163,30 @@ validation/finalization record.
 Rollback or validator-stack installation cannot advance the epoch while an
 assignment in the current epoch remains active.
 
+Use `delegation_report` with `action: "preflight"` before the one-shot
+submission. Preflight runs the same scope binding, assignment-scoped evidence
+canonicalization, coverage, current-candidate, and pinned-validator path as
+submission, but writes no receipt, validation, route, or rejection audit row.
+It returns the deterministic evidence namespace, local-to-canonical mapping,
+mapping digest, and semantic digest. A valid preflight can then be submitted
+with `action: "submit"`; omitting `action` preserves the legacy submit default.
+
+Evidence IDs in a new worker report are worker-local. The protected producer
+derives their canonical identity from the immutable assignment ID and rewrites
+every command, artifact, inspected/failed/newly-discovered scope, and finding
+reference consistently. The same local ID in two assignments therefore has
+two different canonical IDs. A duplicate command/artifact producer ID within
+one report, a missing reference, a caller-supplied `evidence_` namespace, or a
+mixed/cross-assignment namespace still fails closed. Legacy protected records
+remain valid and are not rewritten.
+
 `delegation_report` rejects invalid scope bindings, report structure,
 `newlyDiscovered` scope, writable-scope drift, and candidate drift before it
-uses the assignment's report slot. The Gateway records that rejection and its
-assignment mapping in one append-only transaction without creating a receipt,
-validation, or terminal route event. The worker can correct and resubmit during
-the same run. If the worker exits first, its controller can retrieve bounded
-rejection metadata with `delegation_guard` `validate_completion`.
+uses the assignment's report slot. A submit-time rejection is recorded with
+its assignment mapping in one append-only transaction without creating a
+receipt, validation, or terminal route event. If the worker exits first, its
+controller can retrieve bounded rejection metadata with `delegation_guard`
+`validate_completion`.
 
 Late dependencies belong in `scope.newlyDiscovered`. Use the same canonical
 repository-relative path for both `scopeId` and `path`, cite existing unique
@@ -175,6 +194,23 @@ evidence IDs, and normally use the `follow-up` disposition. Assigned scope IDs
 remain for `inspected`, `omitted`, or `failed` coverage. A `covered` late path
 requires successful, nontruncated command evidence or matching path-bound
 artifact evidence.
+
+`delegation_evidence` accepts no identity, path, command, Docker, or ledger
+selector from the worker. The Gateway derives the exact tester/reviewer
+assignment from the authenticated child session and rejects stale candidates,
+waves, epochs, controller bindings, or cross-session calls. Its schema-checked
+snapshot contains the candidate fingerprint, validator/policy stack, protected
+assignment/report/validation/audit linkage, relevant immutable repair and
+discovery-adoption identities, installed build provenance and container/image
+identity, fixed health/readiness and bounded regression checks, and only the
+caller's sandbox cleanup inventory. A stable digest excludes the separate
+observation timestamp. Live probes are labeled as current facts; regression
+contracts are labeled as installed-artifact contract attestations and bind the
+claim to the twice-verified root-owned runtime chunks, retained source maps and
+validator bytes, provenance manifest, image-bound source revision and retained
+URI, validator, and policy. The tool does not expose the Docker socket, source
+checkout, raw files, raw SQLite/WAL data, configuration mutation, repair actions,
+or arbitrary host execution.
 
 Format correction is available only after a rejected or blocked receipt and
 must preserve that receipt's semantic digest. A pre-receipt rejection has no

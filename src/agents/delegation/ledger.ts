@@ -40,6 +40,7 @@ import {
 import { resolveDelegationGuardPrincipal } from "./policy.js";
 import {
   boundDelegationReportText,
+  DelegationReportContractError,
   normalizeDelegationReportIssues,
   resolveDelegationReportErrorCode,
 } from "./report-result.js";
@@ -6104,6 +6105,75 @@ export class DelegationLedger {
     return this.appendInitialReceiptRecord(params);
   }
 
+  inspectInitialReportSlot(params: { assignmentId: string; report: DelegationWorkerReport }):
+    | { state: "open"; semanticDigest: string }
+    | {
+        state: "idempotent";
+        receiptId: string;
+        semanticDigest: string;
+        validation: ReturnType<DelegationLedger["getValidationForReceipt"]>;
+      } {
+    this.assertActiveStack();
+    const assignment = this.getAssignment(params.assignmentId);
+    if (!assignment || assignment.epoch !== this.currentEpoch()) {
+      throw new DelegationReportContractError(
+        "report_slot_closed",
+        "Delegation report cannot bind a missing or stale assignment.",
+      );
+    }
+    validateDelegationReportCoverage(params.report);
+    validateDelegationNewlyDiscovered({
+      report: params.report,
+      assignedScope: assignment.scopeUnits,
+    });
+    const assigned = [...params.report.scope.assigned].toSorted();
+    const authoritativeScope = [...assignment.scopeUnits].toSorted();
+    if (canonicalDelegationJson(assigned) !== canonicalDelegationJson(authoritativeScope)) {
+      throw new DelegationReportContractError(
+        "report_slot_conflict",
+        "Delegation report assigned scope does not match the protected assignment.",
+      );
+    }
+    const reportJson = canonicalDelegationJson(params.report);
+    const semanticDigest = hashDelegationReportSemantics(params.report);
+    const existing = this.initialReceiptForAssignment(params.assignmentId);
+    if (existing) {
+      if (existing.semanticDigest !== semanticDigest || existing.reportJson !== reportJson) {
+        throw new DelegationReportContractError(
+          "report_slot_conflict",
+          "A delegation assignment can submit only one byte-identical immutable initial report.",
+        );
+      }
+      return {
+        state: "idempotent",
+        receiptId: existing.receiptId,
+        semanticDigest,
+        validation: this.getValidationForReceipt(existing.receiptId),
+      };
+    }
+    const terminalRoute = this.db
+      .prepare(
+        `SELECT 1 FROM route_events
+         WHERE assignment_id = ?
+           AND kind IN ('route_rejected', 'validation_rejected', 'timeout', 'completed')
+         LIMIT 1`,
+      )
+      .get(params.assignmentId);
+    const remediationFrozen =
+      assignment.waveId && assignment.purpose !== "remediation"
+        ? this.db
+            .prepare(`SELECT 1 FROM remediation_revisions WHERE source_wave_id = ? LIMIT 1`)
+            .get(assignment.waveId)
+        : undefined;
+    if (terminalRoute || remediationFrozen) {
+      throw new DelegationReportContractError(
+        "report_slot_closed",
+        "Delegation report arrived after its route or review wave was closed.",
+      );
+    }
+    return { state: "open", semanticDigest };
+  }
+
   appendRejectedReceipt(params: {
     assignmentId: string;
     report: DelegationWorkerReport;
@@ -6156,53 +6226,14 @@ export class DelegationLedger {
     semanticDigest?: string;
     createdAt?: number;
   }): string {
-    const assignment = this.getAssignment(params.assignmentId);
-    if (!assignment || assignment.epoch !== this.currentEpoch()) {
-      throw new Error("Delegation report cannot bind a missing or stale assignment.");
-    }
-    const assigned = [...params.report.scope.assigned].toSorted();
-    const authoritativeScope = [...assignment.scopeUnits].toSorted();
-    if (canonicalDelegationJson(assigned) !== canonicalDelegationJson(authoritativeScope)) {
-      throw new Error("Delegation report assigned scope does not match the protected assignment.");
-    }
+    const slot = this.inspectInitialReportSlot(params);
     const reportJson = canonicalDelegationJson(params.report);
     const semanticDigest = hashDelegationReportSemantics(params.report);
     if (params.semanticDigest && params.semanticDigest !== semanticDigest) {
       throw new Error("Caller-provided report digest does not match runtime-owned semantics.");
     }
-    const existing = this.db
-      .prepare(
-        `SELECT receipt_id AS receiptId, semantic_digest AS semanticDigest,
-                report_json AS reportJson
-         FROM receipts
-         WHERE assignment_id = ? AND correction_of IS NULL
-         LIMIT 1`,
-      )
-      .get(params.assignmentId) as
-      | { receiptId: string; semanticDigest: string; reportJson: string }
-      | undefined;
-    if (existing) {
-      if (existing.semanticDigest === semanticDigest && existing.reportJson === reportJson) {
-        return existing.receiptId;
-      }
-      throw new Error("A delegation assignment can submit only one immutable initial report.");
-    }
-    const terminalRoute = this.db
-      .prepare(
-        `SELECT 1 FROM route_events
-         WHERE assignment_id = ?
-           AND kind IN ('route_rejected', 'validation_rejected', 'timeout', 'completed')
-         LIMIT 1`,
-      )
-      .get(params.assignmentId);
-    const remediationFrozen =
-      assignment.waveId && assignment.purpose !== "remediation"
-        ? this.db
-            .prepare(`SELECT 1 FROM remediation_revisions WHERE source_wave_id = ? LIMIT 1`)
-            .get(assignment.waveId)
-        : undefined;
-    if (terminalRoute || remediationFrozen) {
-      throw new Error("Delegation report arrived after its route or review wave was closed.");
+    if (slot.state === "idempotent") {
+      return slot.receiptId;
     }
     const createdAt = params.createdAt ?? Date.now();
     const receiptId = createDelegationRecordId("receipt", {
@@ -6731,9 +6762,187 @@ export class DelegationLedger {
       remediationRevisions: count("remediation_revisions"),
     };
   }
+
+  captureProtectedEvidenceForAssignment(params: { assignmentId: string; childSessionKey: string }) {
+    this.assertActiveStack();
+    this.assertNoContradictoryInitialReceiptsAfterTerminalRoute();
+    this.assertCompletedCorrectionsHaveExactSupersession();
+    this.assertDiscoveryReceiptAdoptionsValid();
+    const assignment = this.getAssignment(params.assignmentId);
+    if (!assignment || assignment.epoch !== this.currentEpoch()) {
+      throw new Error("Runtime evidence requires a current protected assignment.");
+    }
+    const slice = this.getSliceScope(assignment.sliceId);
+    if (
+      !slice ||
+      slice.epoch !== assignment.epoch ||
+      slice.controllerAgentId !== assignment.controllerAgentId ||
+      slice.controllerSessionKey !== assignment.controllerSessionKey
+    ) {
+      throw new Error("Runtime evidence assignment does not match its protected controller slice.");
+    }
+    if (!assignment.candidateId || !assignment.waveId) {
+      throw new Error("Runtime evidence is restricted to candidate-bound frozen-wave assignments.");
+    }
+    const candidate = this.getCandidateRecord(assignment.candidateId);
+    const wave = this.db
+      .prepare(`SELECT slice_id, candidate_id, epoch FROM waves WHERE wave_id = ?`)
+      .get(assignment.waveId) as
+      | { slice_id: string; candidate_id: string; epoch: number | bigint }
+      | undefined;
+    if (
+      !candidate ||
+      candidate.sliceId !== assignment.sliceId ||
+      candidate.epoch !== assignment.epoch ||
+      !wave ||
+      wave.slice_id !== assignment.sliceId ||
+      wave.candidate_id !== assignment.candidateId ||
+      toNumber(wave.epoch) !== assignment.epoch
+    ) {
+      throw new Error(
+        "Runtime evidence assignment candidate or frozen wave is stale or mismatched.",
+      );
+    }
+    const bindingRows = this.db
+      .prepare(
+        `SELECT binding_id AS bindingId, child_session_key AS childSessionKey,
+                run_id AS runId
+         FROM assignment_bindings WHERE assignment_id = ?
+         ORDER BY bound_at, binding_id`,
+      )
+      .all(assignment.assignmentId) as Array<{
+      bindingId: string;
+      childSessionKey: string;
+      runId: string | null;
+    }>;
+    if (
+      bindingRows.length === 0 ||
+      bindingRows.some((row) => row.childSessionKey !== params.childSessionKey)
+    ) {
+      throw new Error("Runtime evidence caller is not the assignment-bound child session.");
+    }
+    const routeEvents = this.db
+      .prepare(
+        `SELECT event_id AS eventId, kind FROM route_events
+         WHERE assignment_id = ? ORDER BY created_at, event_id`,
+      )
+      .all(assignment.assignmentId) as Array<{ eventId: string; kind: string }>;
+    const reportLinks = this.db
+      .prepare(
+        `SELECT r.receipt_id AS receiptId, r.semantic_digest AS semanticDigest,
+                v.validation_id AS validationId, v.outcome,
+                v.validator_id AS validatorId, v.validator_version AS validatorVersion,
+                v.validator_digest AS validatorDigest
+         FROM receipts r LEFT JOIN validations v ON v.receipt_id = r.receipt_id
+         WHERE r.assignment_id = ? ORDER BY r.created_at, r.receipt_id`,
+      )
+      .all(assignment.assignmentId) as Array<{
+      receiptId: string;
+      semanticDigest: string;
+      validationId: string | null;
+      outcome: DelegationValidationOutcome | null;
+      validatorId: string | null;
+      validatorVersion: string | null;
+      validatorDigest: string | null;
+    }>;
+    const auditEvents = this.db
+      .prepare(
+        `SELECT audit_event_id AS auditEventId, kind FROM assignment_audit_events
+         WHERE assignment_id = ? ORDER BY created_at, audit_event_id`,
+      )
+      .all(assignment.assignmentId) as Array<{ auditEventId: string; kind: string }>;
+    const terminal = this.db
+      .prepare(
+        `SELECT terminal_receipt_id AS terminalReceiptId,
+                accepted_receipt_id AS acceptedReceiptId,
+                result_receipt_id AS resultReceiptId
+         FROM terminal_receipts WHERE assignment_id = ?`,
+      )
+      .get(assignment.assignmentId) as
+      | { terminalReceiptId: string; acceptedReceiptId: string; resultReceiptId: string }
+      | undefined;
+    const adoption = this.discoveryReceiptAdoptionForSlice(assignment.sliceId);
+    const repairRecords = this.db
+      .prepare(
+        `SELECT e.repair_event_id AS repairEventId,
+                r.repair_receipt_id AS repairReceiptId,
+                e.assignment_id AS assignmentId,
+                e.authorization_digest AS authorizationDigest,
+                e.corruption_fingerprint AS corruptionFingerprint,
+                r.outcome
+         FROM delegation_ledger_repair_events e
+         JOIN delegation_ledger_repair_receipts r ON r.repair_event_id = e.repair_event_id
+         JOIN assignments a ON a.assignment_id = e.assignment_id
+         WHERE a.controller_session_key = ? OR a.slice_id = ?
+         ORDER BY e.created_at, e.repair_event_id`,
+      )
+      .all(assignment.controllerSessionKey, assignment.sliceId) as Array<{
+      repairEventId: string;
+      repairReceiptId: string;
+      assignmentId: string;
+      authorizationDigest: string;
+      corruptionFingerprint: string;
+      outcome: string;
+    }>;
+    return {
+      contractVersion: DELEGATION_CONTRACT_VERSION,
+      epoch: assignment.epoch,
+      stack: {
+        validatorId: this.guard.validator.id,
+        validatorVersion: this.guard.validator.version,
+        validatorDigest: this.guard.validator.sha256,
+        policyDigest: this.policyDigest,
+      },
+      assignment: {
+        assignmentId: assignment.assignmentId,
+        sliceId: assignment.sliceId,
+        candidateId: assignment.candidateId,
+        waveId: assignment.waveId,
+        controllerAgentId: assignment.controllerAgentId,
+        controllerSessionKey: assignment.controllerSessionKey,
+        workerAgentId: assignment.workerAgentId,
+        role: assignment.role,
+        purpose: assignment.purpose,
+        routeFamilyId: assignment.routeFamilyId,
+        epoch: assignment.epoch,
+      },
+      scopeDigest: slice.scope.scopeDigest,
+      candidate: { candidateId: assignment.candidateId, fingerprint: candidate.fingerprint },
+      waveId: assignment.waveId,
+      bindings: bindingRows,
+      routeEvents,
+      reportLinks,
+      auditEvents,
+      terminal: terminal ?? null,
+      discoveryAdoption: adoption
+        ? {
+            adoptionId: adoption.adoptionId,
+            sourceReceiptId: adoption.sourceReceiptId,
+            sourceValidationId: adoption.sourceValidationId,
+            authorizationDigest: adoption.authorizationDigest,
+            idempotencyKey: adoption.idempotencyKey,
+            scopeDigest: adoption.scopeDigest,
+            baselineFingerprintDigest: adoption.baselineFingerprintDigest,
+          }
+        : null,
+      repairRecords,
+      integrity: { strictReadOnlyValidation: true as const },
+    };
+  }
 }
 
 const ledgerCache = new Map<string, DelegationLedger>();
+
+export function getCachedDelegationLedger(params: {
+  guard: DelegationGuardConfig;
+  policyDigest: string;
+  stateDir?: string;
+}): DelegationLedger | undefined {
+  const pathname = path.join(params.stateDir ?? resolveStateDir(), "delegation", "ledger.sqlite");
+  const cached = ledgerCache.get(pathname);
+  cached?.assertConfiguredStack({ guard: params.guard, policyDigest: params.policyDigest });
+  return cached;
+}
 
 export function openDelegationLedger(params: {
   guard: DelegationGuardConfig;

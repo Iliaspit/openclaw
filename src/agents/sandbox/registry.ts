@@ -133,6 +133,16 @@ export async function readRegistry(): Promise<SandboxRegistry> {
   };
 }
 
+export async function readRegistryStrict(): Promise<SandboxRegistry> {
+  const registry = await readRegistryFromFile<SandboxRegistryEntry>(
+    SANDBOX_REGISTRY_PATH,
+    "strict",
+  );
+  return {
+    entries: registry.entries.map((entry) => normalizeSandboxRegistryEntry(entry)),
+  };
+}
+
 function upsertEntry<T extends UpsertEntry>(entries: T[], entry: T): T[] {
   const existing = entries.find((item) => item.containerName === entry.containerName);
   const next = entries.filter((item) => item.containerName !== entry.containerName);
