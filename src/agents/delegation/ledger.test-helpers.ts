@@ -290,6 +290,7 @@ export function issueAssignment(params: {
   initialRouteKind?: DelegationRouteKind;
   targetSessionKey?: string;
   requiredModel?: string;
+  issuedAt?: number;
 }) {
   const worker = WORKERS[params.role];
   return params.fixture.ledger.issueAssignment({
@@ -304,6 +305,7 @@ export function issueAssignment(params: {
     requiredModel: params.requiredModel ?? "openai/gpt-5.4",
     workspaceAccess: worker.workspaceAccess,
     purpose: params.purpose,
+    ...(params.issuedAt === undefined ? {} : { issuedAt: params.issuedAt }),
     ...(params.remediationRevisionId
       ? { remediationRevisionId: params.remediationRevisionId }
       : {}),
@@ -321,6 +323,9 @@ export function startAssignment(params: {
   delegationToken: string;
   childSessionKey?: string;
   runId?: string;
+  boundAt?: number;
+  acceptedAt?: number;
+  acceptedPayload?: unknown;
 }) {
   const childSessionKey =
     params.childSessionKey ??
@@ -337,10 +342,13 @@ export function startAssignment(params: {
     assignmentId: params.assignment.assignmentId,
     childSessionKey,
     runId,
+    ...(params.boundAt === undefined ? {} : { boundAt: params.boundAt }),
   });
   params.fixture.ledger.appendRouteEvent({
     assignmentId: params.assignment.assignmentId,
     kind: "accepted",
+    ...(params.acceptedAt === undefined ? {} : { createdAt: params.acceptedAt }),
+    ...(params.acceptedPayload === undefined ? {} : { payload: params.acceptedPayload }),
   });
   return { childSessionKey, runId };
 }

@@ -24,6 +24,7 @@ vi.mock("./register.maintenance.js", () => ({
     program.command("dashboard");
     program.command("reset");
     program.command("uninstall");
+    program.command("delegation-ledger").command("adopt-discovery");
   },
 }));
 
@@ -77,6 +78,7 @@ describe("command-registry", () => {
     expect(names).toContain("config");
     expect(names).toContain("agents");
     expect(names).toContain("backup");
+    expect(names).toContain("delegation-ledger");
     expect(names).toContain("mcp");
     expect(names).toContain("sessions");
     expect(names).toContain("tasks");
@@ -136,6 +138,7 @@ describe("command-registry", () => {
     expect(names).toContain("dashboard");
     expect(names).toContain("reset");
     expect(names).toContain("uninstall");
+    expect(names).toContain("delegation-ledger");
     expect(names).not.toContain("maintenance");
   });
 
@@ -161,6 +164,12 @@ describe("command-registry", () => {
 
     const found = await registerCoreCliByName(program, testProgramContext, "dashboard");
     expect(found).toBe(true);
-    expect(namesOf(program)).toEqual(["doctor", "dashboard", "reset", "uninstall"]);
+    expect(namesOf(program)).toEqual([
+      "doctor",
+      "dashboard",
+      "reset",
+      "uninstall",
+      "delegation-ledger",
+    ]);
   });
 });

@@ -91,7 +91,10 @@ export type AuthorizedDelegationRoute = {
   };
 };
 
-export function resolveDelegationRuntime(config: OpenClawConfig): DelegationRuntime | undefined {
+export function resolveDelegationRuntime(
+  config: OpenClawConfig,
+  options: { stateDir?: string } = {},
+): DelegationRuntime | undefined {
   const guard = resolveDelegationGuardConfig(config);
   if (!guard) {
     return undefined;
@@ -104,7 +107,11 @@ export function resolveDelegationRuntime(config: OpenClawConfig): DelegationRunt
   return {
     guard,
     policyDigest,
-    ledger: openConfiguredDelegationLedger({ guard, policyDigest }),
+    ledger: openConfiguredDelegationLedger({
+      guard,
+      policyDigest,
+      ...(options.stateDir ? { stateDir: options.stateDir } : {}),
+    }),
   };
 }
 
@@ -221,11 +228,15 @@ export function resolveDelegationCallerAgentId(params: {
 
 export function requireDelegationController(params: {
   config: OpenClawConfig;
+  stateDir?: string;
   agentSessionKey?: string;
   requesterAgentIdOverride?: string;
   effectiveThinking?: string;
 }): { runtime: DelegationRuntime; controllerAgentId: string } {
-  const runtime = resolveDelegationRuntime(params.config);
+  const runtime = resolveDelegationRuntime(
+    params.config,
+    params.stateDir ? { stateDir: params.stateDir } : {},
+  );
   if (!runtime) {
     throw new Error("Delegation guard is not enabled.");
   }

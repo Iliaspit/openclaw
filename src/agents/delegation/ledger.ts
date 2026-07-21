@@ -110,6 +110,100 @@ export type DelegationGatewayDispatchClaim = {
   outcome?: DelegationGatewayDispatchOutcome;
 };
 
+export type DelegationDiscoveryReceiptAdoption = {
+  adoptionId: string;
+  targetSliceId: string;
+  targetAssignmentId: string;
+  sourceSliceId: string;
+  sourceAssignmentId: string;
+  sourceReceiptId: string;
+  sourceTerminalReceiptId: string;
+  sourceValidationId: string;
+  sourceBlockingAssignmentId: string;
+  sourceBlockingAcceptedEventId: string;
+  sourceBlockingAcceptedEventAppendSequence: number;
+  sourceBlockingEventId: string;
+  sourceBlockingEventAppendSequence: number;
+  sourceBlockingBindingId: string;
+  sourceBlockingTerminalResultId: string;
+  sourceBlockingTerminalResultDigest: string;
+  sourceBlockingRunId: string;
+  sourceBlockingChildSessionKey: string;
+  targetReconciliationEventId: string;
+  targetReconciliationEventAppendSequence: number;
+  targetReconciliationCreatedAt: number;
+  scopeDigest: string;
+  baselineFingerprintDigest: string;
+  authorizationDigest: string;
+  idempotencyKey: string;
+  createdAt: number;
+  alreadyAdopted: boolean;
+  discoveryPrerequisiteSatisfied: true;
+};
+
+const DISCOVERY_RECEIPT_ADOPTION_VERSION =
+  "openclaw-discovery-receipt-adoption-authorization-v1" as const;
+
+type DiscoveryReceiptAdoptionFacts = {
+  controllerAgentId: string;
+  controllerSessionKey: string;
+  targetSliceId: string;
+  targetAssignmentId: string;
+  sourceSliceId: string;
+  sourceAssignmentId: string;
+  sourceReceiptId: string;
+  sourceTerminalReceiptId: string;
+  sourceValidationId: string;
+  sourceBlockingAssignmentId: string;
+  sourceBlockingAcceptedEventId: string;
+  sourceBlockingAcceptedEventAppendSequence: number;
+  sourceBlockingEventId: string;
+  sourceBlockingEventAppendSequence: number;
+  sourceBlockingBindingId: string;
+  sourceBlockingTerminalResultId: string;
+  sourceBlockingTerminalResultDigest: string;
+  sourceBlockingRunId: string;
+  sourceBlockingChildSessionKey: string;
+  targetReconciliationEventId: string;
+  targetReconciliationEventAppendSequence: number;
+  targetReconciliationCreatedAt: number;
+  sourceSemanticDigest: string;
+  scopeDigest: string;
+  baselineFingerprintDigest: string;
+  epoch: number;
+};
+
+type DiscoveryReceiptAdoptionRow = {
+  adoption_id: string;
+  target_slice_id: string;
+  target_assignment_id: string;
+  source_slice_id: string;
+  source_assignment_id: string;
+  source_receipt_id: string;
+  source_terminal_receipt_id: string;
+  source_validation_id: string;
+  source_blocking_assignment_id: string;
+  source_blocking_accepted_event_id: string;
+  source_blocking_accepted_event_append_sequence: number | bigint;
+  source_blocking_event_id: string;
+  source_blocking_event_append_sequence: number | bigint;
+  source_blocking_binding_id: string;
+  source_blocking_terminal_result_id: string;
+  source_blocking_terminal_result_digest: string;
+  source_blocking_run_id: string;
+  source_blocking_child_session_key: string;
+  target_reconciliation_event_id: string;
+  target_reconciliation_event_append_sequence: number | bigint;
+  target_reconciliation_created_at: number | bigint;
+  scope_digest: string;
+  baseline_fingerprint_digest: string;
+  authorization_json: string;
+  authorization_digest: string;
+  idempotency_key: string;
+  epoch: number | bigint;
+  created_at: number | bigint;
+};
+
 function compareSemanticVersions(left: string, right: string): number | undefined {
   const parse = (value: string): [number, number, number] | undefined => {
     const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(value);
@@ -546,6 +640,36 @@ export function ensureDelegationLedgerSchema(db: DatabaseSync) {
       result_receipt_json TEXT NOT NULL,
       created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS discovery_receipt_adoptions (
+      adoption_id TEXT PRIMARY KEY,
+      target_slice_id TEXT NOT NULL UNIQUE REFERENCES slices(slice_id),
+      target_assignment_id TEXT NOT NULL UNIQUE REFERENCES assignments(assignment_id),
+      source_slice_id TEXT NOT NULL REFERENCES slices(slice_id),
+      source_assignment_id TEXT NOT NULL REFERENCES assignments(assignment_id),
+      source_receipt_id TEXT NOT NULL REFERENCES receipts(receipt_id),
+      source_terminal_receipt_id TEXT NOT NULL REFERENCES terminal_receipts(terminal_receipt_id),
+      source_validation_id TEXT NOT NULL REFERENCES validations(validation_id),
+      source_blocking_assignment_id TEXT NOT NULL REFERENCES assignments(assignment_id),
+      source_blocking_accepted_event_id TEXT NOT NULL REFERENCES route_events(event_id),
+      source_blocking_accepted_event_append_sequence INTEGER NOT NULL,
+      source_blocking_event_id TEXT NOT NULL REFERENCES route_events(event_id),
+      source_blocking_event_append_sequence INTEGER NOT NULL,
+      source_blocking_binding_id TEXT NOT NULL REFERENCES assignment_bindings(binding_id),
+      source_blocking_terminal_result_id TEXT NOT NULL REFERENCES terminal_results(terminal_result_id),
+      source_blocking_terminal_result_digest TEXT NOT NULL,
+      source_blocking_run_id TEXT NOT NULL,
+      source_blocking_child_session_key TEXT NOT NULL,
+      target_reconciliation_event_id TEXT NOT NULL REFERENCES route_events(event_id),
+      target_reconciliation_event_append_sequence INTEGER NOT NULL,
+      target_reconciliation_created_at INTEGER NOT NULL,
+      scope_digest TEXT NOT NULL,
+      baseline_fingerprint_digest TEXT NOT NULL,
+      authorization_json TEXT NOT NULL,
+      authorization_digest TEXT NOT NULL UNIQUE,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      epoch INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS remediation_revisions (
       revision_id TEXT PRIMARY KEY,
       slice_id TEXT NOT NULL REFERENCES slices(slice_id),
@@ -739,6 +863,7 @@ export function ensureDelegationLedgerSchema(db: DatabaseSync) {
     "validations",
     "terminal_results",
     "terminal_receipts",
+    "discovery_receipt_adoptions",
     "remediation_revisions",
     "correction_uses",
     "delegation_ledger_repair_events",
@@ -1659,7 +1784,23 @@ export class DelegationLedger {
          WHERE a.slice_id = ? AND a.purpose = ?`,
       )
       .all(sliceId, purpose) as Array<{ accepted_report_json: string }>;
-    return rows.some((row) => isProgressableTerminalReport(row.accepted_report_json, options));
+    if (rows.some((row) => isProgressableTerminalReport(row.accepted_report_json, options))) {
+      return true;
+    }
+    if (purpose !== "discovery") {
+      return false;
+    }
+    const adoptedRows = this.db
+      .prepare(
+        `SELECT t.accepted_report_json
+         FROM discovery_receipt_adoptions d
+         JOIN terminal_receipts t ON t.terminal_receipt_id = d.source_terminal_receipt_id
+         WHERE d.target_slice_id = ?`,
+      )
+      .all(sliceId) as Array<{ accepted_report_json: string }>;
+    return adoptedRows.some((row) =>
+      isProgressableTerminalReport(row.accepted_report_json, options),
+    );
   }
 
   private hasProgressableTerminalWaveRole(
@@ -2356,6 +2497,774 @@ export class DelegationLedger {
         },
       });
     });
+  }
+
+  private resolveDiscoveryReceiptAdoptionFacts(params: {
+    targetAssignmentId: string;
+    sourceReceiptId: string;
+    sourceBlockingAssignmentId: string;
+    expectedEpoch: number;
+  }): DiscoveryReceiptAdoptionFacts {
+    const target = this.getAssignment(params.targetAssignmentId);
+    const sourceReceipt = this.getReceipt(params.sourceReceiptId);
+    const source = sourceReceipt ? this.getAssignment(sourceReceipt.assignmentId) : undefined;
+    const sourceBlocking = this.getAssignment(params.sourceBlockingAssignmentId);
+    if (!target || !sourceReceipt || !source || !sourceBlocking) {
+      throw new Error(
+        "Discovery receipt adoption requires existing protected source, blocker, target, and receipt records.",
+      );
+    }
+    if (
+      target.epoch !== params.expectedEpoch ||
+      source.epoch !== params.expectedEpoch ||
+      sourceBlocking.epoch !== params.expectedEpoch ||
+      target.epoch !== source.epoch
+    ) {
+      throw new Error("Discovery receipt adoption rejects stale or cross-epoch evidence.");
+    }
+    if (target.assignmentId === source.assignmentId || target.sliceId === source.sliceId) {
+      throw new Error("Discovery receipt adoption requires a distinct corrected target slice.");
+    }
+    const sourceSlice = this.getSliceScope(source.sliceId);
+    const targetSlice = this.getSliceScope(target.sliceId);
+    if (
+      !sourceSlice ||
+      !targetSlice ||
+      sourceSlice.epoch !== params.expectedEpoch ||
+      targetSlice.epoch !== params.expectedEpoch ||
+      source.controllerAgentId !== target.controllerAgentId ||
+      source.controllerSessionKey !== target.controllerSessionKey ||
+      sourceBlocking.controllerAgentId !== target.controllerAgentId ||
+      sourceBlocking.controllerSessionKey !== target.controllerSessionKey ||
+      sourceSlice.controllerAgentId !== targetSlice.controllerAgentId ||
+      sourceSlice.controllerSessionKey !== targetSlice.controllerSessionKey ||
+      source.controllerAgentId !== sourceSlice.controllerAgentId ||
+      source.controllerSessionKey !== sourceSlice.controllerSessionKey
+    ) {
+      throw new Error("Discovery receipt adoption requires one exact controller and session.");
+    }
+    if (
+      sourceBlocking.assignmentId === source.assignmentId ||
+      sourceBlocking.sliceId !== source.sliceId ||
+      sourceBlocking.purpose !== "verification" ||
+      sourceBlocking.role !== "reviewer" ||
+      !sourceBlocking.candidateId ||
+      !sourceBlocking.waveId
+    ) {
+      throw new Error(
+        "Discovery receipt adoption requires the later rejected reviewer verification from the source slice.",
+      );
+    }
+    if (
+      source.purpose !== "discovery" ||
+      target.purpose !== "discovery" ||
+      source.role !== "helper" ||
+      target.role !== "helper" ||
+      source.candidateId ||
+      target.candidateId ||
+      source.waveId ||
+      target.waveId ||
+      source.workerAgentId !== target.workerAgentId ||
+      source.requiredThinking !== target.requiredThinking ||
+      source.requiredModel !== target.requiredModel ||
+      source.workspaceAccess !== "ro" ||
+      target.workspaceAccess !== "ro" ||
+      canonicalDelegationJson([...source.scopeUnits].toSorted()) !==
+        canonicalDelegationJson([...target.scopeUnits].toSorted())
+    ) {
+      throw new Error("Discovery receipt adoption requires matching helper discovery assignments.");
+    }
+    if (
+      sourceSlice.repositoryRoot !== targetSlice.repositoryRoot ||
+      sourceSlice.scope.scopeDigest !== targetSlice.scope.scopeDigest ||
+      sourceSlice.scope.canonicalJson !== targetSlice.scope.canonicalJson
+    ) {
+      throw new Error("Discovery receipt adoption requires an exact canonical scope match.");
+    }
+
+    const baselineForSlice = (sliceId: string) =>
+      this.db
+        .prepare(
+          `SELECT b.baseline_id AS baselineId, c.fingerprint_json AS fingerprintJson,
+                  s.snapshot_digest AS snapshotDigest, s.snapshot_json AS snapshotJson
+           FROM slice_baselines b
+           JOIN candidates c ON c.candidate_id = b.candidate_id
+           JOIN candidate_snapshots s ON s.candidate_id = b.candidate_id
+           WHERE b.slice_id = ?`,
+        )
+        .get(sliceId) as
+        | {
+            baselineId: string;
+            fingerprintJson: string;
+            snapshotDigest: string;
+            snapshotJson: string;
+          }
+        | undefined;
+    const sourceBaseline = baselineForSlice(source.sliceId);
+    const targetBaseline = baselineForSlice(target.sliceId);
+    if (
+      !sourceBaseline ||
+      !targetBaseline ||
+      sourceBaseline.fingerprintJson !== targetBaseline.fingerprintJson ||
+      sourceBaseline.snapshotDigest !== targetBaseline.snapshotDigest ||
+      sourceBaseline.snapshotJson !== targetBaseline.snapshotJson
+    ) {
+      throw new Error(
+        "Discovery receipt adoption requires byte-identical protected baseline fingerprints and inventories.",
+      );
+    }
+    const baselineFingerprintDigest = hashDelegationIdentity(
+      "delegation-discovery-receipt-adoption-baseline-v1",
+      {
+        fingerprint: JSON.parse(sourceBaseline.fingerprintJson) as unknown,
+        snapshotDigest: sourceBaseline.snapshotDigest,
+      },
+    );
+
+    const sourceTerminal = this.db
+      .prepare(
+        `SELECT t.terminal_receipt_id AS terminalReceiptId,
+                t.accepted_semantic_digest AS semanticDigest,
+                t.accepted_report_json AS reportJson,
+                v.validation_id AS validationId,
+                v.validator_id AS validatorId,
+                v.validator_version AS validatorVersion,
+                v.validator_digest AS validatorDigest,
+                e.validator_id AS epochValidatorId,
+                e.validator_version AS epochValidatorVersion,
+                e.validator_digest AS epochValidatorDigest
+         FROM terminal_receipts t
+         JOIN validations v ON v.receipt_id = t.accepted_receipt_id
+         JOIN epoch_events e ON e.epoch = ?
+         WHERE t.assignment_id = ? AND t.accepted_receipt_id = ?
+           AND v.outcome = 'accepted'`,
+      )
+      .get(params.expectedEpoch, source.assignmentId, sourceReceipt.receiptId) as
+      | {
+          terminalReceiptId: string;
+          semanticDigest: string;
+          reportJson: string;
+          validationId: string;
+          validatorId: string;
+          validatorVersion: string;
+          validatorDigest: string;
+          epochValidatorId: string;
+          epochValidatorVersion: string;
+          epochValidatorDigest: string;
+        }
+      | undefined;
+    if (
+      !sourceTerminal ||
+      sourceTerminal.semanticDigest !== sourceReceipt.semanticDigest ||
+      sourceTerminal.reportJson !== sourceReceipt.reportJson ||
+      sourceTerminal.validatorId !== sourceTerminal.epochValidatorId ||
+      sourceTerminal.validatorVersion !== sourceTerminal.epochValidatorVersion ||
+      sourceTerminal.validatorDigest !== sourceTerminal.epochValidatorDigest ||
+      !this.isAssignmentCompleted(source.assignmentId) ||
+      !isProgressableTerminalReport(sourceTerminal.reportJson) ||
+      this.latestValidationRejectedRouteForAssignment(source.assignmentId, sourceReceipt.receiptId)
+    ) {
+      throw new Error(
+        "Discovery receipt adoption requires one completed, accepted, progressable protected report.",
+      );
+    }
+
+    const sourceBlocker = this.db
+      .prepare(
+        `SELECT blocking.event_id AS blockingEventId,
+                blocking.created_at AS blockingCreatedAt,
+                blocking_order.append_sequence AS blockingAppendSequence,
+                accepted.event_id AS acceptedEventId,
+                accepted.created_at AS acceptedCreatedAt,
+                accepted.payload_json AS acceptedPayloadJson,
+                accepted_order.append_sequence AS acceptedAppendSequence,
+                source_order.append_sequence AS sourceCompletedAppendSequence,
+                target_slice.created_at AS targetSliceCreatedAt,
+                blocking.payload_json AS blockingPayloadJson,
+                binding.binding_id AS bindingId,
+                binding.child_session_key AS childSessionKey,
+                binding.run_id AS bindingRunId,
+                binding.bound_at AS bindingBoundAt,
+                terminal.terminal_result_id AS terminalResultId,
+                terminal.run_id AS terminalRunId,
+                terminal.result_receipt_id AS resultReceiptId,
+                terminal.result_receipt_sha256 AS resultReceiptSha256,
+                terminal.result_receipt_bytes AS resultReceiptBytes,
+                terminal.result_receipt_captured_at AS resultReceiptCapturedAt,
+                terminal.result_receipt_json AS resultReceiptJson,
+                terminal.created_at AS terminalCreatedAt,
+                (SELECT COUNT(*) FROM route_events e
+                 WHERE e.assignment_id = ?) AS routeCount,
+                (SELECT COUNT(*) FROM route_events e
+                 WHERE e.assignment_id = ? AND e.kind = 'accepted') AS acceptedCount,
+                (SELECT COUNT(*) FROM route_events e
+                 WHERE e.assignment_id = ? AND e.kind = 'validation_rejected') AS rejectionCount,
+                (SELECT COUNT(*) FROM assignment_bindings b
+                 WHERE b.assignment_id = ?) AS bindingCount,
+                (SELECT COUNT(*) FROM receipts r
+                 WHERE r.assignment_id = ?) AS receiptCount,
+                (SELECT COUNT(*) FROM validations v
+                 JOIN receipts r ON r.receipt_id = v.receipt_id
+                 WHERE r.assignment_id = ?) AS validationCount,
+                (SELECT COUNT(*) FROM terminal_receipts t
+                 WHERE t.assignment_id = ?) AS terminalReceiptCount,
+                (SELECT COUNT(*) FROM terminal_results t
+                 WHERE t.assignment_id = ?) AS terminalResultCount
+         FROM route_events blocking
+         JOIN ledger_record_appends_v2 blocking_order
+           ON blocking_order.assignment_id = blocking.assignment_id
+          AND blocking_order.record_kind = 'route_event'
+          AND blocking_order.record_id = blocking.event_id
+         JOIN route_events accepted
+           ON accepted.assignment_id = blocking.assignment_id AND accepted.kind = 'accepted'
+         JOIN ledger_record_appends_v2 accepted_order
+           ON accepted_order.assignment_id = accepted.assignment_id
+          AND accepted_order.record_kind = 'route_event'
+          AND accepted_order.record_id = accepted.event_id
+         JOIN assignment_bindings binding
+           ON binding.assignment_id = blocking.assignment_id
+         JOIN terminal_results terminal
+           ON terminal.assignment_id = blocking.assignment_id
+         JOIN route_events source_completed
+           ON source_completed.assignment_id = ? AND source_completed.kind = 'completed'
+         JOIN ledger_record_appends_v2 source_order
+           ON source_order.assignment_id = source_completed.assignment_id
+          AND source_order.record_kind = 'route_event'
+          AND source_order.record_id = source_completed.event_id
+         JOIN slices target_slice ON target_slice.slice_id = ?
+         WHERE blocking.assignment_id = ? AND blocking.kind = 'validation_rejected'
+         ORDER BY blocking_order.append_sequence DESC LIMIT 1`,
+      )
+      .get(
+        sourceBlocking.assignmentId,
+        sourceBlocking.assignmentId,
+        sourceBlocking.assignmentId,
+        sourceBlocking.assignmentId,
+        sourceBlocking.assignmentId,
+        sourceBlocking.assignmentId,
+        sourceBlocking.assignmentId,
+        sourceBlocking.assignmentId,
+        source.assignmentId,
+        target.sliceId,
+        sourceBlocking.assignmentId,
+      ) as
+      | {
+          blockingEventId: string;
+          blockingCreatedAt: number | bigint;
+          blockingAppendSequence: number | bigint;
+          acceptedEventId: string;
+          acceptedCreatedAt: number | bigint;
+          acceptedPayloadJson: string;
+          acceptedAppendSequence: number | bigint;
+          sourceCompletedAppendSequence: number | bigint;
+          targetSliceCreatedAt: number | bigint;
+          blockingPayloadJson: string;
+          bindingId: string;
+          childSessionKey: string;
+          bindingRunId: string;
+          bindingBoundAt: number | bigint;
+          terminalResultId: string;
+          terminalRunId: string;
+          resultReceiptId: string;
+          resultReceiptSha256: string;
+          resultReceiptBytes: number | bigint;
+          resultReceiptCapturedAt: number | bigint;
+          resultReceiptJson: string;
+          terminalCreatedAt: number | bigint;
+          routeCount: number | bigint;
+          acceptedCount: number | bigint;
+          rejectionCount: number | bigint;
+          bindingCount: number | bigint;
+          receiptCount: number | bigint;
+          validationCount: number | bigint;
+          terminalReceiptCount: number | bigint;
+          terminalResultCount: number | bigint;
+        }
+      | undefined;
+    const blockingPayload = sourceBlocker
+      ? (JSON.parse(sourceBlocker.blockingPayloadJson) as { code?: unknown; runId?: unknown })
+      : undefined;
+    const acceptedPayload = sourceBlocker
+      ? (JSON.parse(sourceBlocker.acceptedPayloadJson) as {
+          childSessionKey?: unknown;
+          runId?: unknown;
+        })
+      : undefined;
+    const resultReceipt = sourceBlocker
+      ? (JSON.parse(sourceBlocker.resultReceiptJson) as {
+          id?: unknown;
+          kind?: unknown;
+          requiredRead?: unknown;
+          bytes?: unknown;
+          sha256?: unknown;
+          capturedAt?: unknown;
+          resultText?: unknown;
+        })
+      : undefined;
+    const resultReceiptBytes = sourceBlocker
+      ? toNumber(sourceBlocker.resultReceiptBytes)
+      : undefined;
+    const resultReceiptCapturedAt = sourceBlocker
+      ? toNumber(sourceBlocker.resultReceiptCapturedAt)
+      : undefined;
+    const exactResultReceipt =
+      sourceBlocker && typeof resultReceipt?.resultText === "string"
+        ? canonicalDelegationJson(resultReceipt) ===
+            canonicalDelegationJson({
+              id: sourceBlocker.resultReceiptId,
+              kind: "subagent_result",
+              requiredRead: true,
+              bytes: resultReceiptBytes,
+              sha256: sourceBlocker.resultReceiptSha256,
+              capturedAt: resultReceiptCapturedAt,
+              resultText: resultReceipt.resultText,
+            }) &&
+          Buffer.byteLength(resultReceipt.resultText, "utf8") === resultReceiptBytes &&
+          createHash("sha256").update(resultReceipt.resultText, "utf8").digest("hex") ===
+            sourceBlocker.resultReceiptSha256
+        : false;
+    if (
+      !sourceBlocker ||
+      !sourceBlocker.bindingRunId.trim() ||
+      !sourceBlocker.childSessionKey.trim() ||
+      canonicalDelegationJson(blockingPayload) !==
+        canonicalDelegationJson({
+          code: "missing-accepted-report",
+          runId: sourceBlocker.bindingRunId,
+        }) ||
+      canonicalDelegationJson(acceptedPayload) !==
+        canonicalDelegationJson({
+          childSessionKey: sourceBlocker.childSessionKey,
+          runId: sourceBlocker.bindingRunId,
+        }) ||
+      sourceBlocker.terminalRunId !== sourceBlocker.bindingRunId ||
+      !exactResultReceipt ||
+      toNumber(sourceBlocker.routeCount) !== 2 ||
+      toNumber(sourceBlocker.acceptedCount) !== 1 ||
+      toNumber(sourceBlocker.rejectionCount) !== 1 ||
+      toNumber(sourceBlocker.bindingCount) !== 1 ||
+      toNumber(sourceBlocker.receiptCount) !== 0 ||
+      toNumber(sourceBlocker.validationCount) !== 0 ||
+      toNumber(sourceBlocker.terminalReceiptCount) !== 0 ||
+      toNumber(sourceBlocker.terminalResultCount) !== 1 ||
+      toNumber(sourceBlocker.sourceCompletedAppendSequence) >=
+        toNumber(sourceBlocker.acceptedAppendSequence) ||
+      toNumber(sourceBlocker.acceptedAppendSequence) >=
+        toNumber(sourceBlocker.blockingAppendSequence) ||
+      sourceBlocking.issuedAt > toNumber(sourceBlocker.bindingBoundAt) ||
+      toNumber(sourceBlocker.bindingBoundAt) > toNumber(sourceBlocker.acceptedCreatedAt) ||
+      toNumber(sourceBlocker.acceptedCreatedAt) > toNumber(sourceBlocker.blockingCreatedAt) ||
+      toNumber(sourceBlocker.terminalCreatedAt) !== toNumber(sourceBlocker.blockingCreatedAt) ||
+      toNumber(sourceBlocker.blockingCreatedAt) >= toNumber(sourceBlocker.targetSliceCreatedAt) ||
+      toNumber(sourceBlocker.targetSliceCreatedAt) > target.issuedAt
+    ) {
+      throw new Error(
+        "Discovery receipt adoption requires the exact receipt-free reviewer terminal-result run followed by missing-accepted-report rejection and then the corrected target slice.",
+      );
+    }
+    const sourceBlockingTerminalResultDigest = hashDelegationIdentity(
+      "delegation-discovery-receipt-adoption-blocker-terminal-v1",
+      {
+        terminalResultId: sourceBlocker.terminalResultId,
+        runId: sourceBlocker.terminalRunId,
+        resultReceiptId: sourceBlocker.resultReceiptId,
+        resultReceiptSha256: sourceBlocker.resultReceiptSha256,
+        resultReceiptBytes,
+        resultReceiptCapturedAt,
+        resultReceiptJson: sourceBlocker.resultReceiptJson,
+        createdAt: toNumber(sourceBlocker.terminalCreatedAt),
+      },
+    );
+
+    const targetEvidence = this.db
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM token_uses WHERE assignment_id = ?) AS token_used,
+           (SELECT COUNT(*) FROM assignment_bindings WHERE assignment_id = ?) AS bound,
+           (SELECT COUNT(*) FROM gateway_dispatch_capabilities WHERE assignment_id = ?) AS capable,
+           (SELECT COUNT(*) FROM receipts WHERE assignment_id = ?) AS reported,
+           (SELECT COUNT(*) FROM terminal_results WHERE assignment_id = ?) AS terminal_result,
+           (SELECT COUNT(*) FROM route_events WHERE assignment_id = ?) AS route_count`,
+      )
+      .get(
+        target.assignmentId,
+        target.assignmentId,
+        target.assignmentId,
+        target.assignmentId,
+        target.assignmentId,
+        target.assignmentId,
+      ) as Record<string, number | bigint>;
+    if (
+      toNumber(targetEvidence.token_used) !== 0 ||
+      toNumber(targetEvidence.bound) !== 0 ||
+      toNumber(targetEvidence.capable) !== 0 ||
+      toNumber(targetEvidence.reported) !== 0 ||
+      toNumber(targetEvidence.terminal_result) !== 0 ||
+      toNumber(targetEvidence.route_count) !== 1
+    ) {
+      throw new Error(
+        "Discovery receipt adoption requires one operator-reconciled assignment with no execution evidence.",
+      );
+    }
+    const reconciliation = this.db
+      .prepare(
+        `SELECT e.event_id AS eventId, e.kind, e.payload_json AS payloadJson,
+                e.created_at AS createdAt, o.append_sequence AS appendSequence
+         FROM route_events e
+         JOIN ledger_record_appends_v2 o
+           ON o.assignment_id = e.assignment_id
+          AND o.record_kind = 'route_event'
+          AND o.record_id = e.event_id
+         WHERE e.assignment_id = ? LIMIT 1`,
+      )
+      .get(target.assignmentId) as
+      | {
+          eventId: string;
+          kind: string;
+          payloadJson: string;
+          createdAt: number | bigint;
+          appendSequence: number | bigint;
+        }
+      | undefined;
+    const reconciliationPayload = reconciliation
+      ? (JSON.parse(reconciliation.payloadJson) as {
+          response?: { code?: unknown; operatorReconciled?: unknown };
+        })
+      : undefined;
+    if (
+      reconciliation?.kind !== "route_rejected" ||
+      reconciliationPayload?.response?.code !==
+        "delegation_unstarted_assignment_operator_rejected" ||
+      reconciliationPayload.response.operatorReconciled !== true
+    ) {
+      throw new Error(
+        "Discovery receipt adoption requires the exact supported unstarted-assignment reconciliation.",
+      );
+    }
+    const targetReconciliationCreatedAt = toNumber(reconciliation.createdAt);
+    if (
+      targetReconciliationCreatedAt < target.issuedAt ||
+      targetReconciliationCreatedAt < toNumber(sourceBlocker.targetSliceCreatedAt) ||
+      toNumber(reconciliation.appendSequence) <= toNumber(sourceBlocker.blockingAppendSequence)
+    ) {
+      throw new Error(
+        "Discovery receipt adoption requires reconciliation after the corrected target assignment.",
+      );
+    }
+
+    return {
+      controllerAgentId: target.controllerAgentId,
+      controllerSessionKey: target.controllerSessionKey,
+      targetSliceId: target.sliceId,
+      targetAssignmentId: target.assignmentId,
+      sourceSliceId: source.sliceId,
+      sourceAssignmentId: source.assignmentId,
+      sourceReceiptId: sourceReceipt.receiptId,
+      sourceTerminalReceiptId: sourceTerminal.terminalReceiptId,
+      sourceValidationId: sourceTerminal.validationId,
+      sourceBlockingAssignmentId: sourceBlocking.assignmentId,
+      sourceBlockingAcceptedEventId: sourceBlocker.acceptedEventId,
+      sourceBlockingAcceptedEventAppendSequence: toNumber(sourceBlocker.acceptedAppendSequence),
+      sourceBlockingEventId: sourceBlocker.blockingEventId,
+      sourceBlockingEventAppendSequence: toNumber(sourceBlocker.blockingAppendSequence),
+      sourceBlockingBindingId: sourceBlocker.bindingId,
+      sourceBlockingTerminalResultId: sourceBlocker.terminalResultId,
+      sourceBlockingTerminalResultDigest,
+      sourceBlockingRunId: sourceBlocker.bindingRunId,
+      sourceBlockingChildSessionKey: sourceBlocker.childSessionKey,
+      targetReconciliationEventId: reconciliation.eventId,
+      targetReconciliationEventAppendSequence: toNumber(reconciliation.appendSequence),
+      targetReconciliationCreatedAt,
+      sourceSemanticDigest: sourceTerminal.semanticDigest,
+      scopeDigest: targetSlice.scope.scopeDigest,
+      baselineFingerprintDigest,
+      epoch: params.expectedEpoch,
+    };
+  }
+
+  adoptCompletedDiscoveryReceipt(params: {
+    targetAssignmentId: string;
+    sourceReceiptId: string;
+    sourceBlockingAssignmentId: string;
+    controllerAgentId: string;
+    controllerSessionKey: string;
+    operator: { id: string; reason: string; ticket: string };
+    idempotencyKey: string;
+    createdAt?: number;
+  }): DelegationDiscoveryReceiptAdoption {
+    this.assertActiveStack();
+    const requiredText = (value: string, label: string, maxBytes: number): string => {
+      const normalized = value.trim();
+      if (!normalized || Buffer.byteLength(normalized, "utf8") > maxBytes) {
+        throw new Error(`Discovery receipt adoption requires a bounded ${label}.`);
+      }
+      return normalized;
+    };
+    const operator = {
+      id: requiredText(params.operator.id, "operator id", 256),
+      reason: requiredText(params.operator.reason, "operator reason", 2048),
+      ticket: requiredText(params.operator.ticket, "operator ticket", 256),
+    };
+    const idempotencyKey = requiredText(params.idempotencyKey, "idempotency key", 256);
+    const existingIdempotency = this.db
+      .prepare(`SELECT * FROM discovery_receipt_adoptions WHERE idempotency_key = ?`)
+      .get(idempotencyKey) as DiscoveryReceiptAdoptionRow | undefined;
+    if (existingIdempotency) {
+      if (toNumber(existingIdempotency.epoch) !== this.currentEpoch()) {
+        throw new Error(
+          "Discovery receipt adoption idempotency belongs to a historical inactive epoch.",
+        );
+      }
+      const authorization = JSON.parse(existingIdempotency.authorization_json) as {
+        controller?: { agentId?: unknown; sessionKey?: unknown };
+        operator?: { id?: unknown; reason?: unknown; ticket?: unknown };
+      };
+      if (
+        existingIdempotency.target_assignment_id !== params.targetAssignmentId ||
+        existingIdempotency.source_receipt_id !== params.sourceReceiptId ||
+        existingIdempotency.source_blocking_assignment_id !== params.sourceBlockingAssignmentId ||
+        authorization.controller?.agentId !== params.controllerAgentId ||
+        authorization.controller?.sessionKey !== params.controllerSessionKey ||
+        authorization.operator?.id !== operator.id ||
+        authorization.operator?.reason !== operator.reason ||
+        authorization.operator?.ticket !== operator.ticket
+      ) {
+        throw new Error("Discovery receipt adoption idempotency key is already bound differently.");
+      }
+      this.assertDiscoveryReceiptAdoptionsValid();
+      return this.discoveryReceiptAdoptionFromRow(existingIdempotency, true);
+    }
+
+    const facts = this.resolveDiscoveryReceiptAdoptionFacts({
+      targetAssignmentId: params.targetAssignmentId,
+      sourceReceiptId: params.sourceReceiptId,
+      sourceBlockingAssignmentId: params.sourceBlockingAssignmentId,
+      expectedEpoch: this.currentEpoch(),
+    });
+    if (
+      facts.controllerAgentId !== params.controllerAgentId ||
+      facts.controllerSessionKey !== params.controllerSessionKey
+    ) {
+      throw new Error("Discovery receipt adoption controller does not own the exact target slice.");
+    }
+    const existingTarget = this.db
+      .prepare(
+        `SELECT * FROM discovery_receipt_adoptions
+         WHERE target_slice_id = ? OR target_assignment_id = ? LIMIT 1`,
+      )
+      .get(facts.targetSliceId, facts.targetAssignmentId) as
+      | DiscoveryReceiptAdoptionRow
+      | undefined;
+    if (existingTarget) {
+      throw new Error("The corrected target slice already has a protected discovery adoption.");
+    }
+    const createdAt = params.createdAt ?? Date.now();
+    if (!Number.isSafeInteger(createdAt) || createdAt < facts.targetReconciliationCreatedAt) {
+      throw new Error(
+        "Discovery receipt adoption authorization must follow every protected prerequisite.",
+      );
+    }
+    const authorization = {
+      version: DISCOVERY_RECEIPT_ADOPTION_VERSION,
+      facts,
+      controller: {
+        agentId: facts.controllerAgentId,
+        sessionKey: facts.controllerSessionKey,
+      },
+      operator,
+      idempotencyKey,
+      createdAt,
+    };
+    const authorizationJson = canonicalDelegationJson(authorization);
+    const authorizationDigest = hashDelegationIdentity(
+      "delegation-discovery-receipt-adoption-authorization-v1",
+      authorization,
+    );
+    const adoptionId = createDelegationRecordId("discovery-receipt-adoption", {
+      authorizationDigest,
+    });
+    this.db
+      .prepare(
+        `INSERT INTO discovery_receipt_adoptions
+         (adoption_id, target_slice_id, target_assignment_id, source_slice_id,
+          source_assignment_id, source_receipt_id, source_terminal_receipt_id,
+          source_validation_id, source_blocking_assignment_id,
+          source_blocking_accepted_event_id, source_blocking_accepted_event_append_sequence,
+          source_blocking_event_id, source_blocking_event_append_sequence,
+          source_blocking_binding_id, source_blocking_terminal_result_id,
+          source_blocking_terminal_result_digest, source_blocking_run_id,
+          source_blocking_child_session_key, target_reconciliation_event_id,
+          target_reconciliation_event_append_sequence, target_reconciliation_created_at,
+          scope_digest, baseline_fingerprint_digest,
+          authorization_json, authorization_digest, idempotency_key, epoch, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        adoptionId,
+        facts.targetSliceId,
+        facts.targetAssignmentId,
+        facts.sourceSliceId,
+        facts.sourceAssignmentId,
+        facts.sourceReceiptId,
+        facts.sourceTerminalReceiptId,
+        facts.sourceValidationId,
+        facts.sourceBlockingAssignmentId,
+        facts.sourceBlockingAcceptedEventId,
+        facts.sourceBlockingAcceptedEventAppendSequence,
+        facts.sourceBlockingEventId,
+        facts.sourceBlockingEventAppendSequence,
+        facts.sourceBlockingBindingId,
+        facts.sourceBlockingTerminalResultId,
+        facts.sourceBlockingTerminalResultDigest,
+        facts.sourceBlockingRunId,
+        facts.sourceBlockingChildSessionKey,
+        facts.targetReconciliationEventId,
+        facts.targetReconciliationEventAppendSequence,
+        facts.targetReconciliationCreatedAt,
+        facts.scopeDigest,
+        facts.baselineFingerprintDigest,
+        authorizationJson,
+        authorizationDigest,
+        idempotencyKey,
+        facts.epoch,
+        createdAt,
+      );
+    const row = this.db
+      .prepare(`SELECT * FROM discovery_receipt_adoptions WHERE adoption_id = ?`)
+      .get(adoptionId) as DiscoveryReceiptAdoptionRow | undefined;
+    if (!row) {
+      throw new Error("Protected discovery receipt adoption could not be read back.");
+    }
+    return this.discoveryReceiptAdoptionFromRow(row, false);
+  }
+
+  private discoveryReceiptAdoptionFromRow(
+    row: DiscoveryReceiptAdoptionRow,
+    alreadyAdopted: boolean,
+  ): DelegationDiscoveryReceiptAdoption {
+    if (!this.hasProgressableTerminalPurpose(row.target_slice_id, "discovery")) {
+      throw new Error(
+        "Protected discovery receipt adoption did not satisfy the target prerequisite.",
+      );
+    }
+    return {
+      adoptionId: row.adoption_id,
+      targetSliceId: row.target_slice_id,
+      targetAssignmentId: row.target_assignment_id,
+      sourceSliceId: row.source_slice_id,
+      sourceAssignmentId: row.source_assignment_id,
+      sourceReceiptId: row.source_receipt_id,
+      sourceTerminalReceiptId: row.source_terminal_receipt_id,
+      sourceValidationId: row.source_validation_id,
+      sourceBlockingAssignmentId: row.source_blocking_assignment_id,
+      sourceBlockingAcceptedEventId: row.source_blocking_accepted_event_id,
+      sourceBlockingAcceptedEventAppendSequence: toNumber(
+        row.source_blocking_accepted_event_append_sequence,
+      ),
+      sourceBlockingEventId: row.source_blocking_event_id,
+      sourceBlockingEventAppendSequence: toNumber(row.source_blocking_event_append_sequence),
+      sourceBlockingBindingId: row.source_blocking_binding_id,
+      sourceBlockingTerminalResultId: row.source_blocking_terminal_result_id,
+      sourceBlockingTerminalResultDigest: row.source_blocking_terminal_result_digest,
+      sourceBlockingRunId: row.source_blocking_run_id,
+      sourceBlockingChildSessionKey: row.source_blocking_child_session_key,
+      targetReconciliationEventId: row.target_reconciliation_event_id,
+      targetReconciliationEventAppendSequence: toNumber(
+        row.target_reconciliation_event_append_sequence,
+      ),
+      targetReconciliationCreatedAt: toNumber(row.target_reconciliation_created_at),
+      scopeDigest: row.scope_digest,
+      baselineFingerprintDigest: row.baseline_fingerprint_digest,
+      authorizationDigest: row.authorization_digest,
+      idempotencyKey: row.idempotency_key,
+      createdAt: toNumber(row.created_at),
+      alreadyAdopted,
+      discoveryPrerequisiteSatisfied: true,
+    };
+  }
+
+  discoveryReceiptAdoptionForSlice(
+    targetSliceId: string,
+  ): DelegationDiscoveryReceiptAdoption | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM discovery_receipt_adoptions WHERE target_slice_id = ?`)
+      .get(targetSliceId) as DiscoveryReceiptAdoptionRow | undefined;
+    return row ? this.discoveryReceiptAdoptionFromRow(row, true) : undefined;
+  }
+
+  assertDiscoveryReceiptAdoptionsValid(): void {
+    const rows = this.db
+      .prepare(`SELECT * FROM discovery_receipt_adoptions ORDER BY created_at, adoption_id`)
+      .all() as DiscoveryReceiptAdoptionRow[];
+    for (const row of rows) {
+      const facts = this.resolveDiscoveryReceiptAdoptionFacts({
+        targetAssignmentId: row.target_assignment_id,
+        sourceReceiptId: row.source_receipt_id,
+        sourceBlockingAssignmentId: row.source_blocking_assignment_id,
+        expectedEpoch: toNumber(row.epoch),
+      });
+      const authorization = JSON.parse(row.authorization_json) as {
+        version?: unknown;
+        facts?: unknown;
+        controller?: unknown;
+        operator?: { id?: unknown; reason?: unknown; ticket?: unknown };
+        idempotencyKey?: unknown;
+        createdAt?: unknown;
+      };
+      const authorizationDigest = hashDelegationIdentity(
+        "delegation-discovery-receipt-adoption-authorization-v1",
+        authorization,
+      );
+      const expectedAdoptionId = createDelegationRecordId("discovery-receipt-adoption", {
+        authorizationDigest,
+      });
+      if (
+        row.target_slice_id !== facts.targetSliceId ||
+        row.source_slice_id !== facts.sourceSliceId ||
+        row.source_assignment_id !== facts.sourceAssignmentId ||
+        row.source_terminal_receipt_id !== facts.sourceTerminalReceiptId ||
+        row.source_validation_id !== facts.sourceValidationId ||
+        row.source_blocking_assignment_id !== facts.sourceBlockingAssignmentId ||
+        row.source_blocking_accepted_event_id !== facts.sourceBlockingAcceptedEventId ||
+        toNumber(row.source_blocking_accepted_event_append_sequence) !==
+          facts.sourceBlockingAcceptedEventAppendSequence ||
+        row.source_blocking_event_id !== facts.sourceBlockingEventId ||
+        toNumber(row.source_blocking_event_append_sequence) !==
+          facts.sourceBlockingEventAppendSequence ||
+        row.source_blocking_binding_id !== facts.sourceBlockingBindingId ||
+        row.source_blocking_terminal_result_id !== facts.sourceBlockingTerminalResultId ||
+        row.source_blocking_terminal_result_digest !== facts.sourceBlockingTerminalResultDigest ||
+        row.source_blocking_run_id !== facts.sourceBlockingRunId ||
+        row.source_blocking_child_session_key !== facts.sourceBlockingChildSessionKey ||
+        row.target_reconciliation_event_id !== facts.targetReconciliationEventId ||
+        toNumber(row.target_reconciliation_event_append_sequence) !==
+          facts.targetReconciliationEventAppendSequence ||
+        toNumber(row.target_reconciliation_created_at) !== facts.targetReconciliationCreatedAt ||
+        row.scope_digest !== facts.scopeDigest ||
+        row.baseline_fingerprint_digest !== facts.baselineFingerprintDigest ||
+        authorization.version !== DISCOVERY_RECEIPT_ADOPTION_VERSION ||
+        canonicalDelegationJson(authorization.facts) !== canonicalDelegationJson(facts) ||
+        canonicalDelegationJson(authorization.controller) !==
+          canonicalDelegationJson({
+            agentId: facts.controllerAgentId,
+            sessionKey: facts.controllerSessionKey,
+          }) ||
+        typeof authorization.operator?.id !== "string" ||
+        typeof authorization.operator.reason !== "string" ||
+        typeof authorization.operator.ticket !== "string" ||
+        authorization.idempotencyKey !== row.idempotency_key ||
+        typeof authorization.createdAt !== "number" ||
+        !Number.isSafeInteger(authorization.createdAt) ||
+        authorization.createdAt < facts.targetReconciliationCreatedAt ||
+        authorization.createdAt !== toNumber(row.created_at) ||
+        authorizationDigest !== row.authorization_digest ||
+        expectedAdoptionId !== row.adoption_id
+      ) {
+        throw new Error(
+          `Protected discovery receipt adoption ${row.adoption_id} failed integrity validation.`,
+        );
+      }
+    }
   }
 
   private appendGatewayCompletionWithoutReceiptIfOpen(params: {
@@ -5990,6 +6899,7 @@ export function openDelegationLedger(params: {
     if (existingEpoch) {
       ledger.assertNoContradictoryInitialReceiptsAfterTerminalRoute();
       ledger.assertCompletedCorrectionsHaveExactSupersession();
+      ledger.assertDiscoveryReceiptAdoptionsValid();
       ledger.reconcilePendingReceiptFinalizationAfterRestart();
       ledger.reconcileGatewayDispatchesAfterRestart();
       ledger.reconcileInterruptedInitialSpawnsAfterRestart();

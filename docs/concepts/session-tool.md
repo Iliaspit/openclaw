@@ -183,6 +183,39 @@ authorize a recovery child; after any report failure, the controller creates a
 corrected new slice in the same epoch. OpenClaw does not automatically continue
 or replay the worker.
 
+When a later phase poisons a slice after discovery already completed, an
+operator may adopt that exact discovery receipt into a corrected same-epoch
+slice instead of replaying the helper. The corrected slice must contain one
+intentionally unstarted discovery assignment already closed through
+`reconcile_unstarted_assignment`. The owner-only `adopt_discovery_receipt`
+controller action then requires the target assignment, source receipt,
+exact later reviewer `missing-accepted-report` source assignment, operator
+identity/reason/ticket, and one idempotency key. The source rejection must
+follow the discovery completion, and the corrected target slice must follow
+that rejection. The reviewer failure must have exactly one accepted route,
+matching child/run binding, protected terminal result, and exact rejection
+payload, with no reviewer receipt, validation, or terminal receipt. The action
+also accepts only the same controller session, helper policy, canonical scope,
+repository root, byte-identical baseline fingerprint and inventory, active
+epoch, accepted validation, and completed progressable source report. Any
+clean, synthetic, contradictory, unrelated, reverse-ordered, stale, executed,
+mismatched, incomplete, or differently authorized evidence fails closed.
+
+An operator can apply the same contract without running the controller by
+stopping every ledger writer and running the built maintenance command from the
+installed OpenClaw image. Both the protected state directory and active config
+file must be supplied as absolute paths:
+
+```bash
+openclaw delegation-ledger adopt-discovery --state-dir /home/node/.openclaw --config /home/node/.openclaw/openclaw.json --controller-session agent:planner:explicit:recovery-session --target-assignment assignment_target --source-receipt receipt_source --source-blocking-assignment assignment_rejected_phase --operator-id operator@example.com --reason "Adopt exact completed discovery into corrected slice" --ticket OPS-4242 --idempotency-key adopt-discovery-ops-4242
+```
+
+The command appends one immutable authorization-bound adoption record. An
+identical retry returns the original adoption ID with `alreadyAdopted: true`;
+reuse of its idempotency key for different facts is rejected. The immutable
+authorization timestamp must follow the corrected assignment's protected
+reconciliation.
+
 The accepted protected report and ledger receipt are authoritative even when a
 worker's final prose is incomplete. OpenClaw classifies raw model stop reasons,
 marks `length` and `max_tokens` output as truncated, and appends a visible

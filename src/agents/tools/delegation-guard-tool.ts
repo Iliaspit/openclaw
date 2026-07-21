@@ -139,6 +139,16 @@ const DelegationGuardToolSchema = Type.Union([
     assignmentId: Type.String({ minLength: 1 }),
     reason: Type.String({ minLength: 1 }),
   }),
+  Type.Object({
+    action: Type.Literal("adopt_discovery_receipt"),
+    targetAssignmentId: Type.String({ minLength: 1 }),
+    sourceReceiptId: Type.String({ minLength: 1 }),
+    sourceBlockingAssignmentId: Type.String({ minLength: 1 }),
+    operatorId: Type.String({ minLength: 1 }),
+    reason: Type.String({ minLength: 1 }),
+    ticket: Type.String({ minLength: 1 }),
+    idempotencyKey: Type.String({ minLength: 1 }),
+  }),
   Type.Object({ action: Type.Literal("rollback"), reason: Type.String({ minLength: 1 }) }),
   Type.Object({ action: Type.Literal("status") }),
 ]);
@@ -936,6 +946,35 @@ export function createDelegationGuardTool(opts: {
             action,
             assignmentId,
           });
+        }
+
+        if (action === "adopt_discovery_receipt") {
+          if (opts.senderIsOwner !== true) {
+            return jsonResult({
+              status: "forbidden",
+              error: "Discovery receipt adoption requires trusted operator authority.",
+            });
+          }
+          if (!opts.agentSessionKey?.trim()) {
+            return jsonResult({
+              status: "forbidden",
+              error: "Discovery receipt adoption requires an exact controller session.",
+            });
+          }
+          const adoption = runtime.ledger.adoptCompletedDiscoveryReceipt({
+            targetAssignmentId: args.targetAssignmentId as string,
+            sourceReceiptId: args.sourceReceiptId as string,
+            sourceBlockingAssignmentId: args.sourceBlockingAssignmentId as string,
+            controllerAgentId,
+            controllerSessionKey: opts.agentSessionKey,
+            operator: {
+              id: args.operatorId as string,
+              reason: args.reason as string,
+              ticket: args.ticket as string,
+            },
+            idempotencyKey: args.idempotencyKey as string,
+          });
+          return jsonResult({ status: "ok", action, ...adoption });
         }
 
         if (action === "rollback") {

@@ -9,6 +9,7 @@ const runtimeMocks = vi.hoisted(() => ({
     latestValidationRejectedRouteForAssignment: vi.fn(),
     rejectedReceiptForAssignment: vi.fn(),
     latestPreReceiptReportRejection: vi.fn(),
+    adoptCompletedDiscoveryReceipt: vi.fn(),
   },
 }));
 
@@ -118,6 +119,80 @@ describe("delegation guard completion visibility", () => {
       code: "run-timeout-after-report",
       runId: "run-1",
       createdAt: 789,
+    });
+  });
+
+  it("requires trusted operator authority for discovery receipt adoption", async () => {
+    const tool = createDelegationGuardTool({
+      config: {},
+      agentSessionKey: "agent:planner:main",
+      senderIsOwner: false,
+    });
+
+    const result = await tool.execute("call-adopt-forbidden", {
+      action: "adopt_discovery_receipt",
+      targetAssignmentId: "assignment-target",
+      sourceReceiptId: "receipt-source",
+      sourceBlockingAssignmentId: "assignment-blocking",
+      operatorId: "operator@example.com",
+      reason: "authorized correction",
+      ticket: "OPS-1",
+      idempotencyKey: "adopt-1",
+    });
+
+    expect(result.details).toEqual({
+      status: "forbidden",
+      error: "Discovery receipt adoption requires trusted operator authority.",
+    });
+    expect(runtimeMocks.ledger.adoptCompletedDiscoveryReceipt).not.toHaveBeenCalled();
+  });
+
+  it("passes one exact owner-authorized discovery adoption to the protected ledger", async () => {
+    runtimeMocks.ledger.adoptCompletedDiscoveryReceipt.mockReturnValue({
+      adoptionId: "discovery-receipt-adoption-1",
+      targetSliceId: "slice-target",
+      targetAssignmentId: "assignment-target",
+      sourceReceiptId: "receipt-source",
+      sourceBlockingAssignmentId: "assignment-blocking",
+      authorizationDigest: "authorization-digest",
+      alreadyAdopted: false,
+      discoveryPrerequisiteSatisfied: true,
+    });
+    const tool = createDelegationGuardTool({
+      config: {},
+      agentSessionKey: "agent:planner:main",
+      senderIsOwner: true,
+    });
+
+    const result = await tool.execute("call-adopt", {
+      action: "adopt_discovery_receipt",
+      targetAssignmentId: "assignment-target",
+      sourceReceiptId: "receipt-source",
+      sourceBlockingAssignmentId: "assignment-blocking",
+      operatorId: "operator@example.com",
+      reason: "authorized correction",
+      ticket: "OPS-1",
+      idempotencyKey: "adopt-1",
+    });
+
+    expect(runtimeMocks.ledger.adoptCompletedDiscoveryReceipt).toHaveBeenCalledWith({
+      targetAssignmentId: "assignment-target",
+      sourceReceiptId: "receipt-source",
+      sourceBlockingAssignmentId: "assignment-blocking",
+      controllerAgentId: "planner",
+      controllerSessionKey: "agent:planner:main",
+      operator: {
+        id: "operator@example.com",
+        reason: "authorized correction",
+        ticket: "OPS-1",
+      },
+      idempotencyKey: "adopt-1",
+    });
+    expect(result.details).toMatchObject({
+      status: "ok",
+      action: "adopt_discovery_receipt",
+      adoptionId: "discovery-receipt-adoption-1",
+      authorizationDigest: "authorization-digest",
     });
   });
 });

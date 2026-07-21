@@ -31,6 +31,11 @@ const coreCliCommandCatalog = defineCommandDescriptorCatalog([
     hasSubcommands: true,
   },
   {
+    name: "delegation-ledger",
+    description: "Run protected delegation ledger maintenance",
+    hasSubcommands: true,
+  },
+  {
     name: "doctor",
     description: "Health checks + quick fixes for the gateway and channels",
     hasSubcommands: false,

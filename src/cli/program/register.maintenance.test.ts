@@ -5,6 +5,7 @@ import { registerMaintenanceCommands } from "./register.maintenance.js";
 const mocks = vi.hoisted(() => ({
   doctorCommand: vi.fn(),
   dashboardCommand: vi.fn(),
+  delegationLedgerAdoptDiscoveryCommand: vi.fn(),
   resetCommand: vi.fn(),
   uninstallCommand: vi.fn(),
   runtime: {
@@ -14,7 +15,14 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
-const { doctorCommand, dashboardCommand, resetCommand, uninstallCommand, runtime } = mocks;
+const {
+  doctorCommand,
+  dashboardCommand,
+  delegationLedgerAdoptDiscoveryCommand,
+  resetCommand,
+  uninstallCommand,
+  runtime,
+} = mocks;
 
 vi.mock("../../commands/doctor.js", () => ({
   doctorCommand: mocks.doctorCommand,
@@ -22,6 +30,10 @@ vi.mock("../../commands/doctor.js", () => ({
 
 vi.mock("../../commands/dashboard.js", () => ({
   dashboardCommand: mocks.dashboardCommand,
+}));
+
+vi.mock("../../commands/delegation-ledger-adopt-discovery.js", () => ({
+  delegationLedgerAdoptDiscoveryCommand: mocks.delegationLedgerAdoptDiscoveryCommand,
 }));
 
 vi.mock("../../commands/reset.js", () => ({
@@ -149,6 +161,55 @@ describe("registerMaintenanceCommands doctor action", () => {
         dryRun: true,
       }),
     );
+  });
+
+  it("runs installed discovery adoption with every exact protected identity", async () => {
+    delegationLedgerAdoptDiscoveryCommand.mockReturnValue({
+      ok: true,
+      adoptionId: "discovery-receipt-adoption-1",
+    });
+
+    await runMaintenanceCli([
+      "delegation-ledger",
+      "adopt-discovery",
+      "--state-dir",
+      "/state",
+      "--config",
+      "/state/openclaw.json",
+      "--controller-session",
+      "agent:planner:explicit:recovery",
+      "--target-assignment",
+      "assignment-target",
+      "--source-receipt",
+      "receipt-source",
+      "--source-blocking-assignment",
+      "assignment-blocking",
+      "--operator-id",
+      "operator@example.com",
+      "--reason",
+      "authorized exact adoption",
+      "--ticket",
+      "OPS-1",
+      "--idempotency-key",
+      "adopt-1",
+    ]);
+
+    expect(delegationLedgerAdoptDiscoveryCommand).toHaveBeenCalledWith({
+      stateDir: "/state",
+      config: "/state/openclaw.json",
+      controllerSession: "agent:planner:explicit:recovery",
+      targetAssignment: "assignment-target",
+      sourceReceipt: "receipt-source",
+      sourceBlockingAssignment: "assignment-blocking",
+      operatorId: "operator@example.com",
+      reason: "authorized exact adoption",
+      ticket: "OPS-1",
+      idempotencyKey: "adopt-1",
+    });
+    expect(runtime.log).toHaveBeenCalledWith(
+      JSON.stringify({ ok: true, adoptionId: "discovery-receipt-adoption-1" }),
+    );
+    expect(runtime.exit).toHaveBeenCalledWith(0);
   });
 
   it("exits with code 1 when dashboard fails", async () => {

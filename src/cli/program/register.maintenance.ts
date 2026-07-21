@@ -1,5 +1,6 @@
 import type { Command } from "commander";
 import { dashboardCommand } from "../../commands/dashboard.js";
+import { delegationLedgerAdoptDiscoveryCommand } from "../../commands/delegation-ledger-adopt-discovery.js";
 import { doctorCommand } from "../../commands/doctor.js";
 import { resetCommand } from "../../commands/reset.js";
 import { uninstallCommand } from "../../commands/uninstall.js";
@@ -9,6 +10,43 @@ import { theme } from "../../terminal/theme.js";
 import { runCommandWithRuntime } from "../cli-utils.js";
 
 export function registerMaintenanceCommands(program: Command) {
+  program
+    .command("delegation-ledger")
+    .description("Run protected delegation ledger maintenance")
+    .command("adopt-discovery")
+    .description("Adopt one exact completed discovery receipt into a corrected slice")
+    .requiredOption("--state-dir <absolute-path>", "Exact protected OpenClaw state directory")
+    .requiredOption("--config <absolute-path>", "Exact active OpenClaw config file")
+    .requiredOption("--controller-session <key>", "Exact owning controller session key")
+    .requiredOption("--target-assignment <id>", "Reconciled target discovery assignment")
+    .requiredOption("--source-receipt <id>", "Completed source discovery receipt")
+    .requiredOption(
+      "--source-blocking-assignment <id>",
+      "Later validation-rejected assignment that forced correction",
+    )
+    .requiredOption("--operator-id <id>", "Authorizing operator identity")
+    .requiredOption("--reason <text>", "Bounded operator reason")
+    .requiredOption("--ticket <id>", "Operator authorization ticket")
+    .requiredOption("--idempotency-key <key>", "One-shot idempotency key")
+    .action(async (opts) => {
+      await runCommandWithRuntime(defaultRuntime, async () => {
+        const result = delegationLedgerAdoptDiscoveryCommand({
+          stateDir: opts.stateDir,
+          config: opts.config,
+          controllerSession: opts.controllerSession,
+          targetAssignment: opts.targetAssignment,
+          sourceReceipt: opts.sourceReceipt,
+          sourceBlockingAssignment: opts.sourceBlockingAssignment,
+          operatorId: opts.operatorId,
+          reason: opts.reason,
+          ticket: opts.ticket,
+          idempotencyKey: opts.idempotencyKey,
+        });
+        defaultRuntime.log(JSON.stringify(result));
+        defaultRuntime.exit(0);
+      });
+    });
+
   program
     .command("doctor")
     .description("Health checks + quick fixes for the gateway and channels")
