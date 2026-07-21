@@ -543,3 +543,10 @@ Consult this before investigating a new issue or making a related change.
    - **Issue:** The installed completed correction had four route events, including the exact receipt-bound supersession and a same-run `missing-accepted-report` observation written at the terminal-result timestamp before the corrected receipt. Strict open correctly kept the extra rejection authoritative, while the original maintenance contract rejected the additional event counts.
    - **Fix and why:** Added a versioned repair case for only that observed chronology. Its authorization fingerprints the complete four-event identities, canonical payloads, append order, timestamps, exact counts, unique terminal-run/child-session binding, correction and terminal state, validator, pre-repair head, operator, ticket, and idempotency evidence. Strict open exempts the extra rejection only when the immutable repair event and receipt reproduce every bound fact.
    - **Result:** The exact historical sequence can receive a forward-only operator repair without rewriting evidence; wrong identities, payloads, binding, ordering, counts, timing, stale heads, and all additional rejection shapes remain fail-closed.
+
+## 2026-07-21
+
+1. **Session-only child completion waited for the parent agent's full follow-up turn**
+   - **Issue:** A completed protected child successfully handed its receipt to an idle parent through a direct `agent` callback, but delivery waited for the parent's final response. The parent consumed the completion and continued orchestration for longer than 120 seconds, so the callback reported two gateway timeouts and delayed child cleanup even though the handoff had already been accepted.
+   - **Fix and why:** Session-only completion callbacks now settle when the gateway accepts the idempotent parent turn. Completion callbacks that deliver to an external channel still wait for the final response, as do non-completion direct announces.
+   - **Result:** Parent follow-up duration no longer converts an accepted internal completion handoff into a false delivery failure or holds the child lifecycle open.

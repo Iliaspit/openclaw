@@ -159,6 +159,7 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
     expect(callGateway).toHaveBeenCalledWith(
       expect.objectContaining({
         method: "agent",
+        expectFinal: true,
         params: expect.objectContaining({
           deliver: true,
           channel: "slack",
@@ -166,6 +167,47 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
           to: "channel:C123",
           threadId: "171.222",
           bestEffortDeliver: true,
+        }),
+      }),
+    );
+  });
+
+  it("settles a session-only completion when the gateway accepts the parent turn", async () => {
+    const callGateway = createGatewayMock();
+    __testing.setDepsForTest({
+      callGateway,
+      getRequesterSessionActivity: () => ({
+        sessionId: "requester-session-internal",
+        isActive: false,
+      }),
+      loadConfig: () => ({}) as never,
+    });
+
+    const result = await deliverSubagentAnnouncement({
+      requesterSessionKey: "agent:planner:explicit:run-1",
+      targetRequesterSessionKey: "agent:planner:explicit:run-1",
+      triggerMessage: "protected child completed",
+      steerMessage: "protected child completed",
+      requesterIsSubagent: false,
+      expectsCompletionMessage: true,
+      bestEffortDeliver: true,
+      directIdempotencyKey: "announce-internal-completion",
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        delivered: true,
+        path: "direct",
+      }),
+    );
+    expect(callGateway).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "agent",
+        expectFinal: false,
+        params: expect.objectContaining({
+          sessionKey: "agent:planner:explicit:run-1",
+          deliver: false,
+          idempotencyKey: "announce-internal-completion",
         }),
       }),
     );

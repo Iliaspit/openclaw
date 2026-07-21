@@ -594,6 +594,12 @@ async function sendSubagentAnnounceDirectly(params: {
         path: "none",
       };
     }
+    // A session-only completion is handed off once the gateway accepts the
+    // idempotent parent turn. Waiting for that turn's final response couples
+    // child cleanup to arbitrary follow-up work performed by the parent and
+    // can turn a successful callback into a 120s timeout. External delivery
+    // still waits for the final response so channel delivery remains proven.
+    const expectFinal = !params.expectsCompletionMessage || deliveryTarget.deliver;
     await runAnnounceDeliveryWithRetry({
       operation: params.expectsCompletionMessage
         ? "completion direct announce agent call"
@@ -632,7 +638,7 @@ async function sendSubagentAnnounceDirectly(params: {
             },
             idempotencyKey: params.directIdempotencyKey,
           },
-          expectFinal: true,
+          expectFinal,
           timeoutMs: announceTimeoutMs,
         }),
     });
