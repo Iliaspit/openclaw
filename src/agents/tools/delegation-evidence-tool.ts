@@ -4,7 +4,10 @@ import {
   resolveDelegationGuardPrincipal,
   resolveDelegationWorkerRequiredModel,
 } from "../delegation/policy.js";
-import { captureDelegationRuntimeEvidence } from "../delegation/runtime-evidence.js";
+import {
+  captureDelegationRuntimeEvidence,
+  resolveDelegationRuntimeEvidenceFailureStage,
+} from "../delegation/runtime-evidence.js";
 import {
   assertDelegationWorkerSandbox,
   requireCurrentDelegationCandidate,
@@ -96,11 +99,13 @@ export function createDelegationEvidenceTool(opts: {
           candidateId: assignment.candidateId,
         });
         return jsonResult({ status: "ok", evidence });
-      } catch {
+      } catch (error) {
+        const failureStage = resolveDelegationRuntimeEvidenceFailureStage(error);
         return jsonResult({
           status: "error",
           errorCode: "runtime_evidence_capture_failed",
           error: "Installed runtime evidence capture failed closed.",
+          ...(failureStage ? { failureStage } : {}),
         });
       }
     },

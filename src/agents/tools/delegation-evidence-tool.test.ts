@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   captureEvidence: vi.fn(),
   requireCurrentCandidate: vi.fn(),
   resolveCaller: vi.fn(),
+  resolveFailureStage: vi.fn(),
   resolveInitializedRuntime: vi.fn(),
 }));
 
@@ -20,6 +21,7 @@ vi.mock("../delegation/runtime.js", () => ({
 
 vi.mock("../delegation/runtime-evidence.js", () => ({
   captureDelegationRuntimeEvidence: mocks.captureEvidence,
+  resolveDelegationRuntimeEvidenceFailureStage: mocks.resolveFailureStage,
 }));
 
 import { createDelegationEvidenceTool } from "./delegation-evidence-tool.js";
@@ -53,6 +55,7 @@ describe("guarded delegation runtime evidence tool", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.resolveCaller.mockReturnValue("tester");
+    mocks.resolveFailureStage.mockReturnValue(undefined);
     mocks.requireCurrentCandidate.mockResolvedValue({ candidateId: "candidate-evidence" });
     mocks.captureEvidence.mockResolvedValue({ snapshotDigest: "a".repeat(64) });
   });
@@ -152,6 +155,39 @@ describe("guarded delegation runtime evidence tool", () => {
       error: "Installed runtime evidence capture failed closed.",
     });
     expect(JSON.stringify(result)).not.toContain("secret");
+  });
+
+  it("exposes only a closed failure stage for operator diagnosis", async () => {
+    const config = createDelegationGuardTestConfig();
+    const guard = resolveDelegationGuardConfig(config);
+    if (!guard) {
+      throw new Error("test guard is missing");
+    }
+    mocks.resolveInitializedRuntime.mockReturnValue({
+      guard,
+      policyDigest: "b".repeat(64),
+      ledger: { resolveAssignmentForChildSession: () => assignment() },
+    });
+    const secretError = new Error("/host/private/token-value");
+    mocks.captureEvidence.mockRejectedValue(secretError);
+    mocks.resolveFailureStage.mockReturnValue("log-regression-scan");
+    const tool = createDelegationEvidenceTool({
+      config,
+      agentSessionKey: "agent:tester:subagent:evidence",
+      requesterAgentIdOverride: "tester",
+      effectiveThinking: "medium",
+    });
+
+    const result = details(await tool.execute("evidence", {}));
+    expect(mocks.resolveFailureStage).toHaveBeenCalledWith(secretError);
+    expect(result).toEqual({
+      status: "error",
+      errorCode: "runtime_evidence_capture_failed",
+      error: "Installed runtime evidence capture failed closed.",
+      failureStage: "log-regression-scan",
+    });
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(JSON.stringify(result)).not.toContain("token-value");
   });
 
   it("rejects a non-verifier principal before reading assignment state", async () => {

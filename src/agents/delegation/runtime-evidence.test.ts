@@ -16,6 +16,8 @@ import {
 } from "./ledger.test-helpers.js";
 import {
   captureDelegationRuntimeEvidence,
+  createInstalledRuntimeProvenanceVerifierCache,
+  resolveDelegationRuntimeEvidenceFailureStage,
   type RuntimeEvidenceDeps,
   verifyInstalledRuntimeProvenance,
 } from "./runtime-evidence.js";
@@ -95,6 +97,7 @@ function evidenceDeps(params?: { now?: number; manifest?: unknown }): RuntimeEvi
         Health: { Status: "healthy" },
       },
     }),
+    inspectSelfChanges: async () => [],
     readSelfLogs: async () => "gateway ready\n",
     probe: async (_port, probePath) => ({
       statusCode: 200,
@@ -293,6 +296,7 @@ describe("guarded installed-runtime evidence", () => {
       );
 
       expect(first.snapshotDigest).toBe(second.snapshotDigest);
+      expect(first.stableSnapshotDigest).toBe(first.snapshotDigest);
       expect(first.observedAt).toBe(1);
       expect(second.observedAt).toBe(2);
       expect(first.binding).toMatchObject({
@@ -455,6 +459,34 @@ describe("guarded installed-runtime evidence", () => {
       });
       await expect(capture(forgedUri)).rejects.toThrow("image identity");
 
+      const changedRuntime = evidenceDeps();
+      changedRuntime.inspectSelfChanges = async () => [
+        { Path: path.join(process.cwd(), "dist/index.js"), Kind: 0 },
+      ];
+      const changedRuntimeError = await capture(changedRuntime).catch((error: unknown) => error);
+      expect(changedRuntimeError).toBeInstanceOf(Error);
+      expect((changedRuntimeError as Error).message).toContain("diverged from the image");
+      expect(resolveDelegationRuntimeEvidenceFailureStage(changedRuntimeError)).toBe(
+        "container-inspection",
+      );
+
+      const changedDuringCapture = evidenceDeps();
+      let changesChecks = 0;
+      changedDuringCapture.inspectSelfChanges = async () => {
+        changesChecks += 1;
+        return changesChecks === 1
+          ? []
+          : [{ Path: path.join(process.cwd(), "dist/index.js"), Kind: 0 }];
+      };
+      const changedDuringCaptureError = await capture(changedDuringCapture).catch(
+        (error: unknown) => error,
+      );
+      expect((changedDuringCaptureError as Error).message).toContain("diverged from the image");
+      expect(resolveDelegationRuntimeEvidenceFailureStage(changedDuringCaptureError)).toBe(
+        "container-inspection",
+      );
+      expect(changesChecks).toBe(2);
+
       const falseReadiness = evidenceDeps();
       falseReadiness.probe = async (_port, probePath) => ({
         statusCode: 200,
@@ -486,6 +518,94 @@ describe("guarded installed-runtime evidence", () => {
         };
       };
       await expect(capture(inCallTamper)).rejects.toThrow("changed during bounded capture");
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("deduplicates successful installed provenance verification and retries failures", async () => {
+    const manifest = provenanceManifest();
+    const identity = {
+      containerId: "d".repeat(64),
+      imageId: `sha256:${"e".repeat(64)}`,
+    };
+    let calls = 0;
+    const verification = {
+      installedArtifactCount: 1,
+      installedArtifactsDigest: "a".repeat(64),
+      buildInfoDigest: "b".repeat(64),
+      retainedBundleDigest: "c".repeat(64),
+      immutableRuntimePaths: true as const,
+    };
+    const cached = createInstalledRuntimeProvenanceVerifierCache(async () => {
+      calls += 1;
+      return verification;
+    });
+
+    const [first, second] = await Promise.all([
+      cached(manifest, identity),
+      cached(manifest, identity),
+    ]);
+    expect(first).toBe(verification);
+    expect(second).toBe(verification);
+    expect(await cached(manifest, identity)).toBe(verification);
+    expect(calls).toBe(1);
+
+    await cached(manifest, { ...identity, containerId: "f".repeat(64) });
+    expect(calls).toBe(2);
+
+    let attempts = 0;
+    const retryable = createInstalledRuntimeProvenanceVerifierCache(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new Error("transient verifier failure");
+      }
+      return verification;
+    });
+    await expect(retryable(manifest, identity)).rejects.toThrow("transient verifier failure");
+    await expect(retryable(manifest, identity)).resolves.toBe(verification);
+    expect(attempts).toBe(2);
+  });
+
+  it("reports the first fixed capture stage when parallel probes fail", async () => {
+    const fixture = createLedgerFixture(["src/one.ts"]);
+    try {
+      completeDiscoveryAndImplementation(fixture);
+      const wave = createVerificationWave(fixture);
+      const issued = issueAssignment({
+        fixture,
+        purpose: "verification",
+        role: "tester",
+        candidateId: wave.candidateId,
+        waveId: wave.waveId,
+      });
+      const started = startAssignment({ fixture, ...issued });
+      const deps = evidenceDeps();
+      deps.probe = async (_port, probePath) => {
+        if (probePath === "/healthz") {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          throw new Error("health secret");
+        }
+        throw new Error("readiness secret");
+      };
+      const error = await withEnvAsync(
+        { OPENCLAW_SOURCE_REVISION: SOURCE_REVISION },
+        async () =>
+          await captureDelegationRuntimeEvidence({
+            config: { gateway: { port: 18789 } } as OpenClawConfig,
+            runtime: {
+              guard: fixture.guard,
+              ledger: fixture.ledger,
+              policyDigest: fixture.policyDigest,
+            },
+            assignmentId: issued.assignment.assignmentId,
+            childSessionKey: started.childSessionKey,
+            deps,
+          }).catch((failure: unknown) => failure),
+      );
+
+      expect(resolveDelegationRuntimeEvidenceFailureStage(error)).toBe("health-probe");
+      expect((error as Error).message).toBe("health secret");
     } finally {
       fixture.close();
     }

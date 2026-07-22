@@ -1,4 +1,5 @@
 import { Type } from "typebox";
+import { Check } from "typebox/value";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type {
   DelegationAssignmentPurpose,
@@ -31,7 +32,7 @@ import type { AnyAgentTool } from "./common.js";
 import { jsonResult } from "./common.js";
 import {
   DelegationWorkerReportSchema,
-  type DelegationWorkerReportInput,
+  prepareDelegationReportForAssignment,
 } from "./delegation-report-tool.js";
 
 const WorkerRoles = ["helper", "implementer", "tester", "reviewer", "qa"] as const;
@@ -687,7 +688,33 @@ export function createDelegationGuardTool(opts: {
                 "Format correction requires originalReceiptId from a protected rejected or blocked receipt. A report rejected before receipt persistence cannot be format-corrected.",
             });
           }
-          const report = args.report as DelegationWorkerReportInput as DelegationWorkerReport;
+          if (!Check(DelegationWorkerReportSchema, args.report)) {
+            return jsonResult({
+              status: "error",
+              error:
+                "Format correction requires one complete report payload that satisfies the protected worker-report schema.",
+            });
+          }
+          let report: DelegationWorkerReport;
+          let evidenceIdentity: ReturnType<
+            typeof prepareDelegationReportForAssignment
+          >["evidenceIdentity"];
+          try {
+            const prepared = prepareDelegationReportForAssignment({
+              assignment,
+              report: args.report,
+            });
+            report = prepared.report;
+            evidenceIdentity = prepared.evidenceIdentity;
+          } catch (error) {
+            return jsonResult({
+              status: "error",
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "Format correction could not be bound to the protected assignment.",
+            });
+          }
           const receiptId = runtime.ledger.appendFormatCorrection({
             assignmentId,
             originalReceiptId,
@@ -724,6 +751,7 @@ export function createDelegationGuardTool(opts: {
               receiptId,
               validationId: existingValidation.validationId,
               semanticDigest,
+              evidenceIdentity,
               ...(terminalReceiptId ? { terminalReceiptId } : {}),
               issues: existingValidation.issues,
             });
@@ -754,6 +782,7 @@ export function createDelegationGuardTool(opts: {
               action,
               receiptId,
               validationId,
+              evidenceIdentity,
               issues: [issue],
             });
           }
@@ -794,6 +823,7 @@ export function createDelegationGuardTool(opts: {
               action,
               receiptId,
               validationId,
+              evidenceIdentity,
               issues: [issue],
             });
           }
@@ -827,6 +857,7 @@ export function createDelegationGuardTool(opts: {
                 action,
                 receiptId,
                 validationId,
+                evidenceIdentity,
                 issues: [issue],
               });
             }
@@ -852,6 +883,7 @@ export function createDelegationGuardTool(opts: {
             receiptId,
             validationId,
             semanticDigest,
+            evidenceIdentity,
             ...(terminalReceiptId ? { terminalReceiptId } : {}),
             issues: validation.issues ?? [],
           });

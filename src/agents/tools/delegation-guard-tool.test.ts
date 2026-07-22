@@ -1,7 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { makeCompleteReport } from "../delegation/ledger.test-helpers.js";
 import { createDelegationGuardTool } from "./delegation-guard-tool.js";
 
 const runtimeMocks = vi.hoisted(() => ({
+  guard: {
+    validator: {
+      id: "delegation-test-validator",
+      version: "1.0.0",
+      sha256: "a".repeat(64),
+      entrypoint: "/opt/openclaw/protected/delegation-validator.mjs",
+      maxOutputBytes: 64 * 1024,
+    },
+  },
   ledger: {
     getAssignment: vi.fn(),
     acceptedReceiptForAssignment: vi.fn(),
@@ -10,6 +20,10 @@ const runtimeMocks = vi.hoisted(() => ({
     rejectedReceiptForAssignment: vi.fn(),
     latestPreReceiptReportRejection: vi.fn(),
     adoptCompletedDiscoveryReceipt: vi.fn(),
+    appendFormatCorrection: vi.fn(),
+    getReceipt: vi.fn(),
+    getValidationForReceipt: vi.fn(),
+    promoteRecordedTerminalCompletion: vi.fn(),
   },
 }));
 
@@ -20,7 +34,7 @@ vi.mock("../delegation/runtime.js", () => ({
   resolveDelegationRepositoryRoot: vi.fn(),
   requireDelegationController: () => ({
     controllerAgentId: "planner",
-    runtime: { ledger: runtimeMocks.ledger },
+    runtime: { guard: runtimeMocks.guard, ledger: runtimeMocks.ledger },
   }),
 }));
 
@@ -32,6 +46,14 @@ describe("delegation guard completion visibility", () => {
     runtimeMocks.ledger.latestValidationRejectedRouteForAssignment.mockReturnValue(undefined);
     runtimeMocks.ledger.rejectedReceiptForAssignment.mockReturnValue(undefined);
     runtimeMocks.ledger.latestPreReceiptReportRejection.mockReturnValue(undefined);
+    runtimeMocks.ledger.appendFormatCorrection.mockReturnValue("receipt-corrected");
+    runtimeMocks.ledger.getReceipt.mockReturnValue({
+      receiptId: "receipt-corrected",
+      assignmentId: "assignment-1",
+      semanticDigest: "semantic-digest",
+    });
+    runtimeMocks.ledger.getValidationForReceipt.mockReturnValue(undefined);
+    runtimeMocks.ledger.promoteRecordedTerminalCompletion.mockReturnValue(undefined);
   });
 
   it("retrieves a durable pre-receipt rejection after the worker is gone", async () => {
@@ -194,5 +216,107 @@ describe("delegation guard completion visibility", () => {
       adoptionId: "discovery-receipt-adoption-1",
       authorizationDigest: "authorization-digest",
     });
+  });
+
+  it("rejects a correction without a complete report before protected persistence", async () => {
+    runtimeMocks.ledger.getAssignment.mockReturnValue({
+      assignmentId: "assignment-1",
+      controllerAgentId: "planner",
+      controllerSessionKey: "agent:planner:main",
+    });
+    const tool = createDelegationGuardTool({
+      config: {},
+      agentSessionKey: "agent:planner:main",
+    });
+
+    const result = await tool.execute("call-correction-missing-report", {
+      action: "format_correction",
+      assignmentId: "assignment-1",
+      originalReceiptId: "receipt-original",
+    });
+
+    expect(result.details).toEqual({
+      status: "error",
+      error:
+        "Format correction requires one complete report payload that satisfies the protected worker-report schema.",
+    });
+    expect(runtimeMocks.ledger.appendFormatCorrection).not.toHaveBeenCalled();
+  });
+
+  it("canonicalizes correction evidence through the assignment-bound report path", async () => {
+    const assignment = {
+      assignmentId: "assignment-1",
+      sliceId: "slice-1",
+      candidateId: "candidate-1",
+      waveId: "wave-1",
+      controllerAgentId: "planner",
+      controllerSessionKey: "agent:planner:main",
+      workerAgentId: "reviewer",
+      role: "reviewer" as const,
+      requiredThinking: "high" as const,
+      requiredModel: "openai/gpt-5.4",
+      workspaceAccess: "ro" as const,
+      scopeUnits: ["src/one.ts"],
+      routeFamilyId: "route-family-1",
+      purpose: "verification" as const,
+      epoch: 14,
+      issuedAt: 1,
+    };
+    runtimeMocks.ledger.getAssignment.mockReturnValue(assignment);
+    runtimeMocks.ledger.getValidationForReceipt.mockReturnValue({
+      validationId: "validation-corrected",
+      receiptId: "receipt-corrected",
+      outcome: "accepted",
+      validatorId: runtimeMocks.guard.validator.id,
+      validatorVersion: runtimeMocks.guard.validator.version,
+      validatorDigest: runtimeMocks.guard.validator.sha256,
+      issues: [],
+    });
+    runtimeMocks.ledger.promoteRecordedTerminalCompletion.mockReturnValue("terminal-corrected");
+    const report = makeCompleteReport({ assigned: ["src/one.ts"] });
+    report.commands[0].evidenceId = "E1";
+    report.scope.inspected[0].evidenceIds = ["E1"];
+    const tool = createDelegationGuardTool({
+      config: {},
+      agentSessionKey: "agent:planner:main",
+    });
+
+    const result = await tool.execute("call-correction", {
+      action: "format_correction",
+      assignmentId: assignment.assignmentId,
+      originalReceiptId: "receipt-original",
+      report,
+    });
+
+    expect(runtimeMocks.ledger.appendFormatCorrection).toHaveBeenCalledWith({
+      assignmentId: assignment.assignmentId,
+      originalReceiptId: "receipt-original",
+      report: expect.objectContaining({
+        commands: [expect.objectContaining({ evidenceId: expect.stringMatching(/^evidence_/) })],
+        scope: expect.objectContaining({
+          inspected: [
+            expect.objectContaining({ evidenceIds: [expect.stringMatching(/^evidence_/)] }),
+          ],
+        }),
+      }),
+    });
+    const persisted = runtimeMocks.ledger.appendFormatCorrection.mock.calls[0]?.[0].report;
+    expect(persisted.commands[0].evidenceId).toBe(persisted.scope.inspected[0].evidenceIds[0]);
+    expect(result.details).toMatchObject({
+      status: "accepted",
+      receiptId: "receipt-corrected",
+      validationId: "validation-corrected",
+      terminalReceiptId: "terminal-corrected",
+      evidenceIdentity: {
+        assignmentId: assignment.assignmentId,
+        mapping: [
+          {
+            localId: "E1",
+            canonicalId: persisted.commands[0].evidenceId,
+          },
+        ],
+      },
+    });
+    expect(report.commands[0].evidenceId).toBe("E1");
   });
 });

@@ -18,12 +18,97 @@ import type { DelegationRuntime } from "./runtime.js";
 const SHA256 = /^[a-f0-9]{64}$/u;
 const FULL_SOURCE_REVISION = /^[a-f0-9]{40}$/u;
 const MAX_HTTP_BYTES = 512 * 1024;
+const MAX_LOG_HTTP_BYTES = 2 * 1024 * 1024;
 const PROVENANCE_PATH = path.resolve("dist/build-provenance.json");
 const DOCKER_SOCKET_PATH = "/var/run/docker.sock";
 const RETAINED_PROVENANCE_ROOT = "/opt/openclaw/build-provenance";
 const BUILD_PROVENANCE_VALIDATOR_ID = "openclaw-build-provenance-validator-v1";
 const BUILD_PROVENANCE_VALIDATOR_PATH = "scripts/verify-build-provenance.mjs";
 const RETAINED_PROVENANCE_LAYOUT = "openclaw-build-provenance-bundle-v1";
+
+export const DELEGATION_RUNTIME_EVIDENCE_FAILURE_STAGES = [
+  "protected-initial",
+  "provenance-manifest-initial",
+  "provenance-installed-initial",
+  "source-identity",
+  "container-inspection",
+  "health-probe",
+  "readiness-probe",
+  "log-regression-scan",
+  "cleanup-inventory",
+  "live-state-validation",
+  "provenance-manifest-final",
+  "provenance-installed-final",
+  "protected-final",
+  "capture-stability",
+  "stable-schema",
+] as const;
+
+export type DelegationRuntimeEvidenceFailureStage =
+  (typeof DELEGATION_RUNTIME_EVIDENCE_FAILURE_STAGES)[number];
+
+class DelegationRuntimeEvidenceCaptureError extends Error {
+  constructor(
+    readonly stage: DelegationRuntimeEvidenceFailureStage,
+    cause: unknown,
+  ) {
+    super(
+      cause instanceof Error
+        ? cause.message
+        : `Installed runtime evidence failed at the ${stage} stage.`,
+      { cause },
+    );
+    this.name = "DelegationRuntimeEvidenceCaptureError";
+  }
+}
+
+async function captureParallelStages<T extends readonly unknown[]>(actions: {
+  [Index in keyof T]: () => Promise<T[Index]>;
+}): Promise<T> {
+  const results = await Promise.allSettled(actions.map((action) => action()));
+  for (const result of results) {
+    if (result.status === "rejected") {
+      throw result.reason;
+    }
+  }
+  return results.map((result) =>
+    result.status === "fulfilled" ? result.value : undefined,
+  ) as unknown as T;
+}
+
+async function captureStage<T>(
+  stage: DelegationRuntimeEvidenceFailureStage,
+  action: () => T | Promise<T>,
+): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    if (error instanceof DelegationRuntimeEvidenceCaptureError) {
+      throw error;
+    }
+    throw new DelegationRuntimeEvidenceCaptureError(stage, error);
+  }
+}
+
+function assertNoProtectedRuntimeChanges(
+  changes: z.infer<typeof DockerFilesystemChangesSchema>,
+): void {
+  const protectedRoots = [path.resolve(process.cwd()), path.resolve(RETAINED_PROVENANCE_ROOT)];
+  const changedProtectedPath = changes.some((entry) =>
+    protectedRoots.some(
+      (root) => entry.Path === root || entry.Path.startsWith(`${root}${path.sep}`),
+    ),
+  );
+  if (changedProtectedPath) {
+    throw new Error("Installed runtime or retained provenance diverged from the image.");
+  }
+}
+
+export function resolveDelegationRuntimeEvidenceFailureStage(
+  error: unknown,
+): DelegationRuntimeEvidenceFailureStage | undefined {
+  return error instanceof DelegationRuntimeEvidenceCaptureError ? error.stage : undefined;
+}
 
 const ProvenanceFileSchema = z.object({
   path: z.string().min(1),
@@ -88,6 +173,14 @@ const DockerInspectSchema = z.object({
     Health: z.object({ Status: z.string().min(1) }).optional(),
   }),
 });
+const DockerFilesystemChangesSchema = z.array(
+  z
+    .object({
+      Path: z.string().min(1),
+      Kind: z.union([z.literal(0), z.literal(1), z.literal(2)]),
+    })
+    .strict(),
+);
 
 const BoundedIdSchema = z.string().min(1).max(1024);
 const DigestSchema = z.string().regex(SHA256);
@@ -337,6 +430,7 @@ const RuntimeEvidenceStableFactsSchema = z
 export type RuntimeEvidenceDeps = {
   readProvenance: () => Promise<unknown>;
   inspectSelf: () => Promise<unknown>;
+  inspectSelfChanges: () => Promise<unknown>;
   readSelfLogs: () => Promise<string>;
   probe: (
     port: number,
@@ -352,6 +446,7 @@ export type RuntimeEvidenceDeps = {
   >;
   verifyInstalledProvenance: (
     manifest: z.infer<typeof ProvenanceManifestSchema>,
+    identity: { containerId: string; imageId: string },
   ) => Promise<InstalledProvenanceVerification>;
   now: () => number;
 };
@@ -665,6 +760,21 @@ async function inspectSelf(): Promise<unknown> {
   return JSON.parse(response.body.toString("utf8")) as unknown;
 }
 
+async function inspectSelfChanges(): Promise<unknown> {
+  const hostname = os.hostname();
+  if (!/^[a-f0-9]{12,64}$/u.test(hostname)) {
+    throw new Error("Gateway runtime hostname is not a Docker container identity.");
+  }
+  const response = await requestBounded({
+    socketPath: DOCKER_SOCKET_PATH,
+    requestPath: `/containers/${hostname}/changes`,
+  });
+  if (response.statusCode !== 200) {
+    throw new Error(`Docker self-filesystem inspection failed with HTTP ${response.statusCode}.`);
+  }
+  return JSON.parse(response.body.toString("utf8")) as unknown;
+}
+
 async function readSelfLogs(): Promise<string> {
   const hostname = os.hostname();
   if (!/^[a-f0-9]{12,64}$/u.test(hostname)) {
@@ -673,6 +783,7 @@ async function readSelfLogs(): Promise<string> {
   const response = await requestBounded({
     socketPath: DOCKER_SOCKET_PATH,
     requestPath: `/containers/${hostname}/logs?stdout=true&stderr=true&tail=2000&timestamps=false`,
+    maxBytes: MAX_LOG_HTTP_BYTES,
   });
   if (response.statusCode !== 200) {
     throw new Error(`Docker log regression probe failed with HTTP ${response.statusCode}.`);
@@ -707,9 +818,48 @@ async function probe(port: number, probePath: "/healthz" | "/readyz") {
   return { statusCode: response.statusCode, status };
 }
 
+export function createInstalledRuntimeProvenanceVerifierCache(
+  verify: (
+    manifest: z.infer<typeof ProvenanceManifestSchema>,
+  ) => Promise<InstalledProvenanceVerification> = verifyInstalledRuntimeProvenance,
+) {
+  let cache: { key: string; result: Promise<InstalledProvenanceVerification> } | undefined;
+  return async (
+    manifest: z.infer<typeof ProvenanceManifestSchema>,
+    identity: { containerId: string; imageId: string },
+  ): Promise<InstalledProvenanceVerification> => {
+    const key = hashDelegationIdentity("installed-runtime-provenance-cache-v1", {
+      manifestDigest: manifest.manifestDigest,
+      ...identity,
+      root: path.resolve(process.cwd()),
+      retainedRoot: path.resolve(RETAINED_PROVENANCE_ROOT),
+      production: process.env.NODE_ENV === "production",
+    });
+    if (cache?.key === key) {
+      return await cache.result;
+    }
+    // The full verifier proves both trees are root-owned and not runtime-writable.
+    // Sharing its promise prevents concurrent verifier lanes from repeating the
+    // same large immutable image scan. Failed verification is never cached.
+    const result = verify(manifest);
+    cache = { key, result };
+    try {
+      return await result;
+    } catch (error) {
+      if (cache?.result === result) {
+        cache = undefined;
+      }
+      throw error;
+    }
+  };
+}
+
+const verifyInstalledRuntimeProvenanceCached = createInstalledRuntimeProvenanceVerifierCache();
+
 const defaultDeps: RuntimeEvidenceDeps = {
   readProvenance: async () => JSON.parse(await readFile(PROVENANCE_PATH, "utf8")) as unknown,
   inspectSelf,
+  inspectSelfChanges,
   readSelfLogs,
   probe,
   cleanupInventory: async (sessionKey) => {
@@ -724,7 +874,7 @@ const defaultDeps: RuntimeEvidenceDeps = {
       }))
       .toSorted((left, right) => compareDelegationStrings(left.containerName, right.containerName));
   },
-  verifyInstalledProvenance: verifyInstalledRuntimeProvenance,
+  verifyInstalledProvenance: verifyInstalledRuntimeProvenanceCached,
   now: Date.now,
 };
 
@@ -767,75 +917,125 @@ export async function captureDelegationRuntimeEvidence(params: {
   deps?: Partial<RuntimeEvidenceDeps>;
 }) {
   const deps = { ...defaultDeps, ...params.deps };
-  const protectedFacts = params.runtime.ledger.captureProtectedEvidenceForAssignment({
-    assignmentId: params.assignmentId,
-    childSessionKey: params.childSessionKey,
-  });
+  const protectedFacts = await captureStage("protected-initial", () =>
+    params.runtime.ledger.captureProtectedEvidenceForAssignment({
+      assignmentId: params.assignmentId,
+      childSessionKey: params.childSessionKey,
+    }),
+  );
   const protectedAssignment = protectedFacts.assignment;
-  if (
-    !protectedAssignment.candidateId ||
-    !protectedAssignment.waveId ||
-    (protectedAssignment.role !== "tester" && protectedAssignment.role !== "reviewer") ||
-    !["verification", "qa", "confirmation"].includes(protectedAssignment.purpose)
-  ) {
-    throw new Error("Runtime evidence requires an exact verifier frozen-wave assignment.");
-  }
-  const manifest = parseInstalledProvenance(await deps.readProvenance());
-  const { manifestDigest } = manifest;
-  const provenanceVerification = await deps.verifyInstalledProvenance(manifest);
-  const expectedRevision = process.env.OPENCLAW_SOURCE_REVISION?.trim();
-  if (!expectedRevision || !FULL_SOURCE_REVISION.test(expectedRevision)) {
-    throw new Error("Installed source revision is missing or malformed.");
-  }
-  const container = DockerInspectSchema.parse(await deps.inspectSelf());
-  const imageRevision = container.Config.Labels["org.opencontainers.image.revision"]?.trim();
-  const imageProvenanceUri = container.Config.Labels["ai.openclaw.provenance.uri"]?.trim();
-  if (
-    expectedRevision !== manifest.sourceRevision ||
-    imageRevision !== manifest.sourceRevision ||
-    imageProvenanceUri !== manifest.sourceMaps.retainedArtifact.uri ||
-    provenanceVerification.installedArtifactsDigest !==
-      sha256(canonicalDelegationJson(manifest.artifacts))
-  ) {
-    throw new Error("Installed image identity does not match the build provenance manifest.");
-  }
-  const port = resolveGatewayPort(params.config);
-  const [health, readiness, logs, cleanupInventory] = await Promise.all([
-    deps.probe(port, "/healthz"),
-    deps.probe(port, "/readyz"),
-    deps.readSelfLogs(),
-    deps.cleanupInventory(params.childSessionKey),
-  ]);
-  if (
-    health.statusCode !== 200 ||
-    health.status !== "live" ||
-    readiness.statusCode !== 200 ||
-    readiness.status !== "ready" ||
-    container.State.Status !== "running" ||
-    container.State.Health?.Status !== "healthy"
-  ) {
-    throw new Error("Installed gateway health or readiness probe is not green.");
-  }
-  if (
-    cleanupInventory.length > 8 ||
-    cleanupInventory.some((entry) => entry.sessionKey !== params.childSessionKey)
-  ) {
-    throw new Error("Runtime evidence cleanup inventory exceeded the assignment-owned session.");
-  }
-  const finalManifest = parseInstalledProvenance(await deps.readProvenance());
-  const finalVerification = await deps.verifyInstalledProvenance(finalManifest);
-  const finalProtectedFacts = params.runtime.ledger.captureProtectedEvidenceForAssignment({
-    assignmentId: params.assignmentId,
-    childSessionKey: params.childSessionKey,
+  await captureStage("protected-initial", () => {
+    if (
+      !protectedAssignment.candidateId ||
+      !protectedAssignment.waveId ||
+      (protectedAssignment.role !== "tester" && protectedAssignment.role !== "reviewer") ||
+      !["verification", "qa", "confirmation"].includes(protectedAssignment.purpose)
+    ) {
+      throw new Error("Runtime evidence requires an exact verifier frozen-wave assignment.");
+    }
   });
-  if (
-    canonicalDelegationJson(finalManifest) !== canonicalDelegationJson(manifest) ||
-    canonicalDelegationJson(finalVerification) !==
-      canonicalDelegationJson(provenanceVerification) ||
-    canonicalDelegationJson(finalProtectedFacts) !== canonicalDelegationJson(protectedFacts)
-  ) {
-    throw new Error("Runtime evidence changed during bounded capture.");
-  }
+  const manifest = await captureStage("provenance-manifest-initial", async () =>
+    parseInstalledProvenance(await deps.readProvenance()),
+  );
+  const { manifestDigest } = manifest;
+  const expectedRevision = await captureStage("source-identity", () => {
+    const revision = process.env.OPENCLAW_SOURCE_REVISION?.trim();
+    if (!revision || !FULL_SOURCE_REVISION.test(revision)) {
+      throw new Error("Installed source revision is missing or malformed.");
+    }
+    return revision;
+  });
+  const [container, containerChanges] = await captureParallelStages<
+    [z.infer<typeof DockerInspectSchema>, z.infer<typeof DockerFilesystemChangesSchema>]
+  >([
+    () =>
+      captureStage("container-inspection", async () =>
+        DockerInspectSchema.parse(await deps.inspectSelf()),
+      ),
+    () =>
+      captureStage("container-inspection", async () =>
+        DockerFilesystemChangesSchema.parse(await deps.inspectSelfChanges()),
+      ),
+  ]);
+  await captureStage("container-inspection", () =>
+    assertNoProtectedRuntimeChanges(containerChanges),
+  );
+  const provenanceIdentity = { containerId: container.Id, imageId: container.Image };
+  const provenanceVerification = await captureStage("provenance-installed-initial", () =>
+    deps.verifyInstalledProvenance(manifest, provenanceIdentity),
+  );
+  await captureStage("source-identity", () => {
+    const imageRevision = container.Config.Labels["org.opencontainers.image.revision"]?.trim();
+    const imageProvenanceUri = container.Config.Labels["ai.openclaw.provenance.uri"]?.trim();
+    if (
+      expectedRevision !== manifest.sourceRevision ||
+      imageRevision !== manifest.sourceRevision ||
+      imageProvenanceUri !== manifest.sourceMaps.retainedArtifact.uri ||
+      provenanceVerification.installedArtifactsDigest !==
+        sha256(canonicalDelegationJson(manifest.artifacts))
+    ) {
+      throw new Error("Installed image identity does not match the build provenance manifest.");
+    }
+  });
+  const port = resolveGatewayPort(params.config);
+  const [health, readiness, logs, cleanupInventory] = await captureParallelStages<
+    [
+      Awaited<ReturnType<RuntimeEvidenceDeps["probe"]>>,
+      Awaited<ReturnType<RuntimeEvidenceDeps["probe"]>>,
+      string,
+      Awaited<ReturnType<RuntimeEvidenceDeps["cleanupInventory"]>>,
+    ]
+  >([
+    () => captureStage("health-probe", () => deps.probe(port, "/healthz")),
+    () => captureStage("readiness-probe", () => deps.probe(port, "/readyz")),
+    () => captureStage("log-regression-scan", () => deps.readSelfLogs()),
+    () => captureStage("cleanup-inventory", () => deps.cleanupInventory(params.childSessionKey)),
+  ]);
+  await captureStage("live-state-validation", () => {
+    if (
+      health.statusCode !== 200 ||
+      health.status !== "live" ||
+      readiness.statusCode !== 200 ||
+      readiness.status !== "ready" ||
+      container.State.Status !== "running" ||
+      container.State.Health?.Status !== "healthy"
+    ) {
+      throw new Error("Installed gateway health or readiness probe is not green.");
+    }
+    if (
+      cleanupInventory.length > 8 ||
+      cleanupInventory.some((entry) => entry.sessionKey !== params.childSessionKey)
+    ) {
+      throw new Error("Runtime evidence cleanup inventory exceeded the assignment-owned session.");
+    }
+  });
+  const finalManifest = await captureStage("provenance-manifest-final", async () =>
+    parseInstalledProvenance(await deps.readProvenance()),
+  );
+  await captureStage("container-inspection", async () =>
+    assertNoProtectedRuntimeChanges(
+      DockerFilesystemChangesSchema.parse(await deps.inspectSelfChanges()),
+    ),
+  );
+  const finalVerification = await captureStage("provenance-installed-final", () =>
+    deps.verifyInstalledProvenance(finalManifest, provenanceIdentity),
+  );
+  const finalProtectedFacts = await captureStage("protected-final", () =>
+    params.runtime.ledger.captureProtectedEvidenceForAssignment({
+      assignmentId: params.assignmentId,
+      childSessionKey: params.childSessionKey,
+    }),
+  );
+  await captureStage("capture-stability", () => {
+    if (
+      canonicalDelegationJson(finalManifest) !== canonicalDelegationJson(manifest) ||
+      canonicalDelegationJson(finalVerification) !==
+        canonicalDelegationJson(provenanceVerification) ||
+      canonicalDelegationJson(finalProtectedFacts) !== canonicalDelegationJson(protectedFacts)
+    ) {
+      throw new Error("Runtime evidence changed during bounded capture.");
+    }
+  });
   const stableFacts = {
     version: DELEGATION_RUNTIME_EVIDENCE_VERSION,
     binding: {
@@ -917,13 +1117,17 @@ export async function captureDelegationRuntimeEvidence(params: {
       auditConsumer: "protected-delegation-report-v1",
     },
   };
-  const validatedStableFacts = RuntimeEvidenceStableFactsSchema.parse(stableFacts);
+  const validatedStableFacts = await captureStage("stable-schema", () =>
+    RuntimeEvidenceStableFactsSchema.parse(stableFacts),
+  );
+  const stableSnapshotDigest = hashDelegationIdentity(
+    DELEGATION_RUNTIME_EVIDENCE_VERSION,
+    validatedStableFacts,
+  );
   return {
     ...validatedStableFacts,
-    snapshotDigest: hashDelegationIdentity(
-      DELEGATION_RUNTIME_EVIDENCE_VERSION,
-      validatedStableFacts,
-    ),
+    snapshotDigest: stableSnapshotDigest,
+    stableSnapshotDigest,
     observedAt: deps.now(),
   };
 }
