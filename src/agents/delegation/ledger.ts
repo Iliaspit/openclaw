@@ -4440,6 +4440,11 @@ export class DelegationLedger {
     );
   }
 
+  assertAssignmentOpenForExecution(assignmentId: string): void {
+    this.assertActiveStack();
+    this.assertAssignmentOpen(assignmentId);
+  }
+
   private validationRejectionEventsForReceipt(params: {
     assignmentId: string;
     receiptId: string;

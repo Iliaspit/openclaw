@@ -11,11 +11,16 @@ import {
   resolveDelegationGuardConfig,
   resolveDelegationGuardPrincipal,
 } from "../delegation/policy.js";
+import { resolveInitializedDelegationRuntime } from "../delegation/runtime.js";
 import { DEFAULT_AGENT_WORKSPACE_DIR } from "../workspace.js";
 import { requireSandboxBackendFactory } from "./backend.js";
 import { ensureSandboxBrowser } from "./browser.js";
 import { resolveSandboxConfigForAgent } from "./config.js";
 import { createSandboxFsBridge } from "./fs-bridge.js";
+import {
+  assertGuardedVerifierExecutionCurrent,
+  resolveGuardedVerifierSandboxConfig,
+} from "./guarded-verifier-runtime.js";
 import { updateRegistry } from "./registry.js";
 import { resolveSandboxRuntimeStatus } from "./runtime-status.js";
 import { resolveSandboxScopeKey, resolveSandboxWorkspaceDir } from "./shared.js";
@@ -162,7 +167,18 @@ export async function resolveSandboxContext(params: {
   if (!resolved) {
     return null;
   }
-  const { rawSessionKey, cfg, runtime } = resolved;
+  const { rawSessionKey, runtime } = resolved;
+  const delegationRuntime = params.config
+    ? resolveInitializedDelegationRuntime(params.config)
+    : undefined;
+  const cfg = await resolveGuardedVerifierSandboxConfig({
+    config: params.config,
+    agentId: runtime.agentId,
+    sessionKey: rawSessionKey,
+    workspaceDir: params.workspaceDir,
+    sandbox: resolved.cfg,
+    runtime: delegationRuntime,
+  });
 
   if (cfg.prune.idleHours !== 0 || cfg.prune.maxAgeDays !== 0) {
     await (await import("./prune.js")).maybePruneSandboxes(cfg);
@@ -183,23 +199,86 @@ export async function resolveSandboxContext(params: {
   const resolvedCfg = docker === cfg.docker ? cfg : { ...cfg, docker };
 
   const backendFactory = requireSandboxBackendFactory(resolvedCfg.backend);
+  const verifierAuthorization = resolvedCfg.guardedVerifierAuthorization;
+  const verifierConfig = params.config;
+  const beforeExec =
+    resolvedCfg.guardedVerifierRuntime &&
+    verifierAuthorization &&
+    verifierConfig &&
+    delegationRuntime
+      ? async (signal?: AbortSignal, deadlineMs = 60_000) => {
+          if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0 || deadlineMs > 60_000) {
+            throw new Error("Guarded verifier authorization deadline is invalid.");
+          }
+          if (signal?.aborted) {
+            const error = new Error("Guarded verifier authorization was aborted.");
+            error.name = "AbortError";
+            throw error;
+          }
+          await new Promise<void>((resolve, reject) => {
+            let settled = false;
+            const finish = (error?: unknown) => {
+              if (settled) {
+                return;
+              }
+              settled = true;
+              clearTimeout(timeout);
+              signal?.removeEventListener("abort", handleAbort);
+              if (error !== undefined) {
+                reject(error);
+              } else {
+                resolve();
+              }
+            };
+            const handleAbort = () => {
+              const error = new Error("Guarded verifier authorization was aborted.");
+              error.name = "AbortError";
+              finish(error);
+            };
+            const timeout = setTimeout(
+              () => finish(new Error("Guarded verifier authorization exceeded its deadline.")),
+              deadlineMs,
+            );
+            timeout.unref();
+            signal?.addEventListener("abort", handleAbort, { once: true });
+            void assertGuardedVerifierExecutionCurrent({
+              config: verifierConfig,
+              agentId: runtime.agentId,
+              sessionKey: rawSessionKey,
+              workspaceDir,
+              runtime: delegationRuntime,
+              expectedAuthorization: verifierAuthorization,
+            }).then(
+              () => finish(),
+              (error: unknown) => finish(error),
+            );
+          });
+        }
+      : undefined;
   const backend = await backendFactory({
     sessionKey: rawSessionKey,
     scopeKey,
     workspaceDir,
     agentWorkspaceDir,
     cfg: resolvedCfg,
+    beforeExec,
   });
-  await updateRegistry({
-    containerName: backend.runtimeId,
-    backendId: backend.id,
-    runtimeLabel: backend.runtimeLabel,
-    sessionKey: scopeKey,
-    createdAtMs: Date.now(),
-    lastUsedAtMs: Date.now(),
-    image: backend.configLabel ?? resolvedCfg.docker.image,
-    configLabelKind: backend.configLabelKind ?? "Image",
-  });
+  if (backend.id !== "docker") {
+    await updateRegistry(
+      {
+        containerName: backend.runtimeLabel,
+        runtimeId: backend.runtimeId,
+        backendId: backend.id,
+        runtimeLabel: backend.runtimeLabel,
+        sessionKey: scopeKey,
+        createdAtMs: Date.now(),
+        lastUsedAtMs: Date.now(),
+        image: backend.configLabel ?? resolvedCfg.docker.image,
+        configLabelKind: backend.configLabelKind ?? "Image",
+      },
+      { runtimeTransition: "new-runtime" },
+    );
+  }
 
   const evaluateEnabled =
     params.config?.browser?.evaluateEnabled ?? DEFAULT_BROWSER_EVALUATE_ENABLED;

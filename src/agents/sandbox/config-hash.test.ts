@@ -106,6 +106,51 @@ describe("computeSandboxConfigHash", () => {
     });
     expect(left).not.toBe(right);
   });
+
+  it("binds the protected candidate and immutable runtime identities into the sandbox hash", () => {
+    const shared = {
+      docker: createDockerConfig(),
+      workspaceAccess: "ro" as const,
+      workspaceDir: "/tmp/workspace",
+      agentWorkspaceDir: "/tmp/workspace",
+      mountFormatVersion: SANDBOX_MOUNT_FORMAT_VERSION,
+      guardedVerifierAuthorization: {
+        assignmentId: "assignment-a",
+        candidateId: "candidate-a",
+        waveId: "wave-a",
+        epoch: 14,
+        candidateDigest: "a".repeat(64),
+        contextDigest: "b".repeat(64),
+        scopeDigest: "c".repeat(64),
+        worktreeIdentity: "d".repeat(64),
+        repositoryHead: "e".repeat(40),
+        sourceRevision: "f".repeat(40),
+      },
+      guardedVerifierRuntimeIdentity: {
+        imageId: `sha256:${"1".repeat(64)}`,
+        runtimeImageId: `sha256:${"0".repeat(64)}`,
+        imageRevision: "f".repeat(40),
+        packageManager: "yarn@4.9.2",
+        effectiveYarnVersion: "4.9.2",
+        containerEnvironment: ["CI=1", "OPENCLAW_CLI=1"],
+        artifactDigest: "2".repeat(64),
+        dependencyManifestDigest: "3".repeat(64),
+        browserManifestDigest: "4".repeat(64),
+        repositoryIdentityDigest: "5".repeat(64),
+        browserIdentityDigest: "6".repeat(64),
+        workspaceMountSourceDigest: "7".repeat(64),
+      },
+    };
+    const left = computeSandboxConfigHash(shared);
+    const right = computeSandboxConfigHash({
+      ...shared,
+      guardedVerifierAuthorization: {
+        ...shared.guardedVerifierAuthorization,
+        waveId: "wave-b",
+      },
+    });
+    expect(left).not.toBe(right);
+  });
 });
 
 describe("computeSandboxBrowserConfigHash", () => {

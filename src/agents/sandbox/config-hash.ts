@@ -1,5 +1,10 @@
 import { hashTextSha256 } from "./hash.js";
-import type { SandboxBrowserConfig, SandboxDockerConfig, SandboxWorkspaceAccess } from "./types.js";
+import type {
+  GuardedVerifierAuthorization,
+  SandboxBrowserConfig,
+  SandboxDockerConfig,
+  SandboxWorkspaceAccess,
+} from "./types.js";
 
 type SandboxHashInput = {
   docker: SandboxDockerConfig;
@@ -7,6 +12,21 @@ type SandboxHashInput = {
   workspaceDir: string;
   agentWorkspaceDir: string;
   mountFormatVersion: number;
+  guardedVerifierAuthorization?: GuardedVerifierAuthorization;
+  guardedVerifierRuntimeIdentity?: {
+    imageId: string;
+    runtimeImageId: string;
+    imageRevision: string;
+    packageManager: string;
+    effectiveYarnVersion: string;
+    containerEnvironment: string[];
+    artifactDigest: string;
+    dependencyManifestDigest: string;
+    browserManifestDigest: string;
+    repositoryIdentityDigest: string;
+    browserIdentityDigest: string;
+    workspaceMountSourceDigest: string;
+  };
 };
 
 type SandboxBrowserHashInput = {

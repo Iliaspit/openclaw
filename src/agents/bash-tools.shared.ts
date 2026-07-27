@@ -18,12 +18,16 @@ export type BashSandboxConfig = {
     workdir?: string;
     env: Record<string, string>;
     usePty: boolean;
+    signal?: AbortSignal;
+    verificationDeadlineMs?: number;
   }) => Promise<SandboxBackendExecSpec>;
   finalizeExec?: (params: {
     status: "completed" | "failed";
     exitCode: number | null;
     timedOut: boolean;
     token?: unknown;
+    signal?: AbortSignal;
+    verificationDeadlineMs?: number;
   }) => Promise<void>;
 };
 

@@ -5,6 +5,7 @@ export const BROWSER_BRIDGES = new Map<
   {
     bridge: BrowserBridge;
     containerName: string;
+    runtimeId: string;
     authToken?: string;
     authPassword?: string;
   }

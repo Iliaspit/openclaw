@@ -19,6 +19,8 @@ const dockerMocks = vi.hoisted(() => ({
 
 const registryMocks = vi.hoisted(() => ({
   readBrowserRegistry: vi.fn(),
+  removeBrowserRegistryEntryExact: vi.fn(),
+  removeBrowserRegistryEntryOwned: vi.fn(),
   updateBrowserRegistry: vi.fn(),
 }));
 
@@ -42,7 +44,13 @@ vi.mock("./docker.js", async () => {
 });
 
 vi.mock("./registry.js", () => ({
+  readRegistry: vi.fn(async () => ({ entries: [] })),
+  removeRegistryEntryExact: vi.fn(async () => {}),
   readBrowserRegistry: registryMocks.readBrowserRegistry,
+  readBrowserRegistryStrict: registryMocks.readBrowserRegistry,
+  removeBrowserRegistryEntryExact: registryMocks.removeBrowserRegistryEntryExact,
+  removeBrowserRegistryEntryOwned: registryMocks.removeBrowserRegistryEntryOwned,
+  updateRegistry: vi.fn(async () => {}),
   updateBrowserRegistry: registryMocks.updateBrowserRegistry,
 }));
 
@@ -132,18 +140,38 @@ describe("ensureSandboxBrowser create args", () => {
     dockerMocks.readDockerNetworkGateway.mockClear();
     dockerMocks.readDockerPort.mockClear();
     registryMocks.readBrowserRegistry.mockClear();
+    registryMocks.removeBrowserRegistryEntryExact.mockClear();
+    registryMocks.removeBrowserRegistryEntryOwned.mockClear();
     registryMocks.updateBrowserRegistry.mockClear();
     bridgeMocks.startBrowserBridgeServer.mockClear();
     bridgeMocks.stopBrowserBridgeServer.mockClear();
 
-    dockerMocks.dockerContainerState.mockResolvedValue({ exists: false, running: false });
+    dockerMocks.dockerContainerState.mockImplementation(async (container: string) => ({
+      exists: container === "c".repeat(64),
+      running: false,
+    }));
     dockerMocks.execDocker.mockImplementation(async (args: string[]) => {
       if (args[0] === "image" && args[1] === "inspect") {
         return { stdout: "[]", stderr: "", code: 0 };
       }
+      if (args[0] === "create") {
+        return { stdout: `${"c".repeat(64)}\n`, stderr: "", code: 0 };
+      }
+      if (args[0] === "inspect" && args.includes("--type")) {
+        return {
+          stdout: `${"c".repeat(64)}\topenclaw-sandbox-browser:bookworm-slim\tfalse\n`,
+          stderr: "",
+          code: 0,
+        };
+      }
       return { stdout: "", stderr: "", code: 0 };
     });
-    dockerMocks.readDockerContainerLabel.mockResolvedValue(null);
+    dockerMocks.readDockerContainerLabel.mockImplementation(async () => {
+      const createArgs = findDockerArgsCall(dockerMocks.execDocker.mock.calls, "create") ?? [];
+      return collectDockerFlagValues(createArgs, "--label")
+        .find((value) => value.startsWith("openclaw.configHash="))
+        ?.slice("openclaw.configHash=".length);
+    });
     dockerMocks.readDockerContainerEnvVar.mockResolvedValue(null);
     dockerMocks.readDockerNetworkDriver.mockResolvedValue("bridge");
     dockerMocks.readDockerNetworkGateway.mockResolvedValue("172.21.0.1");
@@ -157,6 +185,8 @@ describe("ensureSandboxBrowser create args", () => {
       return null;
     });
     registryMocks.readBrowserRegistry.mockResolvedValue({ entries: [] });
+    registryMocks.removeBrowserRegistryEntryExact.mockResolvedValue(undefined);
+    registryMocks.removeBrowserRegistryEntryOwned.mockResolvedValue(true);
     registryMocks.updateBrowserRegistry.mockResolvedValue(undefined);
     bridgeMocks.startBrowserBridgeServer.mockResolvedValue({
       server: {} as never,
@@ -285,11 +315,140 @@ describe("ensureSandboxBrowser create args", () => {
         agentWorkspaceDir: "/tmp/workspace",
         cfg,
       }),
-    ).rejects.toThrow("hung container has been forcefully removed");
+    ).rejects.toThrow("CDP did not become reachable");
 
-    expect(dockerMocks.execDocker).toHaveBeenCalledWith(
-      ["rm", "-f", expect.stringMatching(/^openclaw-sbx-browser-session-test-/)],
-      { allowFailure: true },
+    expect(dockerMocks.execDocker).toHaveBeenCalledWith(["rm", "-f", "c".repeat(64)]);
+    const provisionalEntry = registryMocks.updateBrowserRegistry.mock.calls[0]?.[0];
+    expect(provisionalEntry).toBeDefined();
+    expect(registryMocks.removeBrowserRegistryEntryExact).toHaveBeenCalledWith(
+      provisionalEntry?.containerName,
+      "c".repeat(64),
+    );
+  });
+
+  it("publishes and validates exact ownership before first start", async () => {
+    await ensureTestSandboxBrowser({
+      scopeKey: "session:test",
+      workspaceDir: "/tmp/workspace",
+      agentWorkspaceDir: "/tmp/workspace",
+      cfg: buildConfig(false),
+    });
+
+    const startCall = dockerMocks.execDocker.mock.calls.find(([args]) => args[0] === "start");
+    expect(startCall).toBeDefined();
+    expect(registryMocks.updateBrowserRegistry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtimeId: "c".repeat(64),
+        cdpPort: 0,
+      }),
+      { runtimeTransition: "new-runtime" },
+    );
+    expect(registryMocks.updateBrowserRegistry.mock.invocationCallOrder[0]).toBeLessThan(
+      dockerMocks.execDocker.mock.invocationCallOrder.at(-1) ?? Number.MAX_SAFE_INTEGER,
+    );
+    expect(dockerMocks.execDocker).toHaveBeenCalledWith([
+      "inspect",
+      "--type",
+      "container",
+      "--format",
+      "{{.Id}}\t{{.Config.Image}}\t{{.State.Running}}",
+      "c".repeat(64),
+    ]);
+  });
+
+  it.each(["start", "port", "bridge", "registry"] as const)(
+    "rolls back the exact created browser when %s provisioning fails",
+    async (failureStage) => {
+      if (failureStage === "start") {
+        dockerMocks.execDocker.mockImplementationOnce(async (args: string[]) => {
+          if (args[0] === "image") {
+            return { stdout: "[]", stderr: "", code: 0 };
+          }
+          return { stdout: "", stderr: "", code: 0 };
+        });
+        dockerMocks.execDocker.mockImplementation(async (args: string[]) => {
+          if (args[0] === "image") {
+            return { stdout: "[]", stderr: "", code: 0 };
+          }
+          if (args[0] === "create") {
+            return { stdout: `${"c".repeat(64)}\n`, stderr: "", code: 0 };
+          }
+          if (args[0] === "inspect" && args.includes("--type")) {
+            return {
+              stdout: `${"c".repeat(64)}\topenclaw-sandbox-browser:bookworm-slim\tfalse\n`,
+              stderr: "",
+              code: 0,
+            };
+          }
+          if (args[0] === "start") {
+            throw new Error("start failed");
+          }
+          return { stdout: "", stderr: "", code: 0 };
+        });
+      } else if (failureStage === "port") {
+        dockerMocks.readDockerPort.mockResolvedValue(null);
+      } else if (failureStage === "bridge") {
+        bridgeMocks.startBrowserBridgeServer.mockRejectedValue(new Error("bridge failed"));
+      } else {
+        registryMocks.updateBrowserRegistry
+          .mockResolvedValueOnce(undefined)
+          .mockRejectedValueOnce(new Error("final registry failed"));
+      }
+
+      await expect(
+        ensureTestSandboxBrowser({
+          scopeKey: "session:test",
+          workspaceDir: "/tmp/workspace",
+          agentWorkspaceDir: "/tmp/workspace",
+          cfg: buildConfig(false),
+        }),
+      ).rejects.toThrow();
+
+      expect(dockerMocks.execDocker).toHaveBeenCalledWith(["rm", "-f", "c".repeat(64)]);
+      const provisionalEntry = registryMocks.updateBrowserRegistry.mock.calls[0]?.[0];
+      expect(provisionalEntry).toBeDefined();
+      expect(registryMocks.removeBrowserRegistryEntryExact).toHaveBeenCalledWith(
+        provisionalEntry?.containerName,
+        "c".repeat(64),
+      );
+    },
+  );
+
+  it("retains exact registry ownership when rollback cannot prove runtime removal", async () => {
+    bridgeMocks.startBrowserBridgeServer.mockRejectedValue(new Error("bridge failed"));
+    dockerMocks.execDocker.mockImplementation(async (args: string[]) => {
+      if (args[0] === "image") {
+        return { stdout: "[]", stderr: "", code: 0 };
+      }
+      if (args[0] === "create") {
+        return { stdout: `${"c".repeat(64)}\n`, stderr: "", code: 0 };
+      }
+      if (args[0] === "inspect" && args.includes("--type")) {
+        return {
+          stdout: `${"c".repeat(64)}\topenclaw-sandbox-browser:bookworm-slim\tfalse\n`,
+          stderr: "",
+          code: 0,
+        };
+      }
+      if (args[0] === "rm") {
+        throw new Error("daemon removal ambiguous");
+      }
+      return { stdout: "", stderr: "", code: 0 };
+    });
+
+    await expect(
+      ensureTestSandboxBrowser({
+        scopeKey: "session:test",
+        workspaceDir: "/tmp/workspace",
+        agentWorkspaceDir: "/tmp/workspace",
+        cfg: buildConfig(false),
+      }),
+    ).rejects.toThrow("remains registered for supported cleanup");
+
+    expect(registryMocks.removeBrowserRegistryEntryExact).not.toHaveBeenCalled();
+    expect(registryMocks.updateBrowserRegistry).toHaveBeenLastCalledWith(
+      expect.objectContaining({ runtimeId: "c".repeat(64) }),
+      { runtimeTransition: "new-runtime" },
     );
   });
 

@@ -19,6 +19,8 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const FULL_SOURCE_REVISION = /^[a-f0-9]{40}$/u;
 const MAX_HTTP_BYTES = 512 * 1024;
 const MAX_LOG_HTTP_BYTES = 2 * 1024 * 1024;
+const DEFAULT_HTTP_TIMEOUT_MS = 5_000;
+export const RUNTIME_EVIDENCE_DOCKER_CHANGES_TIMEOUT_MS = 30_000;
 const PROVENANCE_PATH = path.resolve("dist/build-provenance.json");
 const DOCKER_SOCKET_PATH = "/var/run/docker.sock";
 const RETAINED_PROVENANCE_ROOT = "/opt/openclaw/build-provenance";
@@ -104,6 +106,25 @@ function assertNoProtectedRuntimeChanges(
   }
 }
 
+function assertNoProtectedRuntimeMounts(mounts: Array<{ Destination: string }>): void {
+  const protectedRoots = [path.resolve(process.cwd()), path.resolve(RETAINED_PROVENANCE_ROOT)];
+  const shadowsProtectedRoot = mounts.some((mount) => {
+    const destination = path.resolve(mount.Destination);
+    return protectedRoots.some((root) => {
+      const relative = path.relative(destination, root);
+      const reverse = path.relative(root, destination);
+      return (
+        relative === "" ||
+        (!relative.startsWith("..") && !path.isAbsolute(relative)) ||
+        (!reverse.startsWith("..") && !path.isAbsolute(reverse))
+      );
+    });
+  });
+  if (shadowsProtectedRoot) {
+    throw new Error("Installed runtime or retained provenance is shadowed by a mount.");
+  }
+}
+
 export function resolveDelegationRuntimeEvidenceFailureStage(
   error: unknown,
 ): DelegationRuntimeEvidenceFailureStage | undefined {
@@ -164,6 +185,7 @@ const DockerInspectSchema = z.object({
   Name: z.string().min(2),
   Config: z.object({
     Image: z.string().min(1),
+    Hostname: z.string().min(1),
     Labels: z.record(z.string(), z.string().nullable()).default({}),
   }),
   RestartCount: z.number().int().nonnegative(),
@@ -172,6 +194,15 @@ const DockerInspectSchema = z.object({
     StartedAt: z.string().min(1),
     Health: z.object({ Status: z.string().min(1) }).optional(),
   }),
+  Mounts: z.array(
+    z
+      .object({
+        Type: z.enum(["bind", "volume", "tmpfs", "npipe", "cluster"]),
+        Destination: z.string().min(1),
+        RW: z.boolean(),
+      })
+      .passthrough(),
+  ),
 });
 const DockerFilesystemChangesSchema = z.array(
   z
@@ -428,6 +459,7 @@ const RuntimeEvidenceStableFactsSchema = z
   .strict();
 
 export type RuntimeEvidenceDeps = {
+  runtimeHostname: () => string;
   readProvenance: () => Promise<unknown>;
   inspectSelf: () => Promise<unknown>;
   inspectSelfChanges: () => Promise<unknown>;
@@ -706,14 +738,24 @@ export async function verifyInstalledRuntimeProvenance(
   return verification;
 }
 
-function requestBounded(params: {
+export function requestBounded(params: {
   socketPath?: string;
   host?: string;
   port?: number;
   requestPath: string;
   maxBytes?: number;
+  timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<{ statusCode: number; body: Buffer }> {
   return new Promise((resolve, reject) => {
+    let wallClockTimer: NodeJS.Timeout | undefined;
+    let settled = false;
+    const clearDeadline = () => {
+      if (wallClockTimer) {
+        clearTimeout(wallClockTimer);
+        wallClockTimer = undefined;
+      }
+    };
     const request = http.request(
       {
         method: "GET",
@@ -721,26 +763,58 @@ function requestBounded(params: {
           ? { socketPath: params.socketPath }
           : { host: params.host, port: params.port }),
         path: params.requestPath,
-        timeout: 5_000,
+        timeout: params.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS,
       },
       (response) => {
         const chunks: Buffer[] = [];
         let bytes = 0;
+        let limitExceeded = false;
         response.on("data", (chunk: Buffer) => {
           bytes += chunk.length;
           if (bytes > (params.maxBytes ?? MAX_HTTP_BYTES)) {
-            request.destroy(new Error("Runtime evidence response exceeded its byte limit."));
+            limitExceeded = true;
+            const error = new Error("Runtime evidence response exceeded its byte limit.");
+            response.destroy(error);
+            request.destroy(error);
+            response.socket?.destroy(error);
             return;
           }
           chunks.push(chunk);
         });
-        response.on("end", () =>
-          resolve({ statusCode: response.statusCode ?? 0, body: Buffer.concat(chunks) }),
-        );
+        response.on("end", () => {
+          if (limitExceeded) {
+            return;
+          }
+          clearDeadline();
+          params.signal?.removeEventListener("abort", abort);
+          settled = true;
+          resolve({ statusCode: response.statusCode ?? 0, body: Buffer.concat(chunks) });
+        });
       },
     );
+    const abort = () => {
+      request.destroy(new Error("Runtime evidence probe was aborted."));
+    };
+    wallClockTimer = setTimeout(
+      () => request.destroy(new Error("Runtime evidence probe exceeded its wall-clock deadline.")),
+      params.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS,
+    );
+    wallClockTimer.unref();
     request.on("timeout", () => request.destroy(new Error("Runtime evidence probe timed out.")));
-    request.on("error", reject);
+    request.on("error", (error) => {
+      clearDeadline();
+      params.signal?.removeEventListener("abort", abort);
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(error);
+    });
+    if (params.signal?.aborted) {
+      abort();
+    } else {
+      params.signal?.addEventListener("abort", abort, { once: true });
+    }
     request.end();
   });
 }
@@ -768,12 +842,33 @@ async function inspectSelfChanges(): Promise<unknown> {
   const response = await requestBounded({
     socketPath: DOCKER_SOCKET_PATH,
     requestPath: `/containers/${hostname}/changes`,
+    timeoutMs: RUNTIME_EVIDENCE_DOCKER_CHANGES_TIMEOUT_MS,
   });
   if (response.statusCode !== 200) {
     throw new Error(`Docker self-filesystem inspection failed with HTTP ${response.statusCode}.`);
   }
   return JSON.parse(response.body.toString("utf8")) as unknown;
 }
+
+export function createRuntimeEvidenceSingleFlight<T>(action: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | undefined;
+  return async () => {
+    if (pending) {
+      return await pending;
+    }
+    const current = action();
+    pending = current;
+    try {
+      return await current;
+    } finally {
+      if (pending === current) {
+        pending = undefined;
+      }
+    }
+  };
+}
+
+const inspectSelfChangesSingleFlight = createRuntimeEvidenceSingleFlight(inspectSelfChanges);
 
 async function readSelfLogs(): Promise<string> {
   const hostname = os.hostname();
@@ -857,9 +952,10 @@ export function createInstalledRuntimeProvenanceVerifierCache(
 const verifyInstalledRuntimeProvenanceCached = createInstalledRuntimeProvenanceVerifierCache();
 
 const defaultDeps: RuntimeEvidenceDeps = {
+  runtimeHostname: os.hostname,
   readProvenance: async () => JSON.parse(await readFile(PROVENANCE_PATH, "utf8")) as unknown,
   inspectSelf,
-  inspectSelfChanges,
+  inspectSelfChanges: inspectSelfChangesSingleFlight,
   readSelfLogs,
   probe,
   cleanupInventory: async (sessionKey) => {
@@ -957,8 +1053,17 @@ export async function captureDelegationRuntimeEvidence(params: {
         DockerFilesystemChangesSchema.parse(await deps.inspectSelfChanges()),
       ),
   ]);
+  await captureStage("container-inspection", () => {
+    const hostname = deps.runtimeHostname();
+    if (container.Config.Hostname !== hostname || !container.Id.startsWith(hostname)) {
+      throw new Error("Docker self-inspection did not return the requesting Gateway container.");
+    }
+  });
   await captureStage("container-inspection", () =>
     assertNoProtectedRuntimeChanges(containerChanges),
+  );
+  await captureStage("container-inspection", () =>
+    assertNoProtectedRuntimeMounts(container.Mounts),
   );
   const provenanceIdentity = { containerId: container.Id, imageId: container.Image };
   const provenanceVerification = await captureStage("provenance-installed-initial", () =>
@@ -1012,11 +1117,30 @@ export async function captureDelegationRuntimeEvidence(params: {
   const finalManifest = await captureStage("provenance-manifest-final", async () =>
     parseInstalledProvenance(await deps.readProvenance()),
   );
-  await captureStage("container-inspection", async () =>
-    assertNoProtectedRuntimeChanges(
-      DockerFilesystemChangesSchema.parse(await deps.inspectSelfChanges()),
-    ),
-  );
+  const [finalContainer, finalContainerChanges] = await captureParallelStages<
+    [z.infer<typeof DockerInspectSchema>, z.infer<typeof DockerFilesystemChangesSchema>]
+  >([
+    () =>
+      captureStage("container-inspection", async () =>
+        DockerInspectSchema.parse(await deps.inspectSelf()),
+      ),
+    () =>
+      captureStage("container-inspection", async () =>
+        DockerFilesystemChangesSchema.parse(await deps.inspectSelfChanges()),
+      ),
+  ]);
+  await captureStage("container-inspection", () => {
+    assertNoProtectedRuntimeChanges(finalContainerChanges);
+    if (
+      finalContainer.Id !== container.Id ||
+      finalContainer.Image !== container.Image ||
+      finalContainer.Config.Hostname !== container.Config.Hostname ||
+      finalContainer.State.StartedAt !== container.State.StartedAt ||
+      finalContainer.State.Status !== "running"
+    ) {
+      throw new Error("Gateway container identity changed during runtime evidence capture.");
+    }
+  });
   const finalVerification = await captureStage("provenance-installed-final", () =>
     deps.verifyInstalledProvenance(finalManifest, provenanceIdentity),
   );

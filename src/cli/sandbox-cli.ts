@@ -1,5 +1,9 @@
 import type { Command } from "commander";
 import { sandboxExplainCommand } from "../commands/sandbox-explain.js";
+import {
+  sandboxVerifierPrepareCommand,
+  sandboxVerifierVerifyCommand,
+} from "../commands/sandbox-verifier-prepare.js";
 import { sandboxListCommand, sandboxRecreateCommand } from "../commands/sandbox.js";
 import { defaultRuntime } from "../runtime.js";
 import { formatDocsLink } from "../terminal/links.js";
@@ -97,6 +101,50 @@ export function registerSandboxCli(program: Command) {
           {
             browser: Boolean(opts.browser),
             json: Boolean(opts.json),
+          },
+          defaultRuntime,
+        ),
+      ),
+    );
+
+  sandbox
+    .command("verifier-prepare")
+    .requiredOption("--workspace <path>")
+    .requiredOption("--browser-root <path>")
+    .requiredOption("--repository-head <sha>")
+    .requiredOption("--source-revision <sha>")
+    .action(
+      createRunner((opts) =>
+        sandboxVerifierPrepareCommand(
+          {
+            workspace: opts.workspace as string,
+            browserRoot: opts.browserRoot as string,
+            repositoryHead: opts.repositoryHead as string,
+            sourceRevision: opts.sourceRevision as string,
+          },
+          defaultRuntime,
+        ),
+      ),
+    );
+
+  sandbox
+    .command("verifier-verify")
+    .requiredOption("--workspace <path>")
+    .requiredOption("--browser-root <path>")
+    .requiredOption("--repository-head <sha>")
+    .requiredOption("--source-revision <sha>")
+    .option("--dependency-manifest <sha>")
+    .option("--browser-manifest <sha>")
+    .action(
+      createRunner((opts) =>
+        sandboxVerifierVerifyCommand(
+          {
+            workspace: opts.workspace as string,
+            browserRoot: opts.browserRoot as string,
+            repositoryHead: opts.repositoryHead as string,
+            sourceRevision: opts.sourceRevision as string,
+            dependencyManifest: opts.dependencyManifest as string | undefined,
+            browserManifest: opts.browserManifest as string | undefined,
           },
           defaultRuntime,
         ),

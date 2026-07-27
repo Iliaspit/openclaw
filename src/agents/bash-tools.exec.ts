@@ -1706,6 +1706,7 @@ export function createExecTool(
         sessionKey: notifySessionKey,
         notifyDeliveryContext,
         timeoutSec: effectiveTimeout,
+        signal,
         onUpdate,
       });
 

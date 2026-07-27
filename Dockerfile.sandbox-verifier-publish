@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1.7
+
+ARG OPENCLAW_VERIFIER_CANDIDATE_IMAGE
+FROM ${OPENCLAW_VERIFIER_CANDIDATE_IMAGE}
+
+ARG OPENCLAW_VERIFIER_DEPENDENCY_MANIFEST
+ARG OPENCLAW_VERIFIER_BROWSER_MANIFEST
+ARG OPENCLAW_VERIFIER_ARTIFACT_DIGEST
+ARG OPENCLAW_VERIFIER_REPOSITORY_IDENTITY
+ARG OPENCLAW_VERIFIER_BROWSER_IDENTITY
+ARG OPENCLAW_VERIFIER_EFFECTIVE_YARN_VERSION
+
+LABEL org.opencontainers.image.title="OpenClaw guarded verifier artifact" \
+  ai.openclaw.sandbox.contract="guarded-verifier-oci-v1" \
+  ai.openclaw.verifier.dependency-manifest="${OPENCLAW_VERIFIER_DEPENDENCY_MANIFEST}" \
+  ai.openclaw.verifier.browser-manifest="${OPENCLAW_VERIFIER_BROWSER_MANIFEST}" \
+  ai.openclaw.verifier.artifact-digest="${OPENCLAW_VERIFIER_ARTIFACT_DIGEST}" \
+  ai.openclaw.verifier.repository-identity="${OPENCLAW_VERIFIER_REPOSITORY_IDENTITY}" \
+  ai.openclaw.verifier.browser-identity="${OPENCLAW_VERIFIER_BROWSER_IDENTITY}" \
+  ai.openclaw.verifier.effective-yarn-version="${OPENCLAW_VERIFIER_EFFECTIVE_YARN_VERSION}"

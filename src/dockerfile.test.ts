@@ -6,6 +6,7 @@ import { BUNDLED_PLUGIN_ROOT_DIR } from "../test/helpers/bundled-plugin-paths.js
 
 const repoRoot = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
 const dockerfilePath = join(repoRoot, "Dockerfile");
+const verifierDockerfilePath = join(repoRoot, "Dockerfile.sandbox-verifier");
 
 function collapseDockerContinuations(dockerfile: string): string {
   return dockerfile.replace(/\\\r?\n[ \t]*/g, " ");
@@ -96,5 +97,34 @@ describe("Dockerfile", () => {
     expect(dockerfile).toContain(
       'corepack prepare "$(node -p "require(\'./package.json\').packageManager")" --activate',
     );
+  });
+
+  it("keeps the guarded verifier OCI artifact offline-ready without Docker tooling", async () => {
+    const dockerfile = await readFile(verifierDockerfilePath, "utf8");
+    expect(dockerfile).toContain(
+      'ARG OPENCLAW_NODE_BOOKWORM_IMAGE="node:24-bookworm@sha256:3a09aa6354567619221ef6c45a5051b671f953f0a1924d1f819ffb236e520e6b"',
+    );
+    expect(dockerfile).toContain("ARG OPENCLAW_VERIFIER_PACKAGE_MANAGER");
+    expect(dockerfile).toContain(
+      'corepack prepare "${OPENCLAW_VERIFIER_PACKAGE_MANAGER}" --activate',
+    );
+    expect(dockerfile).toContain('test -x "$(command -v yarn)"');
+    expect(dockerfile).toContain(
+      'test "$(yarn --version)" = "${OPENCLAW_VERIFIER_PACKAGE_MANAGER#yarn@}"',
+    );
+    expect(dockerfile).toContain("grep -Eq '^yarn@");
+    expect(dockerfile).not.toContain("pnpm|npm|bun");
+    expect(dockerfile).toContain('org.opencontainers.image.revision="${OPENCLAW_SOURCE_REVISION}"');
+    expect(dockerfile).toContain('ai.openclaw.verifier.runtime-image="${OPENCLAW_RUNTIME_IMAGE}"');
+    expect(dockerfile).toContain('ai.openclaw.sandbox.contract="guarded-verifier-candidate-v1"');
+    expect(dockerfile).toContain("chromium");
+    expect(dockerfile).toContain("-perm /111 -print -quit");
+    expect(dockerfile).toContain("PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright");
+    expect(dockerfile).not.toContain("apt-get upgrade");
+    expect(dockerfile).toContain("FROM verifier-base AS verifier-builder");
+    expect(dockerfile).toContain("COPY --chown=node:node . .");
+    expect(dockerfile).toContain("/opt/openclaw-verifier/dependencies");
+    expect(dockerfile).not.toContain("docker-ce-cli");
+    expect(dockerfile).toContain("/opt/openclaw/openclaw.mjs");
   });
 });

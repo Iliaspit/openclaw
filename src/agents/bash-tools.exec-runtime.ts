@@ -12,6 +12,7 @@ import { isDangerousHostInheritedEnvVarName } from "../infra/host-env-security.j
 import { findPathKey, mergePathPrepend } from "../infra/path-prepend.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { scopedHeartbeatWakeOptions } from "../routing/session-key.js";
+import { createPrimaryAndSecondaryAggregateError } from "./aggregate-error.js";
 import type { ProcessSession } from "./bash-process-registry.js";
 import type { ExecToolDetails } from "./bash-tools.exec-types.js";
 import type { BashSandboxConfig } from "./bash-tools.shared.js";
@@ -496,6 +497,63 @@ export function buildExecRuntimeErrorOutcome(params: {
   };
 }
 
+function buildExecPostVerificationFailureOutcome(
+  outcome: ExecProcessOutcome,
+  error: unknown,
+): ExecProcessOutcome {
+  const commandResult =
+    outcome.status === "completed"
+      ? `Command completed with exit code ${outcome.exitCode}.`
+      : `Command outcome: ${outcome.reason}`;
+  return {
+    status: "failed",
+    exitCode: outcome.exitCode,
+    exitSignal: outcome.exitSignal,
+    durationMs: outcome.durationMs,
+    aggregated: outcome.aggregated,
+    timedOut: outcome.timedOut,
+    failureKind: "runtime-error",
+    reason: `${commandResult}\nMandatory post-execution validation failed: ${String(error)}`,
+  };
+}
+
+async function finalizeSandboxExec(params: {
+  finalizeExec: NonNullable<BashSandboxConfig["finalizeExec"]>;
+  status: "completed" | "failed";
+  exitCode: number | null;
+  timedOut: boolean;
+  token: unknown;
+}): Promise<void> {
+  const deadlineMs = 60_000;
+  const controller = new AbortController();
+  let timeout: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      const error = new Error("Sandbox post-execution validation exceeded its deadline.");
+      controller.abort(error);
+      reject(error);
+    }, deadlineMs);
+    timeout.unref();
+  });
+  try {
+    await Promise.race([
+      params.finalizeExec({
+        status: params.status,
+        exitCode: params.exitCode,
+        timedOut: params.timedOut,
+        token: params.token,
+        signal: controller.signal,
+        verificationDeadlineMs: deadlineMs,
+      }),
+      deadline,
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 export async function runExecProcess(opts: {
   command: string;
   // Execute this instead of `command` (which is kept for display/session/logging).
@@ -515,6 +573,7 @@ export async function runExecProcess(opts: {
   sessionKey?: string;
   notifyDeliveryContext?: DeliveryContext;
   timeoutSec: number | null;
+  signal?: AbortSignal;
   onUpdate?: (partialResult: AgentToolResult<ExecToolDetails>) => void;
 }): Promise<ExecProcessHandle> {
   const startedAt = Date.now();
@@ -646,6 +705,8 @@ export async function runExecProcess(opts: {
         workdir: opts.containerWorkdir ?? opts.sandbox.containerWorkdir,
         env: shellRuntimeEnv,
         usePty: opts.usePty,
+        signal: opts.signal,
+        verificationDeadlineMs: 60_000,
       });
       sandboxFinalizeToken = backendExecSpec?.finalizeToken;
       return {
@@ -759,6 +820,27 @@ export async function runExecProcess(opts: {
         throw retryErr;
       }
     } else {
+      if (opts.sandbox?.finalizeExec) {
+        try {
+          await finalizeSandboxExec({
+            finalizeExec: opts.sandbox.finalizeExec,
+            status: "failed",
+            exitCode: null,
+            timedOut: false,
+            token: sandboxFinalizeToken,
+          });
+        } catch (finalizationCause) {
+          markExited(session, null, null, "failed");
+          maybeNotifyOnExit(session, "failed");
+          throw createPrimaryAndSecondaryAggregateError({
+            primary: err,
+            secondary: finalizationCause,
+            secondaryMessage: "Sandbox mandatory post-execution validation failed.",
+            aggregateMessage:
+              "Sandbox process spawn and mandatory post-execution validation both failed.",
+          });
+        }
+      }
       markExited(session, null, null, "failed");
       maybeNotifyOnExit(session, "failed");
       throw err;
@@ -783,30 +865,50 @@ export async function runExecProcess(opts: {
         timeoutSec: opts.timeoutSec,
       });
 
-      markExited(session, exit.exitCode, exit.exitSignal, outcome.status);
-      maybeNotifyOnExit(session, outcome.status);
+      let finalOutcome = outcome;
+      if (opts.sandbox?.finalizeExec) {
+        try {
+          await finalizeSandboxExec({
+            finalizeExec: opts.sandbox.finalizeExec,
+            status: outcome.status,
+            exitCode: exit.exitCode ?? null,
+            timedOut: exit.timedOut,
+            token: sandboxFinalizeToken,
+          });
+        } catch (error) {
+          finalOutcome = buildExecPostVerificationFailureOutcome(outcome, error);
+        }
+      }
+      markExited(session, exit.exitCode, exit.exitSignal, finalOutcome.status);
+      maybeNotifyOnExit(session, finalOutcome.status);
       if (!session.child && session.stdin) {
         session.stdin.destroyed = true;
       }
-      if (opts.sandbox?.finalizeExec) {
-        await opts.sandbox.finalizeExec({
-          status: outcome.status,
-          exitCode: exit.exitCode ?? null,
-          timedOut: exit.timedOut,
-          token: sandboxFinalizeToken,
-        });
-      }
-      return outcome;
+      return finalOutcome;
     })
-    .catch((err): ExecProcessOutcome => {
+    .catch(async (err): Promise<ExecProcessOutcome> => {
       updatesDisabled = true;
-      markExited(session, null, null, "failed");
-      maybeNotifyOnExit(session, "failed");
-      return buildExecRuntimeErrorOutcome({
+      let outcome = buildExecRuntimeErrorOutcome({
         error: err,
         aggregated: session.aggregated.trim(),
         durationMs: Date.now() - startedAt,
       });
+      if (opts.sandbox?.finalizeExec) {
+        try {
+          await finalizeSandboxExec({
+            finalizeExec: opts.sandbox.finalizeExec,
+            status: "failed",
+            exitCode: null,
+            timedOut: false,
+            token: sandboxFinalizeToken,
+          });
+        } catch (finalizationError) {
+          outcome = buildExecPostVerificationFailureOutcome(outcome, finalizationError);
+        }
+      }
+      markExited(session, null, null, "failed");
+      maybeNotifyOnExit(session, "failed");
+      return outcome;
     });
 
   return {

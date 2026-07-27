@@ -5,6 +5,8 @@ import { STATE_DIR } from "../../config/paths.js";
 export const DEFAULT_SANDBOX_WORKSPACE_ROOT = path.join(STATE_DIR, "sandboxes");
 
 export const DEFAULT_SANDBOX_IMAGE = "openclaw-sandbox:bookworm-slim";
+export const GUARDED_VERIFIER_SANDBOX_IMAGE = "openclaw-sandbox-verifier:bookworm-slim";
+export const GUARDED_VERIFIER_BROWSER_CACHE = "/home/node/.cache/ms-playwright";
 export const DEFAULT_SANDBOX_CONTAINER_PREFIX = "openclaw-sbx-";
 export const DEFAULT_SANDBOX_WORKDIR = "/workspace";
 export const DEFAULT_SANDBOX_IDLE_HOURS = 24;

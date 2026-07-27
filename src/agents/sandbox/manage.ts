@@ -6,8 +6,8 @@ import { dockerSandboxBackendManager } from "./docker-backend.js";
 import {
   readBrowserRegistry,
   readRegistry,
-  removeBrowserRegistryEntry,
-  removeRegistryEntry,
+  removeBrowserRegistryEntryOwned,
+  removeRegistryEntryOwned,
   type SandboxBrowserRegistryEntry,
   type SandboxRegistryEntry,
 } from "./registry.js";
@@ -94,29 +94,34 @@ export async function removeSandboxContainer(containerName: string): Promise<voi
   const entry = registry.entries.find((item) => item.containerName === containerName);
   if (entry) {
     const manager = getSandboxBackendManager(entry.backendId ?? "docker");
-    await manager?.removeRuntime({
+    if (!manager) {
+      throw new Error(`No sandbox backend manager owns ${entry.containerName}.`);
+    }
+    await manager.removeRuntime({
       entry,
       config,
       agentId: resolveSandboxAgentId(entry.sessionKey),
     });
+    await removeRegistryEntryOwned(entry);
   }
-  await removeRegistryEntry(containerName);
 }
 
 export async function removeSandboxBrowserContainer(containerName: string): Promise<void> {
   const config = loadConfig();
   const registry = await readBrowserRegistry();
   const entry = registry.entries.find((item) => item.containerName === containerName);
-  if (entry) {
-    await dockerSandboxBackendManager.removeRuntime({
-      entry: toBrowserDockerRuntimeEntry(entry),
-      config,
-    });
+  if (!entry) {
+    return;
   }
-  await removeBrowserRegistryEntry(containerName);
-
+  await dockerSandboxBackendManager.removeRuntime({
+    entry: toBrowserDockerRuntimeEntry(entry),
+    config,
+  });
+  if (!(await removeBrowserRegistryEntryOwned(entry))) {
+    return;
+  }
   for (const [sessionKey, bridge] of BROWSER_BRIDGES.entries()) {
-    if (bridge.containerName === containerName) {
+    if (bridge.containerName === containerName && bridge.runtimeId === entry.runtimeId) {
       await stopBrowserBridgeServer(bridge.bridge.server).catch(() => undefined);
       BROWSER_BRIDGES.delete(sessionKey);
     }

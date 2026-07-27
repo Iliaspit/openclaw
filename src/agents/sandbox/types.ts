@@ -29,6 +29,19 @@ export type SandboxToolPolicyResolved = {
 
 export type SandboxWorkspaceAccess = "none" | "ro" | "rw";
 
+export type GuardedVerifierAuthorization = {
+  assignmentId: string;
+  candidateId: string;
+  waveId: string;
+  epoch: number;
+  candidateDigest: string;
+  contextDigest: string;
+  scopeDigest: string;
+  worktreeIdentity: string;
+  repositoryHead: string;
+  sourceRevision: string;
+};
+
 export type SandboxBrowserConfig = {
   enabled: boolean;
   image: string;
@@ -78,6 +91,10 @@ export type SandboxConfig = {
   browser: SandboxBrowserConfig;
   tools: SandboxToolPolicy;
   prune: SandboxPruneConfig;
+  /** Runtime-derived marker; never accepted from public configuration. */
+  guardedVerifierRuntime?: true;
+  /** Protected assignment identity; never accepted from public configuration. */
+  guardedVerifierAuthorization?: GuardedVerifierAuthorization;
 };
 
 export type SandboxBrowserContext = {

@@ -1,0 +1,96 @@
+# syntax=docker/dockerfile:1.7
+
+ARG OPENCLAW_RUNTIME_IMAGE
+ARG OPENCLAW_NODE_BOOKWORM_IMAGE="node:24-bookworm@sha256:3a09aa6354567619221ef6c45a5051b671f953f0a1924d1f819ffb236e520e6b"
+
+FROM ${OPENCLAW_RUNTIME_IMAGE} AS openclaw-runtime
+FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS verifier-base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ARG OPENCLAW_SOURCE_REVISION
+ARG OPENCLAW_VERIFIER_PACKAGE_MANAGER
+ARG OPENCLAW_VERIFIER_REPOSITORY_HEAD
+
+RUN printf '%s' "${OPENCLAW_SOURCE_REVISION}" | grep -Eq '^[a-f0-9]{40}$'
+RUN printf '%s' "${OPENCLAW_VERIFIER_REPOSITORY_HEAD}" | grep -Eq '^[a-f0-9]{40}$'
+RUN printf '%s' "${OPENCLAW_VERIFIER_PACKAGE_MANAGER}" \
+  | grep -Eq '^yarn@[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9._-]+)?$'
+
+RUN --mount=type=cache,id=openclaw-verifier-apt-cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,id=openclaw-verifier-apt-lists,target=/var/lib/apt,sharing=locked \
+  apt-get update \
+  && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    chromium \
+    curl \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    git \
+    jq \
+    python3 \
+    ripgrep \
+    xvfb \
+  && rm -rf /var/lib/apt/lists/*
+
+ENV COREPACK_HOME=/opt/openclaw-verifier/corepack \
+  PLAYWRIGHT_BROWSERS_PATH=/opt/openclaw-verifier/browsers \
+  HOME=/home/node \
+  CI=1
+
+COPY --from=openclaw-runtime /app /opt/openclaw
+
+RUN install -d -m 0755 "${COREPACK_HOME}" \
+  && corepack enable \
+  && corepack prepare "${OPENCLAW_VERIFIER_PACKAGE_MANAGER}" --activate \
+  && test -x "$(command -v yarn)" \
+  && test "$(yarn --version)" = "${OPENCLAW_VERIFIER_PACKAGE_MANAGER#yarn@}" \
+  && chmod -R a+rX "${COREPACK_HOME}" \
+  && install -d -o node -g node -m 0755 /workspace
+
+FROM verifier-base AS verifier-builder
+WORKDIR /build/workspace
+COPY --chown=node:node . .
+
+USER node
+RUN --mount=type=cache,id=openclaw-verifier-yarn-cache,target=/home/node/.yarn-cache,uid=1000,gid=1000,sharing=locked \
+  declared_package_manager="$(node -p "require('./package.json').packageManager")" \
+  && test "${declared_package_manager}" = "${OPENCLAW_VERIFIER_PACKAGE_MANAGER}" \
+  && YARN_ENABLE_GLOBAL_CACHE=1 YARN_CACHE_FOLDER=/home/node/.yarn-cache yarn install --immutable \
+  && PLAYWRIGHT_BROWSERS_PATH=/build/browsers yarn exec playwright install chromium \
+  && test -n "$(find /build/browsers -type f \
+    \( -name chrome -o -name chrome-headless-shell -o -name chromium -o -name headless_shell \) \
+    -perm /111 -print -quit)"
+
+USER root
+RUN OPENCLAW_VERIFIER_PREPARE=1 \
+  node /opt/openclaw/openclaw.mjs sandbox verifier-prepare \
+    --workspace /build/workspace \
+    --browser-root /build/browsers \
+    --repository-head "${OPENCLAW_VERIFIER_REPOSITORY_HEAD}" \
+    --source-revision "${OPENCLAW_SOURCE_REVISION}"
+
+FROM verifier-base
+ARG OPENCLAW_RUNTIME_IMAGE
+ARG OPENCLAW_SOURCE_REVISION
+ARG OPENCLAW_VERIFIER_PACKAGE_MANAGER
+ARG OPENCLAW_VERIFIER_REPOSITORY_HEAD
+
+LABEL org.opencontainers.image.source="https://github.com/openclaw/openclaw" \
+  org.opencontainers.image.revision="${OPENCLAW_SOURCE_REVISION}" \
+  org.opencontainers.image.title="OpenClaw guarded verifier candidate" \
+  ai.openclaw.verifier.runtime-image="${OPENCLAW_RUNTIME_IMAGE}" \
+  ai.openclaw.sandbox.contract="guarded-verifier-candidate-v1" \
+  ai.openclaw.sandbox.package-manager="${OPENCLAW_VERIFIER_PACKAGE_MANAGER}" \
+  ai.openclaw.verifier.repository-head="${OPENCLAW_VERIFIER_REPOSITORY_HEAD}"
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright
+
+COPY --from=verifier-builder --chown=node:node \
+  /build/workspace/node_modules /opt/openclaw-verifier/dependencies
+COPY --from=verifier-builder --chown=node:node \
+  /build/browsers /opt/openclaw-verifier/browsers
+
+USER 1000:1000
+WORKDIR /workspace
+CMD ["sleep", "infinity"]

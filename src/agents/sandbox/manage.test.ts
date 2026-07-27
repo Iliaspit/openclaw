@@ -10,8 +10,8 @@ const configMocks = vi.hoisted(() => ({
 const registryMocks = vi.hoisted(() => ({
   readBrowserRegistry: vi.fn(),
   readRegistry: vi.fn(),
-  removeBrowserRegistryEntry: vi.fn(),
-  removeRegistryEntry: vi.fn(),
+  removeBrowserRegistryEntryOwned: vi.fn(),
+  removeRegistryEntryOwned: vi.fn(),
 }));
 
 const backendMocks = vi.hoisted(() => ({
@@ -19,19 +19,24 @@ const backendMocks = vi.hoisted(() => ({
   removeRuntime: vi.fn(),
 }));
 
+const bridgeState = vi.hoisted(() => ({
+  bridges: new Map<string, { containerName: string; bridge: { server: object } }>(),
+  stopBrowserBridgeServer: vi.fn(),
+}));
+
 vi.mock("../../config/config.js", () => ({
   loadConfig: configMocks.loadConfig,
 }));
 
 vi.mock("../../plugin-sdk/browser-bridge.js", () => ({
-  stopBrowserBridgeServer: vi.fn(async () => undefined),
+  stopBrowserBridgeServer: bridgeState.stopBrowserBridgeServer,
 }));
 
 vi.mock("./registry.js", () => ({
   readBrowserRegistry: registryMocks.readBrowserRegistry,
   readRegistry: registryMocks.readRegistry,
-  removeBrowserRegistryEntry: registryMocks.removeBrowserRegistryEntry,
-  removeRegistryEntry: registryMocks.removeRegistryEntry,
+  removeBrowserRegistryEntryOwned: registryMocks.removeBrowserRegistryEntryOwned,
+  removeRegistryEntryOwned: registryMocks.removeRegistryEntryOwned,
 }));
 
 vi.mock("./docker-backend.js", () => ({
@@ -43,7 +48,7 @@ vi.mock("./docker-backend.js", () => ({
 }));
 
 vi.mock("./browser-bridges.js", () => ({
-  BROWSER_BRIDGES: new Map(),
+  BROWSER_BRIDGES: bridgeState.bridges,
 }));
 
 beforeAll(async () => {
@@ -55,10 +60,15 @@ describe("listSandboxBrowsers", () => {
     configMocks.loadConfig.mockReset();
     registryMocks.readBrowserRegistry.mockReset();
     registryMocks.readRegistry.mockReset();
-    registryMocks.removeBrowserRegistryEntry.mockReset();
-    registryMocks.removeRegistryEntry.mockReset();
+    registryMocks.removeBrowserRegistryEntryOwned.mockReset();
+    registryMocks.removeRegistryEntryOwned.mockReset();
+    registryMocks.removeBrowserRegistryEntryOwned.mockResolvedValue(true);
+    registryMocks.removeRegistryEntryOwned.mockResolvedValue(true);
     backendMocks.describeRuntime.mockReset();
     backendMocks.removeRuntime.mockReset();
+    bridgeState.bridges.clear();
+    bridgeState.stopBrowserBridgeServer.mockReset();
+    bridgeState.stopBrowserBridgeServer.mockResolvedValue(undefined);
 
     configMocks.loadConfig.mockReturnValue({
       agents: {
@@ -130,6 +140,25 @@ describe("listSandboxBrowsers", () => {
         }),
       }),
     );
-    expect(registryMocks.removeBrowserRegistryEntry).toHaveBeenCalledWith("browser-1");
+    expect(registryMocks.removeBrowserRegistryEntryOwned).toHaveBeenCalledWith(
+      expect.objectContaining({
+        containerName: "browser-1",
+        sessionKey: "agent:coder:main",
+        createdAtMs: 1,
+      }),
+    );
+  });
+
+  it("preserves a same-name replacement bridge when compare-and-remove loses the race", async () => {
+    bridgeState.bridges.set("agent:coder:main", {
+      containerName: "browser-1",
+      bridge: { server: {} },
+    });
+    registryMocks.removeBrowserRegistryEntryOwned.mockResolvedValueOnce(false);
+
+    await removeSandboxBrowserContainer("browser-1");
+
+    expect(bridgeState.stopBrowserBridgeServer).not.toHaveBeenCalled();
+    expect(bridgeState.bridges.has("agent:coder:main")).toBe(true);
   });
 });

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -17,7 +18,10 @@ import {
 import {
   captureDelegationRuntimeEvidence,
   createInstalledRuntimeProvenanceVerifierCache,
+  createRuntimeEvidenceSingleFlight,
   resolveDelegationRuntimeEvidenceFailureStage,
+  RUNTIME_EVIDENCE_DOCKER_CHANGES_TIMEOUT_MS,
+  requestBounded,
   type RuntimeEvidenceDeps,
   verifyInstalledRuntimeProvenance,
 } from "./runtime-evidence.js";
@@ -78,6 +82,7 @@ function provenanceManifest() {
 
 function evidenceDeps(params?: { now?: number; manifest?: unknown }): RuntimeEvidenceDeps {
   return {
+    runtimeHostname: () => "d".repeat(12),
     readProvenance: async () => params?.manifest ?? provenanceManifest(),
     inspectSelf: async () => ({
       Id: "d".repeat(64),
@@ -85,6 +90,7 @@ function evidenceDeps(params?: { now?: number; manifest?: unknown }): RuntimeEvi
       Name: "/openclaw-openclaw-gateway-1",
       Config: {
         Image: "openclaw:local",
+        Hostname: "d".repeat(12),
         Labels: {
           "org.opencontainers.image.revision": SOURCE_REVISION,
           "ai.openclaw.provenance.uri": "embedded:/opt/openclaw/build-provenance",
@@ -96,6 +102,13 @@ function evidenceDeps(params?: { now?: number; manifest?: unknown }): RuntimeEvi
         StartedAt: "2026-07-21T00:00:00Z",
         Health: { Status: "healthy" },
       },
+      Mounts: [
+        {
+          Type: "bind",
+          Destination: "/home/node/.openclaw",
+          RW: true,
+        },
+      ],
     }),
     inspectSelfChanges: async () => [],
     readSelfLogs: async () => "gateway ready\n",
@@ -123,6 +136,52 @@ function evidenceDeps(params?: { now?: number; manifest?: unknown }): RuntimeEvi
 }
 
 describe("guarded installed-runtime evidence", () => {
+  it("enforces wall-clock deadlines and response byte bounds", async () => {
+    let delayedResponse: NodeJS.Timeout | undefined;
+    const slow = createServer((_request, response) => {
+      delayedResponse = setTimeout(() => response.end("late"), 100);
+    });
+    await new Promise<void>((resolve) => slow.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = slow.address();
+      if (!address || typeof address === "string") {
+        throw new Error("test server address missing");
+      }
+      await expect(
+        requestBounded({
+          host: "127.0.0.1",
+          port: address.port,
+          requestPath: "/",
+          timeoutMs: 10,
+        }),
+      ).rejects.toThrow("wall-clock deadline");
+    } finally {
+      if (delayedResponse) {
+        clearTimeout(delayedResponse);
+      }
+      slow.closeAllConnections();
+      await new Promise<void>((resolve) => slow.close(() => resolve()));
+    }
+
+    const large = createServer((_request, response) => response.end("too-large"));
+    await new Promise<void>((resolve) => large.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = large.address();
+      if (!address || typeof address === "string") {
+        throw new Error("test server address missing");
+      }
+      await expect(
+        requestBounded({
+          host: "127.0.0.1",
+          port: address.port,
+          requestPath: "/",
+          maxBytes: 4,
+        }),
+      ).rejects.toThrow("byte limit");
+    } finally {
+      await new Promise<void>((resolve) => large.close(() => resolve()));
+    }
+  });
   it("verifies the installed runtime inventory and rejects a self-consistent forged manifest", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "openclaw-runtime-evidence-"));
     try {
@@ -427,17 +486,32 @@ describe("guarded installed-runtime evidence", () => {
         );
 
       const revisionMismatch = evidenceDeps();
-      revisionMismatch.inspectSelf = async () => ({
+      revisionMismatch.inspectSelf = async () => {
+        const base = (await evidenceDeps().inspectSelf()) as {
+          Config: { Image: string; Hostname: string; Labels: Record<string, string> };
+        };
+        return {
+          ...base,
+          Config: {
+            ...base.Config,
+            Labels: {
+              "org.opencontainers.image.revision": "a".repeat(40),
+              "ai.openclaw.provenance.uri": "embedded:/opt/openclaw/build-provenance",
+            },
+          },
+        };
+      };
+      await expect(capture(revisionMismatch)).rejects.toThrow("image identity");
+
+      const wrongSelf = evidenceDeps();
+      wrongSelf.inspectSelf = async () => ({
         ...(await evidenceDeps().inspectSelf()),
         Config: {
-          Image: "openclaw:local",
-          Labels: {
-            "org.opencontainers.image.revision": "a".repeat(40),
-            "ai.openclaw.provenance.uri": "embedded:/opt/openclaw/build-provenance",
-          },
+          ...((await evidenceDeps().inspectSelf()) as { Config: Record<string, unknown> }).Config,
+          Hostname: "e".repeat(12),
         },
       });
-      await expect(capture(revisionMismatch)).rejects.toThrow("image identity");
+      await expect(capture(wrongSelf)).rejects.toThrow("requesting Gateway container");
 
       const baseManifest = provenanceManifest();
       const { manifestDigest: _manifestDigest, ...baseFacts } = baseManifest;
@@ -486,6 +560,24 @@ describe("guarded installed-runtime evidence", () => {
         "container-inspection",
       );
       expect(changesChecks).toBe(2);
+
+      for (const destination of [
+        process.cwd(),
+        path.join(process.cwd(), "dist"),
+        "/opt/openclaw",
+        "/opt/openclaw/build-provenance/source-maps",
+      ]) {
+        const shadowedRuntime = evidenceDeps();
+        shadowedRuntime.inspectSelf = async () => ({
+          ...(await evidenceDeps().inspectSelf()),
+          Mounts: [{ Type: "volume", Destination: destination, RW: false }],
+        });
+        const shadowError = await capture(shadowedRuntime).catch((error: unknown) => error);
+        expect(resolveDelegationRuntimeEvidenceFailureStage(shadowError)).toBe(
+          "container-inspection",
+        );
+        expect((shadowError as Error).message).toContain("shadowed by a mount");
+      }
 
       const falseReadiness = evidenceDeps();
       falseReadiness.probe = async (_port, probePath) => ({
@@ -565,6 +657,37 @@ describe("guarded installed-runtime evidence", () => {
     await expect(retryable(manifest, identity)).rejects.toThrow("transient verifier failure");
     await expect(retryable(manifest, identity)).resolves.toBe(verification);
     expect(attempts).toBe(2);
+  });
+
+  it("single-flights Docker changes inspection without caching success or failure", async () => {
+    expect(RUNTIME_EVIDENCE_DOCKER_CHANGES_TIMEOUT_MS).toBe(30_000);
+    let calls = 0;
+    let release: (() => void) | undefined;
+    const action = createRuntimeEvidenceSingleFlight(async () => {
+      calls += 1;
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return calls;
+    });
+    const first = action();
+    const second = action();
+    expect(calls).toBe(1);
+    release?.();
+    await expect(Promise.all([first, second])).resolves.toEqual([1, 1]);
+
+    const third = action();
+    expect(calls).toBe(2);
+    release?.();
+    await expect(third).resolves.toBe(2);
+
+    let attempts = 0;
+    const retryable = createRuntimeEvidenceSingleFlight(async () => {
+      attempts += 1;
+      throw new Error(`failure-${attempts}`);
+    });
+    await expect(Promise.all([retryable(), retryable()])).rejects.toThrow("failure-1");
+    await expect(retryable()).rejects.toThrow("failure-2");
   });
 
   it("reports the first fixed capture stage when parallel probes fail", async () => {

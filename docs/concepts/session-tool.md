@@ -355,6 +355,69 @@ Docker environment values, browser binds, and dangerous bind or namespace
 overrides. Do not expose Gateway state, credentials, validator internals,
 receipt storage, lane tokens, or the Docker socket to child sandboxes.
 
+Guarded tester and reviewer assignments use the exact published OCI image ID
+resolved from the owner-managed `openclaw-sandbox-verifier:bookworm-slim`
+discovery tag. It contains Node, a pinned
+Corepack-managed Yarn version, browser system libraries, and the OpenClaw
+verification command, but no credentials or Docker client. The protected
+candidate workspace remains the exact live read-only bind; it is never replaced
+with clean-HEAD bytes. Prepared dependencies and Playwright browsers are
+subpath-mounted read-only from the exact published OCI image ID over the
+workspace's `node_modules` and browser-cache targets. Missing image-mount
+support, a mutable or ambiguous source, or an identity mismatch fails before
+execution. This contract requires Docker Engine 28 or newer with `type=image`
+mounts and relative `image-subpath` support. Network access remains disabled.
+
+For Docker deployments, `docker-compose.verifier.yml` adds only the Gateway's
+read-only live workspace and exact published OCI identity. The owner-only
+`scripts/docker/setup.sh` transaction builds an unpredictable, unpublished
+candidate image from the repository's pinned Yarn `packageManager`, runs `yarn
+install --immutable`, prepares Playwright Chromium, and writes bounded
+content-digest manifests for dependencies, repository package/lock/Yarn
+configuration, repository-local `yarnPath` and plugins, browser revisions,
+executable modes, and bytes. The final image publishes the prepared toolchain
+under fixed image subpaths; candidate source continues to come from the
+protected live workspace.
+
+Publication uses an operator-owned, non-symlink state directory, exclusive
+lifecycle lock, unpredictable transaction ID, and durably replaced phase
+journal. The state defaults to `$XDG_STATE_HOME/openclaw/verifier` (or
+`$HOME/.local/state/openclaw/verifier`) and must be outside the config directory
+and every Gateway bind, including read-only binds. Setup rejects ownership,
+mode, symlink, or Compose-mount overlap before changing `.env`, building an
+image, or creating a transaction. The candidate is verified
+offline with a read-only root, no network,
+the exact live workspace read-only, and its own image subpaths mounted
+read-only. Only then is a label-only final OCI image created from the exact
+candidate, checked to retain identical root filesystem layers, and
+independently reverified. The candidate is built from the exact Gateway runtime
+image ID, never a mutable tag. Its exact image ID and deterministic manifests
+are atomically written to `.env`; tags are discovery labels only. A failure restores the
+byte-identical prior environment and effective shell state, restores the stable
+tag, restarts the prior Gateway when needed, and removes only journaled
+exact-ID artifacts with no consumers. A committed journal is never rolled back;
+interrupted post-commit cleanup resumes forward. An active consumer or cleanup
+failure retains the journal and lock for operator inspection.
+
+At runtime, the Gateway validates the exact immutable image ID, OCI labels,
+manifest identities, live bounded package/Yarn metadata, and fixed read-only
+image-subpath mounts without rescanning the dependency tree. Every execution
+re-inspects that exact image and container ID, the complete closed isolation
+profile, and finally revalidates protected assignment, candidate, wave, epoch,
+source, and workspace currency. Commands, post-execution finalization, and
+owned cleanup use the captured container ID rather than resolving its mutable
+name again. New verifier containers are registered and fully inspected before
+their first start. Pre- and post-execution checks have bounded, cancellable
+deadlines, and post-execution validation requires an in-memory, one-use
+authority minted by the same sandbox handle; caller-shaped objects, replay, and
+cross-handle use are rejected. Docker-in-Docker deployments derive the
+daemon-visible workspace
+source from the Gateway's exact read-only mount while keeping that host path
+out of labels and protected evidence. The image ID,
+environment, manifests, candidate, assignment and workspace identities are
+bound into the sandbox config hash. Only exact option-validated tmpfs targets
+for test output and `node_modules/.vite-temp` are writable.
+
 ## Visibility
 
 Session tools are scoped to limit what the agent can see:

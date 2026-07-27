@@ -26,11 +26,13 @@ const spawnState = vi.hoisted(() => ({
 
 const registryMocks = vi.hoisted(() => ({
   readRegistry: vi.fn(),
+  removeRegistryEntryExact: vi.fn(),
   updateRegistry: vi.fn(),
 }));
 
 vi.mock("./registry.js", () => ({
   readRegistry: registryMocks.readRegistry,
+  removeRegistryEntryExact: registryMocks.removeRegistryEntryExact,
   updateRegistry: registryMocks.updateRegistry,
 }));
 
@@ -61,13 +63,16 @@ function spawnDockerProcess(command: string, args: string[]) {
     args[2]?.includes('index .Config.Labels "openclaw.configHash"')
   ) {
     stdout = `${spawnState.labelHash}\n`;
+  } else if (args[0] === "inspect" && args[1] === "--format" && args[2] === "{{.Id}}") {
+    stdout = `${"a".repeat(64)}\n`;
   } else if (
     (args[0] === "rm" && args[1] === "-f") ||
     (args[0] === "image" && args[1] === "inspect") ||
-    args[0] === "create" ||
     args[0] === "start"
   ) {
     code = 0;
+  } else if (args[0] === "create") {
+    stdout = `${"a".repeat(64)}\n`;
   } else {
     code = 1;
     stderr = `unexpected docker args: ${args.join(" ")}`;
@@ -96,15 +101,17 @@ async function createChildProcessMock() {
 vi.mock("node:child_process", async () => createChildProcessMock());
 
 let ensureSandboxContainer: typeof import("./docker.js").ensureSandboxContainer;
+let createSandboxContainer: typeof import("./docker.js").createSandboxContainer;
 
 async function loadFreshDockerModuleForTest() {
   vi.resetModules();
   vi.doMock("./registry.js", () => ({
     readRegistry: registryMocks.readRegistry,
+    removeRegistryEntryExact: registryMocks.removeRegistryEntryExact,
     updateRegistry: registryMocks.updateRegistry,
   }));
   vi.doMock("node:child_process", async () => createChildProcessMock());
-  ({ ensureSandboxContainer } = await import("./docker.js"));
+  ({ createSandboxContainer, ensureSandboxContainer } = await import("./docker.js"));
 }
 
 function createSandboxConfig(
@@ -188,7 +195,65 @@ describe("ensureSandboxContainer config-hash recreation", () => {
     registryMocks.readRegistry.mockClear();
     registryMocks.updateRegistry.mockClear();
     registryMocks.updateRegistry.mockResolvedValue(undefined);
+    registryMocks.removeRegistryEntryExact.mockClear();
+    registryMocks.removeRegistryEntryExact.mockResolvedValue(undefined);
     await loadFreshDockerModuleForTest();
+  });
+
+  it("registers and validates a new verifier container before its first start", async () => {
+    const cfg = createSandboxConfig([]);
+    const onContainerCreated = vi.fn(async () => {});
+    const validateBeforeStart = vi.fn(async () => {
+      expect(spawnState.calls.some((call) => call.args[0] === "start")).toBe(false);
+    });
+
+    await createSandboxContainer({
+      name: "oc-test-verifier",
+      cfg: cfg.docker,
+      workspaceDir: "/tmp/workspace",
+      workspaceMountSource: "/tmp/workspace",
+      workspaceAccess: "ro",
+      agentWorkspaceDir: "/tmp/workspace",
+      scopeKey: "agent:tester:subagent:one",
+      onContainerCreated,
+      validateBeforeStart,
+    });
+
+    expect(onContainerCreated).toHaveBeenCalledWith("a".repeat(64));
+    expect(validateBeforeStart).toHaveBeenCalledWith("a".repeat(64));
+    const startCall = spawnState.calls.findIndex((call) => call.args[0] === "start");
+    expect(onContainerCreated.mock.invocationCallOrder[0]).toBeLessThan(
+      validateBeforeStart.mock.invocationCallOrder[0],
+    );
+    expect(startCall).toBeGreaterThanOrEqual(0);
+  });
+
+  it("removes exactly and never starts a new verifier that fails pre-start validation", async () => {
+    const cfg = createSandboxConfig([]);
+    const onContainerRemoved = vi.fn(async () => {});
+
+    await expect(
+      createSandboxContainer({
+        name: "oc-test-verifier",
+        cfg: cfg.docker,
+        workspaceDir: "/tmp/workspace",
+        workspaceMountSource: "/tmp/workspace",
+        workspaceAccess: "ro",
+        agentWorkspaceDir: "/tmp/workspace",
+        scopeKey: "agent:tester:subagent:one",
+        onContainerCreated: async () => {},
+        onContainerRemoved,
+        validateBeforeStart: async () => {
+          throw new Error("closed profile mismatch");
+        },
+      }),
+    ).rejects.toThrow("closed profile mismatch");
+
+    expect(spawnState.calls.some((call) => call.args[0] === "start")).toBe(false);
+    expect(spawnState.calls).toContainEqual(
+      expect.objectContaining({ args: ["rm", "-f", "a".repeat(64)] }),
+    );
+    expect(onContainerRemoved).toHaveBeenCalledWith("a".repeat(64));
   });
 
   it("recreates shared container when array-order change alters hash", async () => {
@@ -226,19 +291,18 @@ describe("ensureSandboxContainer config-hash recreation", () => {
       ],
     });
 
-    const containerName = await ensureSandboxContainer({
+    const result = await ensureSandboxContainer({
       sessionKey: "agent:main:session-1",
       workspaceDir,
       agentWorkspaceDir: workspaceDir,
       cfg: newCfg,
     });
 
-    expect(containerName).toBe("oc-test-shared");
+    expect(result.containerName).toBe("oc-test-shared");
     const dockerCalls = spawnState.calls.filter((call) => call.command === "docker");
     expect(
       dockerCalls.some(
-        (call) =>
-          call.args[0] === "rm" && call.args[1] === "-f" && call.args[2] === "oc-test-shared",
+        (call) => call.args[0] === "rm" && call.args[1] === "-f" && call.args[2] === "a".repeat(64),
       ),
     ).toBe(true);
     const createCall = dockerCalls.find((call) => call.args[0] === "create");
@@ -249,6 +313,7 @@ describe("ensureSandboxContainer config-hash recreation", () => {
         containerName: "oc-test-shared",
         configHash: newHash,
       }),
+      { runtimeTransition: "new-runtime" },
     );
   });
 

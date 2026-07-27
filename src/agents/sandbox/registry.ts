@@ -7,6 +7,8 @@ import { SANDBOX_BROWSER_REGISTRY_PATH, SANDBOX_REGISTRY_PATH } from "./constant
 
 export type SandboxRegistryEntry = {
   containerName: string;
+  /** Immutable backend identity captured after creation; absent on legacy entries. */
+  runtimeId?: string;
   backendId?: string;
   runtimeLabel?: string;
   sessionKey: string;
@@ -23,6 +25,8 @@ type SandboxRegistry = {
 
 export type SandboxBrowserRegistryEntry = {
   containerName: string;
+  /** Immutable Docker container identity; absent on legacy entries. */
+  runtimeId?: string;
   sessionKey: string;
   createdAtMs: number;
   lastUsedAtMs: number;
@@ -38,6 +42,13 @@ type SandboxBrowserRegistry = {
 
 type RegistryReadMode = "strict" | "fallback";
 
+/**
+ * Runtime ownership changes are explicit. `adopt-existing` is reserved for a
+ * caller that has already inspected and validated the exact live runtime
+ * represented by a legacy row.
+ */
+export type RegistryRuntimeTransition = "new-runtime" | "adopt-existing";
+
 type RegistryEntry = {
   containerName: string;
 };
@@ -47,6 +58,7 @@ type RegistryFile<T extends RegistryEntry> = {
 };
 
 type UpsertEntry = RegistryEntry & {
+  runtimeId?: string;
   backendId?: string;
   runtimeLabel?: string;
   createdAtMs: number;
@@ -143,15 +155,37 @@ export async function readRegistryStrict(): Promise<SandboxRegistry> {
   };
 }
 
-function upsertEntry<T extends UpsertEntry>(entries: T[], entry: T): T[] {
+function upsertEntry<T extends UpsertEntry>(
+  entries: T[],
+  entry: T,
+  runtimeTransition?: RegistryRuntimeTransition,
+): T[] {
   const existing = entries.find((item) => item.containerName === entry.containerName);
+  if (runtimeTransition === "adopt-existing" && !existing) {
+    throw new Error(
+      `Cannot adopt sandbox runtime ${entry.containerName} without an existing registry row.`,
+    );
+  }
+  const replacesRuntime =
+    Boolean(existing) && Boolean(entry.runtimeId) && existing?.runtimeId !== entry.runtimeId;
+  if (replacesRuntime && !runtimeTransition) {
+    throw new Error(
+      `Sandbox runtime ownership transition for ${entry.containerName} requires an explicit mode.`,
+    );
+  }
+  if (runtimeTransition === "adopt-existing" && existing?.runtimeId) {
+    throw new Error(`Cannot adopt sandbox runtime ${entry.containerName} over an exact owner.`);
+  }
   const next = entries.filter((item) => item.containerName !== entry.containerName);
+  const retainedCreatedAtMs = existing?.createdAtMs ?? entry.createdAtMs;
+  const retainedImage = existing?.image ?? entry.image;
   next.push({
     ...entry,
     backendId: entry.backendId ?? existing?.backendId,
+    runtimeId: entry.runtimeId ?? existing?.runtimeId,
     runtimeLabel: entry.runtimeLabel ?? existing?.runtimeLabel,
-    createdAtMs: existing?.createdAtMs ?? entry.createdAtMs,
-    image: existing?.image ?? entry.image,
+    createdAtMs: replacesRuntime ? entry.createdAtMs : retainedCreatedAtMs,
+    image: replacesRuntime ? entry.image : retainedImage,
     configLabelKind: entry.configLabelKind ?? existing?.configLabelKind,
     configHash: entry.configHash ?? existing?.configHash,
   });
@@ -160,6 +194,18 @@ function upsertEntry<T extends UpsertEntry>(entries: T[], entry: T): T[] {
 
 function removeEntry<T extends RegistryEntry>(entries: T[], containerName: string): T[] {
   return entries.filter((entry) => entry.containerName !== containerName);
+}
+
+function hasSameRuntimeOwnership(
+  current: SandboxRegistryEntry | SandboxBrowserRegistryEntry,
+  expected: SandboxRegistryEntry | SandboxBrowserRegistryEntry,
+): boolean {
+  return (
+    current.containerName === expected.containerName &&
+    current.runtimeId === expected.runtimeId &&
+    current.sessionKey === expected.sessionKey &&
+    current.createdAtMs === expected.createdAtMs
+  );
 }
 
 async function withRegistryMutation<T extends RegistryEntry>(
@@ -176,9 +222,12 @@ async function withRegistryMutation<T extends RegistryEntry>(
   });
 }
 
-export async function updateRegistry(entry: SandboxRegistryEntry) {
+export async function updateRegistry(
+  entry: SandboxRegistryEntry,
+  options?: { runtimeTransition?: RegistryRuntimeTransition },
+) {
   await withRegistryMutation<SandboxRegistryEntry>(SANDBOX_REGISTRY_PATH, (entries) =>
-    upsertEntry(entries, entry),
+    upsertEntry(entries, entry, options?.runtimeTransition),
   );
 }
 
@@ -192,6 +241,29 @@ export async function removeRegistryEntry(containerName: string) {
   });
 }
 
+export async function removeRegistryEntryExact(containerName: string, runtimeId: string) {
+  await withRegistryMutation<SandboxRegistryEntry>(SANDBOX_REGISTRY_PATH, (entries) => {
+    const existing = entries.find((entry) => entry.containerName === containerName);
+    if (!existing || existing.runtimeId !== runtimeId) {
+      return null;
+    }
+    return removeEntry(entries, containerName);
+  });
+}
+
+export async function removeRegistryEntryOwned(expected: SandboxRegistryEntry): Promise<boolean> {
+  let removed = false;
+  await withRegistryMutation<SandboxRegistryEntry>(SANDBOX_REGISTRY_PATH, (entries) => {
+    const existing = entries.find((entry) => entry.containerName === expected.containerName);
+    if (!existing || !hasSameRuntimeOwnership(existing, expected)) {
+      return null;
+    }
+    removed = true;
+    return removeEntry(entries, expected.containerName);
+  });
+  return removed;
+}
+
 export async function readBrowserRegistry(): Promise<SandboxBrowserRegistry> {
   return await readRegistryFromFile<SandboxBrowserRegistryEntry>(
     SANDBOX_BROWSER_REGISTRY_PATH,
@@ -199,10 +271,20 @@ export async function readBrowserRegistry(): Promise<SandboxBrowserRegistry> {
   );
 }
 
-export async function updateBrowserRegistry(entry: SandboxBrowserRegistryEntry) {
+export async function readBrowserRegistryStrict(): Promise<SandboxBrowserRegistry> {
+  return await readRegistryFromFile<SandboxBrowserRegistryEntry>(
+    SANDBOX_BROWSER_REGISTRY_PATH,
+    "strict",
+  );
+}
+
+export async function updateBrowserRegistry(
+  entry: SandboxBrowserRegistryEntry,
+  options?: { runtimeTransition?: RegistryRuntimeTransition },
+) {
   await withRegistryMutation<SandboxBrowserRegistryEntry>(
     SANDBOX_BROWSER_REGISTRY_PATH,
-    (entries) => upsertEntry(entries, entry),
+    (entries) => upsertEntry(entries, entry, options?.runtimeTransition),
   );
 }
 
@@ -217,4 +299,35 @@ export async function removeBrowserRegistryEntry(containerName: string) {
       return next;
     },
   );
+}
+
+export async function removeBrowserRegistryEntryExact(containerName: string, runtimeId: string) {
+  await withRegistryMutation<SandboxBrowserRegistryEntry>(
+    SANDBOX_BROWSER_REGISTRY_PATH,
+    (entries) => {
+      const existing = entries.find((entry) => entry.containerName === containerName);
+      if (!existing || existing.runtimeId !== runtimeId) {
+        return null;
+      }
+      return removeEntry(entries, containerName);
+    },
+  );
+}
+
+export async function removeBrowserRegistryEntryOwned(
+  expected: SandboxBrowserRegistryEntry,
+): Promise<boolean> {
+  let removed = false;
+  await withRegistryMutation<SandboxBrowserRegistryEntry>(
+    SANDBOX_BROWSER_REGISTRY_PATH,
+    (entries) => {
+      const existing = entries.find((entry) => entry.containerName === expected.containerName);
+      if (!existing || !hasSameRuntimeOwnership(existing, expected)) {
+        return null;
+      }
+      removed = true;
+      return removeEntry(entries, expected.containerName);
+    },
+  );
+  return removed;
 }

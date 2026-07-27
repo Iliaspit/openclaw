@@ -7,8 +7,8 @@ import { dockerSandboxBackendManager } from "./docker-backend.js";
 import {
   readBrowserRegistry,
   readRegistry,
-  removeBrowserRegistryEntry,
-  removeRegistryEntry,
+  removeBrowserRegistryEntryOwned,
+  removeRegistryEntryOwned,
   type SandboxBrowserRegistryEntry,
   type SandboxRegistryEntry,
 } from "./registry.js";
@@ -38,7 +38,7 @@ function shouldPruneSandboxEntry(cfg: SandboxConfig, now: number, entry: Pruneab
 async function pruneSandboxRegistryEntries<TEntry extends SandboxRegistryEntry>(params: {
   cfg: SandboxConfig;
   read: () => Promise<{ entries: TEntry[] }>;
-  remove: (containerName: string) => Promise<void>;
+  remove: (entry: TEntry) => Promise<boolean>;
   removeRuntime: (entry: TEntry) => Promise<void>;
   onRemoved?: (entry: TEntry) => Promise<void>;
 }) {
@@ -51,12 +51,9 @@ async function pruneSandboxRegistryEntries<TEntry extends SandboxRegistryEntry>(
     if (!shouldPruneSandboxEntry(params.cfg, now, entry)) {
       continue;
     }
-    try {
-      await params.removeRuntime(entry);
-    } catch {
-      // ignore prune failures
-    } finally {
-      await params.remove(entry.containerName);
+    await params.removeRuntime(entry);
+    const removed = await params.remove(entry);
+    if (removed) {
       await params.onRemoved?.(entry);
     }
   }
@@ -67,10 +64,13 @@ async function pruneSandboxContainers(cfg: SandboxConfig) {
   await pruneSandboxRegistryEntries<SandboxRegistryEntry>({
     cfg,
     read: readRegistry,
-    remove: removeRegistryEntry,
+    remove: removeRegistryEntryOwned,
     removeRuntime: async (entry) => {
       const manager = getSandboxBackendManager(entry.backendId ?? "docker");
-      await manager?.removeRuntime({
+      if (!manager) {
+        throw new Error(`No sandbox backend manager owns ${entry.containerName}.`);
+      }
+      await manager.removeRuntime({
         entry,
         config,
       });
@@ -89,7 +89,7 @@ async function pruneSandboxBrowsers(cfg: SandboxConfig) {
   >({
     cfg,
     read: readBrowserRegistry,
-    remove: removeBrowserRegistryEntry,
+    remove: removeBrowserRegistryEntryOwned,
     removeRuntime: async (entry) => {
       await dockerSandboxBackendManager.removeRuntime({
         entry: {
@@ -103,7 +103,7 @@ async function pruneSandboxBrowsers(cfg: SandboxConfig) {
     },
     onRemoved: async (entry) => {
       const bridge = BROWSER_BRIDGES.get(entry.sessionKey);
-      if (bridge?.containerName === entry.containerName) {
+      if (bridge?.containerName === entry.containerName && bridge.runtimeId === entry.runtimeId) {
         await stopBrowserBridgeServer(bridge.bridge.server).catch(() => undefined);
         BROWSER_BRIDGES.delete(entry.sessionKey);
       }

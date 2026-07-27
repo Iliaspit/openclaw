@@ -53,12 +53,16 @@ export type SandboxBackendHandle = {
     workdir?: string;
     env: Record<string, string>;
     usePty: boolean;
+    signal?: AbortSignal;
+    verificationDeadlineMs?: number;
   }): Promise<SandboxBackendExecSpec>;
   finalizeExec?: (params: {
     status: "completed" | "failed";
     exitCode: number | null;
     timedOut: boolean;
     token?: unknown;
+    signal?: AbortSignal;
+    verificationDeadlineMs?: number;
   }) => Promise<void>;
   runShellCommand(params: SandboxBackendCommandParams): Promise<SandboxBackendCommandResult>;
   createFsBridge?: (params: { sandbox: SandboxFsBridgeContext }) => SandboxFsBridge;
