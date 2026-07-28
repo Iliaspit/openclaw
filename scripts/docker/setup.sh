@@ -28,11 +28,21 @@ VERIFIER_SOCKET_OVERLAY_READY=""
 VERIFIER_RUNTIME_IMAGE_ID=""
 VERIFIER_OLD_GATEWAY_ID=""
 VERIFIER_OLD_GATEWAY_IMAGE_ID=""
+VERIFIER_GATEWAY_COMPOSE_PROJECT=""
+VERIFIER_GATEWAY_COMPOSE_SERVICE=""
+VERIFIER_GATEWAY_CANDIDATE_LABEL=""
+VERIFIER_GATEWAY_CREATE_BINDING=""
 VERIFIER_CONFIG_BACKUP_PRESENT="0"
 VERIFIER_CONFIG_BACKUP_DIGEST=""
 VERIFIER_CONFIG_BACKUP_MODE=""
 VERIFIER_CONFIG_BACKUP_PARENT_DEV=""
 VERIFIER_CONFIG_BACKUP_PARENT_INO=""
+VERIFIER_CONFIG_DEV=""
+VERIFIER_CONFIG_INO=""
+VERIFIER_TRANSACTION_FORMAT="2"
+VERIFIER_CONFIG_POLICY="write"
+VERIFIER_OPERATION_FORMAT=""
+VERIFIER_OPERATION_CONFIG_POLICY=""
 VERIFIER_OVERLAY_BACKUP_PRESENT="0"
 VERIFIER_OVERLAY_BACKUP_DIGEST=""
 VERIFIER_OVERLAY_BACKUP_MODE=""
@@ -43,6 +53,13 @@ VERIFIER_ENV_BACKUP_MODE=""
 VERIFIER_ENV_BACKUP_PARENT_DEV=""
 VERIFIER_ENV_BACKUP_PARENT_INO=""
 VERIFIER_DOCKER_SOCKET_PATH=""
+PROTECTED_CONFIG_DEV=""
+PROTECTED_CONFIG_INO=""
+PROTECTED_CONFIG_MODE=""
+PROTECTED_CONFIG_DIGEST=""
+PROTECTED_CONFIG_PARENT_DEV=""
+PROTECTED_CONFIG_PARENT_INO=""
+DEFER_PROTECTED_CONFIG_VALIDATION=""
 SOURCE_REVISION_WAS_EXPLICIT=""
 if printenv OPENCLAW_SOURCE_REVISION >/dev/null 2>&1; then
   SOURCE_REVISION_WAS_EXPLICIT="1"
@@ -58,6 +75,7 @@ load_persisted_setup_defaults() {
   allowed+="OPENCLAW_VERIFIER_ARTIFACT_DIGEST OPENCLAW_VERIFIER_DEPENDENCY_MANIFEST "
   allowed+="OPENCLAW_VERIFIER_BROWSER_MANIFEST OPENCLAW_VERIFIER_REPOSITORY_IDENTITY "
   allowed+="OPENCLAW_VERIFIER_BROWSER_IDENTITY OPENCLAW_VERIFIER_EFFECTIVE_YARN_VERSION "
+  allowed+="OPENCLAW_SETUP_READ_ONLY_CONFIG "
   if [[ ! -f "$ENV_FILE" ]]; then
     return
   fi
@@ -110,6 +128,12 @@ RAW_SANDBOX_SETTING="${OPENCLAW_SANDBOX:-}"
 SANDBOX_ENABLED=""
 RAW_BROWSER_INSTALL_SETTING="${OPENCLAW_INSTALL_BROWSER:-1}"
 BROWSER_INSTALL_ENABLED=""
+RAW_READ_ONLY_CONFIG_SETTING="${OPENCLAW_SETUP_READ_ONLY_CONFIG:-}"
+READ_ONLY_CONFIG_ENABLED=""
+READ_ONLY_CONFIG_SETTING_PRESENT=""
+if printenv OPENCLAW_SETUP_READ_ONLY_CONFIG >/dev/null 2>&1; then
+  READ_ONLY_CONFIG_SETTING_PRESENT="1"
+fi
 DOCKER_SOCKET_PATH="${OPENCLAW_DOCKER_SOCKET:-}"
 TIMEZONE="${OPENCLAW_TZ:-}"
 VERIFIER_ENABLED=""
@@ -207,6 +231,374 @@ NODE
   fi
 }
 
+capture_protected_config() {
+  local config_path="$OPENCLAW_CONFIG_DIR/openclaw.json"
+  local metadata=""
+  if metadata="$(
+    node - "$config_path" <<'NODE'
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const [configPath] = process.argv.slice(2);
+if (!path.isAbsolute(configPath) || path.basename(configPath) !== "openclaw.json") {
+  throw new Error("Protected OpenClaw config path must be an absolute direct file.");
+}
+const directory = path.dirname(configPath);
+const leaf = path.basename(configPath);
+const parent = fs.lstatSync(directory, { bigint: true });
+if (
+  !parent.isDirectory() ||
+  parent.isSymbolicLink() ||
+  fs.realpathSync(directory) !== directory
+) {
+  throw new Error("Protected OpenClaw config parent must be a direct canonical directory.");
+}
+process.chdir(directory);
+const pinnedParent = fs.lstatSync(".", { bigint: true });
+if (pinnedParent.dev !== parent.dev || pinnedParent.ino !== parent.ino) {
+  throw new Error("Protected OpenClaw config parent changed before capture.");
+}
+const before = fs.lstatSync(leaf, { bigint: true });
+if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n) {
+  throw new Error("Protected OpenClaw config must be a direct single-link regular file.");
+}
+const fd = fs.openSync(leaf, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+try {
+  const opened = fs.fstatSync(fd, { bigint: true });
+  if (
+    opened.dev !== before.dev ||
+    opened.ino !== before.ino ||
+    opened.mode !== before.mode ||
+    opened.nlink !== 1n
+  ) {
+    throw new Error("Protected OpenClaw config changed before capture.");
+  }
+  const first = fs.readFileSync(fd);
+  const middle = fs.fstatSync(fd, { bigint: true });
+  const second = Buffer.alloc(Number(middle.size));
+  let offset = 0;
+  while (offset < second.length) {
+    const count = fs.readSync(fd, second, offset, second.length - offset, offset);
+    if (count === 0) {
+      throw new Error("Protected OpenClaw config changed during capture.");
+    }
+    offset += count;
+  }
+  const after = fs.fstatSync(fd, { bigint: true });
+  const finalPath = fs.lstatSync(leaf, { bigint: true });
+  const finalParent = fs.lstatSync(".", { bigint: true });
+  if (
+    opened.dev !== after.dev ||
+    opened.ino !== after.ino ||
+    opened.mode !== after.mode ||
+    opened.nlink !== after.nlink ||
+    opened.size !== after.size ||
+    opened.mtimeNs !== after.mtimeNs ||
+    opened.ctimeNs !== after.ctimeNs ||
+    middle.size !== opened.size ||
+    finalPath.dev !== opened.dev ||
+    finalPath.ino !== opened.ino ||
+    finalPath.mode !== opened.mode ||
+    finalPath.nlink !== 1n ||
+    finalParent.dev !== parent.dev ||
+    finalParent.ino !== parent.ino ||
+    !first.equals(second)
+  ) {
+    throw new Error("Protected OpenClaw config changed during capture.");
+  }
+  process.stdout.write(
+    [
+      opened.dev,
+      opened.ino,
+      (opened.mode & 0o7777n).toString(8),
+      crypto.createHash("sha256").update(first).digest("hex"),
+      parent.dev,
+      parent.ino,
+    ].join("|"),
+  );
+} finally {
+  fs.closeSync(fd);
+}
+NODE
+  )"; then
+    :
+  else
+    fail "Protected existing config capture failed."
+  fi
+  IFS='|' read -r \
+    PROTECTED_CONFIG_DEV PROTECTED_CONFIG_INO PROTECTED_CONFIG_MODE \
+    PROTECTED_CONFIG_DIGEST PROTECTED_CONFIG_PARENT_DEV \
+    PROTECTED_CONFIG_PARENT_INO <<<"$metadata"
+  [[ "$PROTECTED_CONFIG_DEV" =~ ^[0-9]+$ &&
+    "$PROTECTED_CONFIG_INO" =~ ^[0-9]+$ &&
+    "$PROTECTED_CONFIG_MODE" =~ ^[0-7]{3,4}$ &&
+    "$PROTECTED_CONFIG_DIGEST" =~ ^[a-f0-9]{64}$ &&
+    "$PROTECTED_CONFIG_PARENT_DEV" =~ ^[0-9]+$ &&
+    "$PROTECTED_CONFIG_PARENT_INO" =~ ^[0-9]+$ ]] ||
+    fail "Protected existing config capture returned malformed metadata."
+}
+
+assert_protected_config_unchanged() {
+  local label="${1:-Protected OpenClaw config}"
+  local config_dev="${2:-$PROTECTED_CONFIG_DEV}"
+  local config_ino="${3:-$PROTECTED_CONFIG_INO}"
+  local config_digest="${4:-$PROTECTED_CONFIG_DIGEST}"
+  local config_mode="${5:-$PROTECTED_CONFIG_MODE}"
+  local parent_dev="${6:-$PROTECTED_CONFIG_PARENT_DEV}"
+  local parent_ino="${7:-$PROTECTED_CONFIG_PARENT_INO}"
+  node - "$OPENCLAW_CONFIG_DIR/openclaw.json" \
+    "$config_dev" "$config_ino" "$config_digest" "$config_mode" \
+    "$parent_dev" "$parent_ino" "$label" <<'NODE'
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const [
+  target,
+  expectedDev,
+  expectedIno,
+  expectedDigest,
+  expectedMode,
+  expectedParentDev,
+  expectedParentIno,
+  label,
+] = process.argv.slice(2);
+if (
+  !path.isAbsolute(target) ||
+  !/^[0-9]+$/.test(expectedDev) ||
+  !/^[0-9]+$/.test(expectedIno) ||
+  !/^[a-f0-9]{64}$/.test(expectedDigest) ||
+  !/^[0-7]{3,4}$/.test(expectedMode) ||
+  !/^[0-9]+$/.test(expectedParentDev) ||
+  !/^[0-9]+$/.test(expectedParentIno)
+) {
+  throw new Error("Protected config assertion metadata is malformed.");
+}
+const directory = path.dirname(target);
+const leaf = path.basename(target);
+const parent = fs.lstatSync(directory, { bigint: true });
+const sameParent = (value) =>
+  value.isDirectory() &&
+  !value.isSymbolicLink() &&
+  String(value.dev) === expectedParentDev &&
+  String(value.ino) === expectedParentIno;
+if (!sameParent(parent) || fs.realpathSync(directory) !== directory) {
+  throw new Error(`${label} parent identity changed.`);
+}
+process.chdir(directory);
+if (!sameParent(fs.lstatSync(".", { bigint: true }))) {
+  throw new Error(`${label} parent changed before inspection.`);
+}
+const before = fs.lstatSync(leaf, { bigint: true });
+if (
+  !before.isFile() ||
+  before.isSymbolicLink() ||
+  before.nlink !== 1n ||
+  String(before.dev) !== expectedDev ||
+  String(before.ino) !== expectedIno ||
+  (before.mode & 0o7777n).toString(8) !== expectedMode
+) {
+  throw new Error(`${label} identity or mode changed.`);
+}
+const fd = fs.openSync(leaf, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+try {
+  const opened = fs.fstatSync(fd, { bigint: true });
+  if (
+    opened.dev !== before.dev ||
+    opened.ino !== before.ino ||
+    opened.mode !== before.mode ||
+    opened.nlink !== 1n
+  ) {
+    throw new Error(`${label} changed before read.`);
+  }
+  const bytes = fs.readFileSync(fd);
+  const after = fs.fstatSync(fd, { bigint: true });
+  const finalPath = fs.lstatSync(leaf, { bigint: true });
+  if (
+    after.dev !== opened.dev ||
+    after.ino !== opened.ino ||
+    after.mode !== opened.mode ||
+    after.nlink !== 1n ||
+    after.size !== opened.size ||
+    after.mtimeNs !== opened.mtimeNs ||
+    after.ctimeNs !== opened.ctimeNs ||
+    finalPath.dev !== opened.dev ||
+    finalPath.ino !== opened.ino ||
+    finalPath.mode !== opened.mode ||
+    finalPath.nlink !== 1n ||
+    crypto.createHash("sha256").update(bytes).digest("hex") !== expectedDigest ||
+    !sameParent(fs.lstatSync(".", { bigint: true }))
+  ) {
+    throw new Error(`${label} changed during verification.`);
+  }
+} finally {
+  fs.closeSync(fd);
+}
+NODE
+}
+
+assert_protected_config_immutable() {
+  local label="${1:-Protected OpenClaw config}"
+  local config_dev="${2:-$PROTECTED_CONFIG_DEV}"
+  local config_ino="${3:-$PROTECTED_CONFIG_INO}"
+  local config_digest="${4:-$PROTECTED_CONFIG_DIGEST}"
+  local config_mode="${5:-$PROTECTED_CONFIG_MODE}"
+  local parent_dev="${6:-$PROTECTED_CONFIG_PARENT_DEV}"
+  local parent_ino="${7:-$PROTECTED_CONFIG_PARENT_INO}"
+  local host_platform=""
+  local stat_command="/usr/bin/stat"
+  local flag_record=""
+  local flag_dev=""
+  local flag_ino=""
+  local flags=""
+
+  if [[ "${OPENCLAW_DOCKER_SETUP_TEST:-}" == "1" ]]; then
+    host_platform="${OPENCLAW_TEST_HOST_PLATFORM:-}"
+    if [[ -n "${OPENCLAW_TEST_PROTECTED_CONFIG_STAT_COMMAND:-}" ]]; then
+      stat_command="$OPENCLAW_TEST_PROTECTED_CONFIG_STAT_COMMAND"
+    fi
+  else
+    [[ -x "/usr/bin/uname" && ! -L "/usr/bin/uname" ]] ||
+      fail "Read-only existing-config setup requires the exact macOS uname command."
+    host_platform="$(/usr/bin/uname -s)"
+  fi
+  [[ "$host_platform" == "Darwin" ]] ||
+    fail "OPENCLAW_SETUP_READ_ONLY_CONFIG requires macOS user-immutable config protection."
+  if [[ "${OPENCLAW_DOCKER_SETUP_TEST:-}" != "1" ]]; then
+    [[ "$stat_command" == "/usr/bin/stat" ]] ||
+      fail "Protected config flag inspection command is not the production contract."
+  fi
+  [[ "$stat_command" == /* && -x "$stat_command" && -f "$stat_command" &&
+    ! -L "$stat_command" ]] ||
+    fail "Protected config flag inspection command is unsafe."
+
+  assert_protected_config_unchanged \
+    "$label before immutable-flag inspection" \
+    "$config_dev" "$config_ino" "$config_digest" "$config_mode" \
+    "$parent_dev" "$parent_ino"
+  if flag_record="$(
+    OPENCLAW_PROTECTED_CONFIG_FLAG_CHECK_LABEL="$label" \
+      "$stat_command" -f '%d|%i|%Sf' "$OPENCLAW_CONFIG_DIR/openclaw.json"
+  )"; then
+    :
+  else
+    fail "$label immutable-flag inspection failed."
+  fi
+  flag_record="${flag_record//$'\r'/}"
+  [[ "$flag_record" != *$'\n'* ]] ||
+    fail "$label immutable-flag inspection returned ambiguous output."
+  IFS='|' read -r flag_dev flag_ino flags <<<"$flag_record"
+  [[ "$flag_dev" == "$config_dev" && "$flag_ino" == "$config_ino" &&
+    -n "$flags" ]] ||
+    fail "$label immutable-flag identity changed."
+  case ",$flags," in
+    *,uchg,*) ;;
+    *) fail "$label requires the macOS user-immutable uchg flag." ;;
+  esac
+  assert_protected_config_unchanged \
+    "$label after immutable-flag inspection" \
+    "$config_dev" "$config_ino" "$config_digest" "$config_mode" \
+    "$parent_dev" "$parent_ino"
+}
+
+read_protected_config_gateway_token() {
+  assert_protected_config_immutable "Protected OpenClaw config before token read"
+  node - "$OPENCLAW_CONFIG_DIR/openclaw.json" \
+    "$PROTECTED_CONFIG_DEV" "$PROTECTED_CONFIG_INO" \
+    "$PROTECTED_CONFIG_DIGEST" "$PROTECTED_CONFIG_MODE" \
+    "$PROTECTED_CONFIG_PARENT_DEV" "$PROTECTED_CONFIG_PARENT_INO" <<'NODE'
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const [
+  configPath,
+  expectedDev,
+  expectedIno,
+  expectedDigest,
+  expectedMode,
+  expectedParentDev,
+  expectedParentIno,
+] = process.argv.slice(2);
+const directory = path.dirname(configPath);
+const leaf = path.basename(configPath);
+const sameParent = (value) =>
+  value.isDirectory() &&
+  !value.isSymbolicLink() &&
+  String(value.dev) === expectedParentDev &&
+  String(value.ino) === expectedParentIno;
+if (
+  !path.isAbsolute(configPath) ||
+  !/^[0-9]+$/.test(expectedDev) ||
+  !/^[0-9]+$/.test(expectedIno) ||
+  !/^[a-f0-9]{64}$/.test(expectedDigest) ||
+  !/^[0-7]{3,4}$/.test(expectedMode) ||
+  !/^[0-9]+$/.test(expectedParentDev) ||
+  !/^[0-9]+$/.test(expectedParentIno) ||
+  !sameParent(fs.lstatSync(directory, { bigint: true })) ||
+  fs.realpathSync(directory) !== directory
+) {
+  throw new Error("Protected config token metadata changed before read.");
+}
+process.chdir(directory);
+if (!sameParent(fs.lstatSync(".", { bigint: true }))) {
+  throw new Error("Protected config parent changed before token read.");
+}
+const before = fs.lstatSync(leaf, { bigint: true });
+if (
+  !before.isFile() ||
+  before.isSymbolicLink() ||
+  before.nlink !== 1n ||
+  String(before.dev) !== expectedDev ||
+  String(before.ino) !== expectedIno ||
+  (before.mode & 0o7777n).toString(8) !== expectedMode
+) {
+  throw new Error("Protected config identity changed before token read.");
+}
+const fd = fs.openSync(leaf, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+try {
+  const opened = fs.fstatSync(fd, { bigint: true });
+  if (
+    opened.dev !== before.dev ||
+    opened.ino !== before.ino ||
+    opened.mode !== before.mode ||
+    opened.nlink !== 1n
+  ) {
+    throw new Error("Protected config changed before token read.");
+  }
+  const bytes = fs.readFileSync(fd);
+  const after = fs.fstatSync(fd, { bigint: true });
+  const finalPath = fs.lstatSync(leaf, { bigint: true });
+  if (
+    after.dev !== opened.dev ||
+    after.ino !== opened.ino ||
+    after.mode !== opened.mode ||
+    after.nlink !== 1n ||
+    after.size !== opened.size ||
+    after.mtimeNs !== opened.mtimeNs ||
+    after.ctimeNs !== opened.ctimeNs ||
+    finalPath.dev !== opened.dev ||
+    finalPath.ino !== opened.ino ||
+    finalPath.mode !== opened.mode ||
+    finalPath.nlink !== 1n ||
+    crypto.createHash("sha256").update(bytes).digest("hex") !== expectedDigest ||
+    !sameParent(fs.lstatSync(".", { bigint: true }))
+  ) {
+    throw new Error("Protected config changed during token read.");
+  }
+  const parsed = JSON.parse(bytes.toString("utf8"));
+  const token = parsed?.gateway?.auth?.token;
+  if (typeof token === "string" && token.trim()) {
+    process.stdout.write(token.trim());
+  }
+} finally {
+  fs.closeSync(fd);
+}
+NODE
+  assert_protected_config_immutable "Protected OpenClaw config after token read"
+}
+
 read_env_gateway_token() {
   local env_path="$1"
   local line=""
@@ -268,6 +660,125 @@ run_prestart_cli() {
   # gateway can start cleanly.
   run_prestart_gateway --entrypoint node openclaw-gateway \
     dist/index.js "$@"
+}
+
+validate_read_only_existing_config() {
+  case "$OPENCLAW_GATEWAY_BIND" in
+    auto | custom | lan | loopback | tailnet) ;;
+    *) fail "OPENCLAW_GATEWAY_BIND is not a supported Gateway bind mode." ;;
+  esac
+  assert_protected_config_immutable \
+    "Protected OpenClaw config before semantic validation"
+  if node - "$OPENCLAW_CONFIG_DIR/openclaw.json" \
+    "$PROTECTED_CONFIG_DEV" "$PROTECTED_CONFIG_INO" \
+    "$PROTECTED_CONFIG_DIGEST" "$PROTECTED_CONFIG_MODE" \
+    "$PROTECTED_CONFIG_PARENT_DEV" "$PROTECTED_CONFIG_PARENT_INO" \
+    "$OPENCLAW_GATEWAY_BIND" <<'NODE'
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const [
+  configPath,
+  expectedDev,
+  expectedIno,
+  expectedDigest,
+  expectedMode,
+  expectedParentDev,
+  expectedParentIno,
+  expectedBind,
+] = process.argv.slice(2);
+const directory = path.dirname(configPath);
+const leaf = path.basename(configPath);
+const sameParent = (value) =>
+  value.isDirectory() &&
+  !value.isSymbolicLink() &&
+  String(value.dev) === expectedParentDev &&
+  String(value.ino) === expectedParentIno;
+if (
+  !path.isAbsolute(configPath) ||
+  !sameParent(fs.lstatSync(directory, { bigint: true })) ||
+  fs.realpathSync(directory) !== directory
+) {
+  throw new Error("Protected config semantic parent changed.");
+}
+process.chdir(directory);
+if (!sameParent(fs.lstatSync(".", { bigint: true }))) {
+  throw new Error("Protected config semantic parent changed before read.");
+}
+const before = fs.lstatSync(leaf, { bigint: true });
+if (
+  !before.isFile() ||
+  before.isSymbolicLink() ||
+  before.nlink !== 1n ||
+  String(before.dev) !== expectedDev ||
+  String(before.ino) !== expectedIno ||
+  (before.mode & 0o7777n).toString(8) !== expectedMode
+) {
+  throw new Error("Protected config semantic identity changed.");
+}
+const fd = fs.openSync(leaf, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+try {
+  const opened = fs.fstatSync(fd, { bigint: true });
+  if (
+    opened.dev !== before.dev ||
+    opened.ino !== before.ino ||
+    opened.mode !== before.mode ||
+    opened.nlink !== 1n
+  ) {
+    throw new Error("Protected config changed before semantic read.");
+  }
+  const bytes = fs.readFileSync(fd);
+  const after = fs.fstatSync(fd, { bigint: true });
+  const finalPath = fs.lstatSync(leaf, { bigint: true });
+  if (
+    after.dev !== opened.dev ||
+    after.ino !== opened.ino ||
+    after.mode !== opened.mode ||
+    after.nlink !== 1n ||
+    after.size !== opened.size ||
+    after.mtimeNs !== opened.mtimeNs ||
+    after.ctimeNs !== opened.ctimeNs ||
+    finalPath.dev !== opened.dev ||
+    finalPath.ino !== opened.ino ||
+    finalPath.mode !== opened.mode ||
+    finalPath.nlink !== 1n ||
+    crypto.createHash("sha256").update(bytes).digest("hex") !== expectedDigest ||
+    !sameParent(fs.lstatSync(".", { bigint: true }))
+  ) {
+    throw new Error("Protected config changed during semantic read.");
+  }
+  const parsed = JSON.parse(bytes.toString("utf8"));
+  if (
+    parsed?.gateway?.mode !== "local" ||
+    parsed?.gateway?.bind !== expectedBind ||
+    parsed?.agents?.defaults?.sandbox?.mode !== "non-main" ||
+    parsed?.agents?.defaults?.sandbox?.scope !== "agent" ||
+    parsed?.agents?.defaults?.sandbox?.workspaceAccess !== "none"
+  ) {
+    throw new Error("Protected config does not match the guarded verifier policy.");
+  }
+} finally {
+  fs.closeSync(fd);
+}
+NODE
+  then
+    :
+  else
+    fail "Protected existing config policy validation failed."
+  fi
+  assert_protected_config_immutable \
+    "Protected OpenClaw config after semantic validation"
+  echo "Validated existing read-only config and exact guarded verifier sandbox policy."
+}
+
+prepare_read_only_existing_config_contract() {
+  capture_protected_config
+  validate_read_only_existing_config
+  assert_protected_config_immutable "Protected OpenClaw config before SSH path validation"
+  [[ -d "$OPENCLAW_CONFIG_DIR/ssh" && ! -L "$OPENCLAW_CONFIG_DIR/ssh" ]] ||
+    fail "OPENCLAW_SETUP_READ_ONLY_CONFIG requires an existing direct SSH directory."
+  assert_protected_config_immutable "Protected OpenClaw config after SSH path validation"
 }
 
 run_runtime_cli() {
@@ -354,6 +865,22 @@ fi
 if is_truthy_value "$RAW_BROWSER_INSTALL_SETTING"; then
   BROWSER_INSTALL_ENABLED="1"
 fi
+READ_ONLY_CONFIG_NORMALIZED="$(
+  printf '%s' "$RAW_READ_ONLY_CONFIG_SETTING" | tr '[:upper:]' '[:lower:]'
+)"
+case "$READ_ONLY_CONFIG_NORMALIZED" in
+  1 | true | yes | on)
+    READ_ONLY_CONFIG_ENABLED="1"
+    OPENCLAW_SETUP_READ_ONLY_CONFIG="1"
+    ;;
+  "" | 0 | false | no | off)
+    OPENCLAW_SETUP_READ_ONLY_CONFIG="0"
+    ;;
+  *)
+    fail "OPENCLAW_SETUP_READ_ONLY_CONFIG must be a boolean value."
+    ;;
+esac
+export OPENCLAW_SETUP_READ_ONLY_CONFIG
 
 OPENCLAW_CONFIG_DIR="${OPENCLAW_CONFIG_DIR:-$HOME/.openclaw}"
 OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-$HOME/.openclaw/workspace}"
@@ -421,6 +948,9 @@ if [[ "$verifier_values" -eq 3 ]]; then
     fail "Guarded verifier publication Dockerfile is missing: $VERIFIER_PUBLISH_DOCKERFILE"
   fi
 fi
+if [[ -n "$READ_ONLY_CONFIG_ENABLED" && -z "$VERIFIER_ENABLED" ]]; then
+  fail "OPENCLAW_SETUP_READ_ONLY_CONFIG requires guarded verifier publication."
+fi
 
 validate_mount_path_value "OPENCLAW_CONFIG_DIR" "$OPENCLAW_CONFIG_DIR"
 validate_mount_path_value "OPENCLAW_WORKSPACE_DIR" "$OPENCLAW_WORKSPACE_DIR"
@@ -449,13 +979,18 @@ if [[ -n "$TIMEZONE" ]]; then
   fi
 fi
 
-mkdir -p "$OPENCLAW_CONFIG_DIR"
-mkdir -p "$OPENCLAW_WORKSPACE_DIR"
-# Seed directory tree eagerly so bind mounts work even on Docker Desktop/Windows
-# where the container (even as root) cannot create new host subdirectories.
-mkdir -p "$OPENCLAW_CONFIG_DIR/identity"
-mkdir -p "$OPENCLAW_CONFIG_DIR/agents/main/agent"
-mkdir -p "$OPENCLAW_CONFIG_DIR/agents/main/sessions"
+if [[ -n "$READ_ONLY_CONFIG_ENABLED" ]]; then
+  [[ -d "$OPENCLAW_WORKSPACE_DIR" ]] ||
+    fail "OPENCLAW_SETUP_READ_ONLY_CONFIG requires an existing workspace."
+else
+  mkdir -p "$OPENCLAW_CONFIG_DIR"
+  mkdir -p "$OPENCLAW_WORKSPACE_DIR"
+  # Seed directory tree eagerly so bind mounts work even on Docker Desktop/Windows
+  # where the container (even as root) cannot create new host subdirectories.
+  mkdir -p "$OPENCLAW_CONFIG_DIR/identity"
+  mkdir -p "$OPENCLAW_CONFIG_DIR/agents/main/agent"
+  mkdir -p "$OPENCLAW_CONFIG_DIR/agents/main/sessions"
+fi
 
 export OPENCLAW_CONFIG_DIR
 export OPENCLAW_WORKSPACE_DIR
@@ -483,6 +1018,18 @@ export OPENCLAW_VERIFIER_REPOSITORY_IDENTITY="${OPENCLAW_VERIFIER_REPOSITORY_IDE
 export OPENCLAW_VERIFIER_BROWSER_IDENTITY="${OPENCLAW_VERIFIER_BROWSER_IDENTITY:-}"
 export OPENCLAW_VERIFIER_EFFECTIVE_YARN_VERSION="${OPENCLAW_VERIFIER_EFFECTIVE_YARN_VERSION:-}"
 
+if [[ -n "$READ_ONLY_CONFIG_ENABLED" ]]; then
+  VERIFIER_CONFIG_POLICY="read-only"
+  if [[ -e "$VERIFIER_TRANSACTION_DIR" || -L "$VERIFIER_TRANSACTION_DIR" ]]; then
+    # An interrupted Gateway recreate must be stopped from authenticated
+    # journal state before a missing immutable flag can terminate recovery.
+    DEFER_PROTECTED_CONFIG_VALIDATION="1"
+  else
+    prepare_read_only_existing_config_contract
+  fi
+fi
+VERIFIER_OPERATION_CONFIG_POLICY="$VERIFIER_CONFIG_POLICY"
+
 # Detect Docker socket GID for sandbox group_add.
 DOCKER_GID=""
 if [[ -n "$SANDBOX_ENABLED" && -S "$DOCKER_SOCKET_PATH" ]]; then
@@ -491,7 +1038,17 @@ fi
 export DOCKER_GID
 
 if [[ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]]; then
-  EXISTING_CONFIG_TOKEN="$(read_config_gateway_token || true)"
+  if [[ -n "$READ_ONLY_CONFIG_ENABLED" ]]; then
+    if [[ -n "$DEFER_PROTECTED_CONFIG_VALIDATION" ]]; then
+      EXISTING_CONFIG_TOKEN="$(read_env_gateway_token "$ROOT_DIR/.env" || true)"
+      [[ -n "$EXISTING_CONFIG_TOKEN" ]] ||
+        fail "Interrupted read-only verifier recovery requires its persisted Gateway token."
+    else
+      EXISTING_CONFIG_TOKEN="$(read_protected_config_gateway_token)"
+    fi
+  else
+    EXISTING_CONFIG_TOKEN="$(read_config_gateway_token || true)"
+  fi
   if [[ -n "$EXISTING_CONFIG_TOKEN" ]]; then
     OPENCLAW_GATEWAY_TOKEN="$EXISTING_CONFIG_TOKEN"
     echo "Reusing gateway token from $OPENCLAW_CONFIG_DIR/openclaw.json"
@@ -886,12 +1443,25 @@ oci_assert_lock_tree() {
 
 oci_read_journal() {
   local key="$1"
+  local default_value="${2:-}"
+  local allow_default=""
+  if [[ "$#" -eq 2 ]]; then
+    allow_default="1"
+  fi
   if node - "$VERIFIER_TRANSACTION_DIR" \
     "$VERIFIER_TRANSACTION_DIR_DEV" "$VERIFIER_TRANSACTION_DIR_INO" \
-    "$(id -u)" "$key" <<'NODE'
+    "$(id -u)" "$key" "$allow_default" "$default_value" <<'NODE'
 const fs = require("node:fs");
 
-const [directory, expectedDev, expectedIno, expectedUid, wanted] = process.argv.slice(2);
+const [
+  directory,
+  expectedDev,
+  expectedIno,
+  expectedUid,
+  wanted,
+  allowDefault,
+  defaultValue,
+] = process.argv.slice(2);
 const requested = fs.lstatSync(directory, { bigint: true });
 process.chdir(directory);
 const pinned = fs.lstatSync(".", { bigint: true });
@@ -932,10 +1502,14 @@ try {
     .slice(0, -1)
     .filter((line) => line.startsWith(`${wanted}=`))
     .map((line) => line.slice(wanted.length + 1));
-  if (values.length !== 1) {
-    throw new Error("Verifier transaction journal key is ambiguous.");
+  if (values.length === 0 && allowDefault === "1") {
+    process.stdout.write(`${defaultValue}\n`);
+  } else {
+    if (values.length !== 1) {
+      throw new Error("Verifier transaction journal key is ambiguous.");
+    }
+    process.stdout.write(`${values[0]}\n`);
   }
-  process.stdout.write(`${values[0]}\n`);
 } finally {
   fs.closeSync(journalFd);
 }
@@ -1001,6 +1575,10 @@ const expectedKeys = new Set([
   "new-gateway-id",
   "old-gateway-id",
   "old-gateway-image-id",
+  "gateway-compose-project",
+  "gateway-compose-service",
+  "gateway-candidate-label",
+  "gateway-create-binding",
   "old-image-id",
   "old-stable-image-id",
   "gateway-was-running",
@@ -1008,11 +1586,15 @@ const expectedKeys = new Set([
   "env-backup-mode",
   "env-backup-parent-dev",
   "env-backup-parent-ino",
+  "transaction-format",
+  "config-policy",
   "config-backup-present",
   "config-backup-digest",
   "config-backup-mode",
   "config-backup-parent-dev",
   "config-backup-parent-ino",
+  "config-dev",
+  "config-ino",
   "sandbox-overlay-backup-present",
   "sandbox-overlay-backup-digest",
   "sandbox-overlay-backup-mode",
@@ -1028,6 +1610,16 @@ const expectedKeys = new Set([
   "restore-target-ino",
   "docker-socket-path",
   "gc-old-image",
+]);
+const currentOnlyKeys = new Set([
+  "transaction-format",
+  "config-policy",
+  "config-dev",
+  "config-ino",
+  "gateway-compose-project",
+  "gateway-compose-service",
+  "gateway-candidate-label",
+  "gateway-create-binding",
 ]);
 const requested = fs.lstatSync(directory, { bigint: true });
 if (
@@ -1110,7 +1702,12 @@ const parseJournal = (value) => {
     }
     values.set(key, line.slice(separator + 1));
   }
-  if (values.size !== expectedKeys.size) {
+  const missing = [...expectedKeys].filter((key) => !values.has(key));
+  if (
+    missing.length > 0 &&
+    (missing.length !== currentOnlyKeys.size ||
+      missing.some((key) => !currentOnlyKeys.has(key)))
+  ) {
     return { kind: "incomplete" };
   }
   return { kind: "complete", values };
@@ -1230,6 +1827,10 @@ const expected = new Set([
   "new-gateway-id",
   "old-gateway-id",
   "old-gateway-image-id",
+  "gateway-compose-project",
+  "gateway-compose-service",
+  "gateway-candidate-label",
+  "gateway-create-binding",
   "old-image-id",
   "old-stable-image-id",
   "gateway-was-running",
@@ -1237,11 +1838,15 @@ const expected = new Set([
   "env-backup-mode",
   "env-backup-parent-dev",
   "env-backup-parent-ino",
+  "transaction-format",
+  "config-policy",
   "config-backup-present",
   "config-backup-digest",
   "config-backup-mode",
   "config-backup-parent-dev",
   "config-backup-parent-ino",
+  "config-dev",
+  "config-ino",
   "sandbox-overlay-backup-present",
   "sandbox-overlay-backup-digest",
   "sandbox-overlay-backup-mode",
@@ -1257,6 +1862,16 @@ const expected = new Set([
   "restore-target-ino",
   "docker-socket-path",
   "gc-old-image",
+]);
+const currentOnlyKeys = new Set([
+  "transaction-format",
+  "config-policy",
+  "config-dev",
+  "config-ino",
+  "gateway-compose-project",
+  "gateway-compose-service",
+  "gateway-candidate-label",
+  "gateway-create-binding",
 ]);
 const requested = fs.lstatSync(directory, { bigint: true });
 process.chdir(directory);
@@ -1305,7 +1920,12 @@ for (const line of lines) {
   }
   seen.add(key);
 }
-if (seen.size !== expected.size) {
+const missing = [...expected].filter((key) => !seen.has(key));
+if (
+  missing.length > 0 &&
+  (missing.length !== currentOnlyKeys.size ||
+    missing.some((key) => !currentOnlyKeys.has(key)))
+) {
   throw new Error("Verifier transaction journal is incomplete.");
 }
 NODE
@@ -1460,7 +2080,7 @@ NODE
 
 oci_assert_known_phase() {
   case "$1" in
-    begun | candidate-built | candidate-verified | final-built | final-verified | tag-published | env-committed | socket-overlay-written | sandbox-configured | gateway-started | gateway-ready | committed) ;;
+    begun | candidate-built | candidate-verified | final-built | final-verified | tag-published | env-committed | socket-overlay-written | sandbox-configured | gateway-create-intent | gateway-started | gateway-ready | committed) ;;
     *) fail "Verifier transaction journal contains an unknown phase." ;;
   esac
 }
@@ -1475,11 +2095,17 @@ oci_validate_journal_identities() {
   local old_image="$7"
   local old_stable="$8"
   local gateway_was_running="$9"
+  local transaction_format="${10}"
+  local config_policy="${11}"
+  local expected_operation_binding=""
   [[ "$transaction_id" =~ ^[a-f0-9]{32}$ ]] ||
     fail "Verifier journal contains a malformed transaction ID."
   [[ "$state_instance_digest" == "$VERIFIER_STATE_TOKEN_DIGEST" ]] ||
     fail "Verifier journal belongs to a different state instance."
-  [[ "$operation_binding" == "$(oci_operation_binding "$transaction_id")" ]] ||
+  expected_operation_binding="$(
+    oci_operation_binding "$transaction_id" "$transaction_format" "$config_policy"
+  )"
+  [[ "$operation_binding" == "$expected_operation_binding" ]] ||
     fail "Verifier journal contains an invalid state-bound operation identity."
   [[ -z "$candidate" || "$candidate" =~ ^sha256:[a-f0-9]{64}$ ]] ||
     fail "Verifier journal contains a malformed candidate image ID."
@@ -1506,18 +2132,22 @@ oci_validate_transaction_metadata() {
   local env_backup_mode="$8"
   local env_backup_parent_dev="$9"
   local env_backup_parent_ino="${10}"
-  local config_backup_present="${11}"
-  local config_backup_digest="${12}"
-  local config_backup_mode="${13}"
-  local config_backup_parent_dev="${14}"
-  local config_backup_parent_ino="${15}"
-  local overlay_backup_present="${16}"
-  local overlay_backup_digest="${17}"
-  local overlay_backup_mode="${18}"
-  local overlay_backup_parent_dev="${19}"
-  local overlay_backup_parent_ino="${20}"
-  local docker_socket_path="${21}"
-  local gc_old_image="${22}"
+  local transaction_format="${11}"
+  local config_policy="${12}"
+  local config_backup_present="${13}"
+  local config_backup_digest="${14}"
+  local config_backup_mode="${15}"
+  local config_backup_parent_dev="${16}"
+  local config_backup_parent_ino="${17}"
+  local config_dev="${18}"
+  local config_ino="${19}"
+  local overlay_backup_present="${20}"
+  local overlay_backup_digest="${21}"
+  local overlay_backup_mode="${22}"
+  local overlay_backup_parent_dev="${23}"
+  local overlay_backup_parent_ino="${24}"
+  local docker_socket_path="${25}"
+  local gc_old_image="${26}"
   [[ "$candidate_tag" == "openclaw-sandbox-verifier:candidate-$transaction_id" &&
     "$final_tag" == "openclaw-sandbox-verifier:published-$transaction_id" ]] ||
     fail "Verifier journal contains altered transaction tag intent."
@@ -1534,8 +2164,16 @@ oci_validate_transaction_metadata() {
   [[ "$env_backup_parent_dev" =~ ^[0-9]+$ &&
     "$env_backup_parent_ino" =~ ^[0-9]+$ ]] ||
     fail "Verifier journal contains malformed environment parent identity."
+  [[ "$transaction_format" == "legacy" || "$transaction_format" == "2" ]] ||
+    fail "Verifier journal contains an unknown transaction format."
+  [[ "$config_policy" == "write" || "$config_policy" == "read-only" ]] ||
+    fail "Verifier journal contains an unknown config policy."
+  [[ "$transaction_format" != "legacy" || "$config_policy" == "write" ]] ||
+    fail "Legacy verifier journals cannot claim read-only config handling."
   [[ "$config_backup_present" == "0" || "$config_backup_present" == "1" ]] ||
     fail "Verifier journal contains a malformed config backup state."
+  [[ "$config_policy" != "read-only" || "$config_backup_present" == "1" ]] ||
+    fail "Read-only verifier recovery requires captured config metadata."
   [[ "$overlay_backup_present" == "0" || "$overlay_backup_present" == "1" ]] ||
     fail "Verifier journal contains a malformed sandbox overlay backup state."
   if [[ "$config_backup_present" == "1" ]]; then
@@ -1557,6 +2195,13 @@ oci_validate_transaction_metadata() {
   [[ "$config_backup_parent_dev" =~ ^[0-9]+$ &&
     "$config_backup_parent_ino" =~ ^[0-9]+$ ]] ||
     fail "Verifier journal contains malformed config parent identity."
+  if [[ "$config_policy" == "read-only" ]]; then
+    [[ "$config_dev" =~ ^[0-9]+$ && "$config_ino" =~ ^[0-9]+$ ]] ||
+      fail "Read-only verifier journal contains malformed config identity."
+  else
+    [[ -z "$config_dev" && -z "$config_ino" ]] ||
+      fail "Config-writing verifier journal contains unexpected config identity."
+  fi
   [[ "$overlay_backup_parent_dev" =~ ^[0-9]+$ &&
     "$overlay_backup_parent_ino" =~ ^[0-9]+$ ]] ||
     fail "Verifier journal contains malformed sandbox overlay parent identity."
@@ -1567,6 +2212,32 @@ oci_validate_transaction_metadata() {
   fi
   [[ -z "$gc_old_image" || "$gc_old_image" == "1" ]] ||
     fail "Verifier journal contains a malformed image-retention policy."
+}
+
+oci_validate_config_transaction_artifact() {
+  local config_policy="$1"
+  local config_backup_present="$2"
+  local config_backup_digest="$3"
+  local backup_path="$VERIFIER_TRANSACTION_DIR/config.backup"
+  [[ "$config_policy" == "write" || "$config_policy" == "read-only" ]] ||
+    fail "Verifier config artifact policy is malformed."
+  [[ "$config_backup_present" == "0" || "$config_backup_present" == "1" ]] ||
+    fail "Verifier config artifact presence is malformed."
+  if [[ "$config_policy" == "read-only" ]]; then
+    [[ ! -e "$backup_path" && ! -L "$backup_path" ]] ||
+      fail "Read-only verifier transaction contains a plaintext config backup."
+    return
+  fi
+  if [[ "$config_backup_present" == "1" ]]; then
+    [[ -f "$backup_path" && ! -L "$backup_path" ]] ||
+      fail "Config-writing verifier recovery is missing its captured backup."
+    oci_assert_owned_mode "$backup_path" 600
+    [[ "$(oci_file_digest "$backup_path")" == "$config_backup_digest" ]] ||
+      fail "Config-writing verifier recovery backup digest changed."
+  else
+    [[ ! -e "$backup_path" && ! -L "$backup_path" ]] ||
+      fail "Config-writing verifier transaction has an unexpected config backup."
+  fi
 }
 
 oci_validate_restore_state() {
@@ -1645,6 +2316,10 @@ oci_validate_phase_state() {
       [[ -n "$candidate" && -n "$final" ]] ||
         fail "Verifier journal phase is missing published image identities."
       ;;
+    gateway-create-intent)
+      [[ -n "$candidate" && -n "$final" && -z "$new_gateway" ]] ||
+        fail "Verifier Gateway-create intent has contradictory publication identity."
+      ;;
     gateway-started | gateway-ready | committed)
       [[ -n "$candidate" && -n "$final" && -n "$new_gateway" ]] ||
         fail "Verifier journal phase is missing Gateway publication identities."
@@ -1670,6 +2345,10 @@ oci_write_journal() {
     printf 'new-gateway-id=%s\n' "${VERIFIER_NEW_GATEWAY_ID:-}"
     printf 'old-gateway-id=%s\n' "${VERIFIER_OLD_GATEWAY_ID:-}"
     printf 'old-gateway-image-id=%s\n' "${VERIFIER_OLD_GATEWAY_IMAGE_ID:-}"
+    printf 'gateway-compose-project=%s\n' "${VERIFIER_GATEWAY_COMPOSE_PROJECT:-}"
+    printf 'gateway-compose-service=%s\n' "${VERIFIER_GATEWAY_COMPOSE_SERVICE:-}"
+    printf 'gateway-candidate-label=%s\n' "${VERIFIER_GATEWAY_CANDIDATE_LABEL:-}"
+    printf 'gateway-create-binding=%s\n' "${VERIFIER_GATEWAY_CREATE_BINDING:-}"
     printf 'old-image-id=%s\n' "${VERIFIER_OLD_IMAGE_ID:-}"
     printf 'old-stable-image-id=%s\n' "${VERIFIER_OLD_STABLE_IMAGE_ID:-}"
     printf 'gateway-was-running=%s\n' "${VERIFIER_GATEWAY_WAS_RUNNING:-}"
@@ -1677,11 +2356,15 @@ oci_write_journal() {
     printf 'env-backup-mode=%s\n' "${VERIFIER_ENV_BACKUP_MODE:-}"
     printf 'env-backup-parent-dev=%s\n' "${VERIFIER_ENV_BACKUP_PARENT_DEV:-}"
     printf 'env-backup-parent-ino=%s\n' "${VERIFIER_ENV_BACKUP_PARENT_INO:-}"
+    printf 'transaction-format=%s\n' "${VERIFIER_TRANSACTION_FORMAT:-}"
+    printf 'config-policy=%s\n' "${VERIFIER_CONFIG_POLICY:-}"
     printf 'config-backup-present=%s\n' "${VERIFIER_CONFIG_BACKUP_PRESENT:-0}"
     printf 'config-backup-digest=%s\n' "${VERIFIER_CONFIG_BACKUP_DIGEST:-}"
     printf 'config-backup-mode=%s\n' "${VERIFIER_CONFIG_BACKUP_MODE:-}"
     printf 'config-backup-parent-dev=%s\n' "${VERIFIER_CONFIG_BACKUP_PARENT_DEV:-}"
     printf 'config-backup-parent-ino=%s\n' "${VERIFIER_CONFIG_BACKUP_PARENT_INO:-}"
+    printf 'config-dev=%s\n' "${VERIFIER_CONFIG_DEV:-}"
+    printf 'config-ino=%s\n' "${VERIFIER_CONFIG_INO:-}"
     printf 'sandbox-overlay-backup-present=%s\n' "${VERIFIER_OVERLAY_BACKUP_PRESENT:-0}"
     printf 'sandbox-overlay-backup-digest=%s\n' "${VERIFIER_OVERLAY_BACKUP_DIGEST:-}"
     printf 'sandbox-overlay-backup-mode=%s\n' "${VERIFIER_OVERLAY_BACKUP_MODE:-}"
@@ -1827,16 +2510,421 @@ NODE
 
 oci_operation_binding() {
   local operation_id="$1"
+  local transaction_format="${2:-${VERIFIER_OPERATION_FORMAT:-}}"
+  local config_policy="${3:-${VERIFIER_OPERATION_CONFIG_POLICY:-}}"
   [[ "$VERIFIER_STATE_TOKEN_DIGEST" =~ ^[a-f0-9]{64}$ &&
     ( "$operation_id" == "recovery" || "$operation_id" == "cleanup" ||
       "$operation_id" =~ ^[a-f0-9]{32}$ ) ]] ||
     fail "Guarded verifier state operation binding input is malformed."
+  if [[ "$transaction_format" == "legacy" && "$config_policy" == "write" ]]; then
+    node -e '
+      const crypto = require("node:crypto");
+      process.stdout.write(
+        crypto.createHash("sha256").update(`${process.argv[1]}\0${process.argv[2]}`).digest("hex"),
+      );
+    ' "$VERIFIER_STATE_TOKEN_DIGEST" "$operation_id"
+    return
+  fi
+  [[ "$transaction_format" == "2" &&
+    ( "$config_policy" == "write" || "$config_policy" == "read-only" ) ]] ||
+    fail "Guarded verifier transaction binding policy is malformed."
   node -e '
     const crypto = require("node:crypto");
     process.stdout.write(
-      crypto.createHash("sha256").update(`${process.argv[1]}\0${process.argv[2]}`).digest("hex"),
+      crypto
+        .createHash("sha256")
+        .update(
+          `${process.argv[1]}\0${process.argv[2]}\0${process.argv[3]}\0${process.argv[4]}`,
+        )
+        .digest("hex"),
     );
-  ' "$VERIFIER_STATE_TOKEN_DIGEST" "$operation_id"
+  ' "$VERIFIER_STATE_TOKEN_DIGEST" "$operation_id" "$transaction_format" "$config_policy"
+}
+
+oci_gateway_create_binding() {
+  local operation_binding="$1"
+  local old_gateway="$2"
+  local runtime_image="$3"
+  local compose_project="$4"
+  local compose_service="$5"
+  local candidate_label="$6"
+  local transaction_format="$7"
+  local config_policy="$8"
+  [[ "$operation_binding" =~ ^[a-f0-9]{64}$ &&
+    ( -z "$old_gateway" || "$old_gateway" =~ ^[a-f0-9]{64}$ ) &&
+    "$runtime_image" =~ ^sha256:[a-f0-9]{64}$ &&
+    "$compose_project" =~ ^[a-z0-9][a-z0-9_.-]*$ &&
+    "$compose_service" == "openclaw-gateway" &&
+    "$candidate_label" =~ ^[a-f0-9]{64}$ &&
+    "$transaction_format" == "2" &&
+    ( "$config_policy" == "write" || "$config_policy" == "read-only" ) ]] ||
+    fail "Guarded verifier Gateway-create binding input is malformed."
+  node -e '
+    const crypto = require("node:crypto");
+    process.stdout.write(
+      crypto
+        .createHash("sha256")
+        .update(process.argv.slice(1).join("\0"))
+        .digest("hex"),
+    );
+  ' \
+    "$operation_binding" "$old_gateway" "$runtime_image" \
+    "$compose_project" "$compose_service" "$candidate_label" \
+    "$transaction_format" "$config_policy"
+}
+
+oci_gateway_candidate_label() {
+  local transaction_id="$1"
+  [[ "$transaction_id" =~ ^[a-f0-9]{32}$ ]] ||
+    fail "Guarded verifier Gateway candidate transaction identity is malformed."
+  # The active marker already binds this cryptographically random transaction ID.
+  # Domain separation makes its derived Docker label transaction-specific.
+  node -e '
+    const crypto = require("node:crypto");
+    process.stdout.write(
+      crypto
+        .createHash("sha256")
+        .update(`openclaw-verifier-gateway-candidate\0${process.argv[1]}`)
+        .digest("hex"),
+    );
+  ' "$transaction_id"
+}
+
+oci_compose_gateway_identity() {
+  local candidate_label="$1"
+  local config=""
+  local identity=""
+  shift
+  [[ "$candidate_label" =~ ^[a-f0-9]{64}$ ]] ||
+    fail "Guarded verifier Gateway candidate label is malformed."
+  if config="$(docker compose "$@" config --format json)"; then
+    :
+  else
+    fail "Guarded verifier could not resolve the Gateway Compose identity."
+  fi
+  identity="$(
+    printf '%s' "$config" |
+      node -e '
+        const fs = require("node:fs");
+        const expectedLabel = process.argv[1];
+        const config = JSON.parse(fs.readFileSync(0, "utf8"));
+        const project = config?.name;
+        const service = config?.services?.["openclaw-gateway"];
+        if (
+          typeof project !== "string" ||
+          !/^[a-z0-9][a-z0-9_.-]*$/.test(project) ||
+          typeof service !== "object" ||
+          service === null ||
+          typeof service.labels !== "object" ||
+          service.labels === null ||
+          service.labels["ai.openclaw.verifier.gateway-candidate"] !== expectedLabel
+        ) {
+          throw new Error("Gateway Compose project, service, or candidate label is malformed.");
+        }
+        process.stdout.write(`${project}|openclaw-gateway`);
+      ' "$candidate_label"
+  )" || fail "Guarded verifier Gateway Compose identity is unsafe."
+  [[ "$identity" != *$'\n'* ]] ||
+    fail "Guarded verifier Gateway Compose identity is ambiguous."
+  printf '%s' "$identity"
+}
+
+oci_phase_has_gateway_create_intent() {
+  case "$1" in
+    gateway-create-intent | gateway-started | gateway-ready | committed) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+oci_validate_gateway_create_contract() {
+  local phase="$1"
+  local transaction_format="$2"
+  local operation_binding="$3"
+  local old_gateway="$4"
+  local transaction_id="$5"
+  local runtime_image="$6"
+  local compose_project="$7"
+  local compose_service="$8"
+  local candidate_label="$9"
+  local create_binding="${10}"
+  local config_policy="${11}"
+  local expected=""
+  local expected_candidate_label=""
+  if [[ "$transaction_format" == "legacy" ]]; then
+    [[ -z "$compose_project" && -z "$compose_service" &&
+      -z "$candidate_label" && -z "$create_binding" ]] ||
+      fail "Legacy verifier journal contains unexpected Gateway-create identity."
+    return
+  fi
+  expected_candidate_label="$(oci_gateway_candidate_label "$transaction_id")"
+  [[ "$candidate_label" == "$expected_candidate_label" ]] ||
+    fail "Verifier journal contains an invalid Gateway candidate label."
+  if ! oci_phase_has_gateway_create_intent "$phase"; then
+    [[ -z "$compose_project" && -z "$compose_service" && -z "$create_binding" ]] ||
+      fail "Verifier journal contains premature Gateway-create identity."
+    return
+  fi
+  expected="$(
+    oci_gateway_create_binding \
+      "$operation_binding" "$old_gateway" "$runtime_image" \
+      "$compose_project" "$compose_service" "$candidate_label" \
+      "$transaction_format" "$config_policy"
+  )"
+  [[ "$create_binding" == "$expected" ]] ||
+    fail "Verifier journal contains an invalid Gateway-create identity."
+}
+
+oci_resolve_gateway_service_container() {
+  local compose_project="$1"
+  local compose_service="$2"
+  local resolved=""
+  shift 2
+  [[ "$compose_project" =~ ^[a-z0-9][a-z0-9_.-]*$ &&
+    "$compose_service" == "openclaw-gateway" ]] ||
+    fail "Verifier Gateway service lookup identity is malformed."
+  if resolved="$(
+    docker compose --project-name "$compose_project" \
+      "$@" ps -a -q --no-trunc "$compose_service"
+  )"; then
+    :
+  else
+    fail "Verifier recovery could not resolve the exact Gateway service container."
+  fi
+  [[ "$resolved" != *$'\n'* &&
+    ( -z "$resolved" || "$resolved" =~ ^[a-f0-9]{64}$ ) ]] ||
+    {
+      echo "ERROR: Verifier recovery found an ambiguous Gateway service container identity." >&2
+      return 2
+    }
+  printf '%s' "$resolved"
+}
+
+oci_validate_gateway_container_identity() {
+  local gateway_id="$1"
+  local expected_image="$2"
+  local compose_project="$3"
+  local compose_service="$4"
+  local expected_running="${5:-}"
+  local expected_candidate_label="${6:-}"
+  local labels_json=""
+  local running=""
+  [[ "$gateway_id" =~ ^[a-f0-9]{64}$ &&
+    "$expected_image" =~ ^sha256:[a-f0-9]{64}$ &&
+    "$compose_project" =~ ^[a-z0-9][a-z0-9_.-]*$ &&
+    "$compose_service" == "openclaw-gateway" &&
+    ( -z "$expected_running" || "$expected_running" == "true" ||
+      "$expected_running" == "false" ) &&
+    ( -z "$expected_candidate_label" ||
+      "$expected_candidate_label" =~ ^[a-f0-9]{64}$ ) ]] ||
+    fail "Verifier Gateway container validation input is malformed."
+  if labels_json="$(
+    docker inspect --format '{{json .Config.Labels}}' "$gateway_id"
+  )"; then
+    :
+  else
+    fail "Verifier Gateway container disappeared before identity validation."
+  fi
+  if node - \
+    "$compose_project" "$compose_service" "$expected_candidate_label" "$labels_json" <<'NODE'
+const [expectedProject, expectedService, expectedCandidate, raw] = process.argv.slice(2);
+let cursor = 0;
+
+function skipWhitespace() {
+  while (cursor < raw.length && /[\t\n\r ]/.test(raw[cursor])) {
+    cursor += 1;
+  }
+}
+
+function readString() {
+  if (raw[cursor] !== '"') {
+    throw new Error("Expected a JSON string.");
+  }
+  const start = cursor;
+  cursor += 1;
+  let escaped = false;
+  while (cursor < raw.length) {
+    const value = raw[cursor];
+    cursor += 1;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (value === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (value === '"') {
+      return JSON.parse(raw.slice(start, cursor));
+    }
+  }
+  throw new Error("Unterminated JSON string.");
+}
+
+if (raw.length === 0 || raw !== raw.trim() || raw[cursor] !== "{") {
+  throw new Error("Labels inspection must be one exact JSON object.");
+}
+cursor += 1;
+skipWhitespace();
+const labels = new Map();
+if (raw[cursor] !== "}") {
+  while (true) {
+    const key = readString();
+    if (labels.has(key)) {
+      throw new Error("Labels inspection contains a duplicate key.");
+    }
+    skipWhitespace();
+    if (raw[cursor] !== ":") {
+      throw new Error("Labels inspection is missing a property separator.");
+    }
+    cursor += 1;
+    skipWhitespace();
+    const value = readString();
+    labels.set(key, value);
+    skipWhitespace();
+    if (raw[cursor] === "}") {
+      break;
+    }
+    if (raw[cursor] !== ",") {
+      throw new Error("Labels inspection is not a flat string map.");
+    }
+    cursor += 1;
+    skipWhitespace();
+  }
+}
+cursor += 1;
+if (cursor !== raw.length) {
+  throw new Error("Labels inspection contains ambiguous trailing bytes.");
+}
+if (
+  labels.get("com.docker.compose.project") !== expectedProject ||
+  labels.get("com.docker.compose.service") !== expectedService ||
+  labels.get("com.docker.compose.oneoff") !== "False" ||
+  (expectedCandidate !== "" &&
+    labels.get("ai.openclaw.verifier.gateway-candidate") !== expectedCandidate)
+) {
+  throw new Error("Labels inspection does not match the authenticated identity.");
+}
+NODE
+  then
+    :
+  else
+    fail "Verifier Gateway container does not match the exact Compose service identity."
+  fi
+  [[ "$(docker inspect --format '{{.Image}}' "$gateway_id")" == "$expected_image" ]] ||
+    fail "Verifier Gateway container does not match the exact runtime image."
+  running="$(docker inspect --format '{{.State.Running}}' "$gateway_id")"
+  [[ "$running" == "true" || "$running" == "false" ]] ||
+    fail "Verifier Gateway container returned malformed running state."
+  [[ -z "$expected_running" || "$running" == "$expected_running" ]] ||
+    fail "Verifier Gateway container running state is not the authenticated expectation."
+  printf '%s' "$running"
+}
+
+oci_stop_authenticated_gateway_candidate() {
+  local phase="$1"
+  local transaction_format="$2"
+  local old_gateway="$3"
+  local old_gateway_image="$4"
+  local runtime_image="$5"
+  local new_gateway="$6"
+  local compose_project="$7"
+  local compose_service="$8"
+  local candidate_label="$9"
+  local resolved=""
+  local running=""
+  shift 9
+  if [[ "$transaction_format" != "2" ]] ||
+    ! oci_phase_has_gateway_create_intent "$phase"; then
+    return
+  fi
+  if [[ -n "$new_gateway" ]]; then
+    running="$(
+      oci_validate_gateway_container_identity \
+        "$new_gateway" "$runtime_image" "$compose_project" "$compose_service" \
+        "" "$candidate_label"
+    )"
+    if [[ "$running" == "true" ]]; then
+      docker stop "$new_gateway" >/dev/null
+    fi
+    oci_validate_gateway_container_identity \
+      "$new_gateway" "$runtime_image" "$compose_project" "$compose_service" \
+      "false" "$candidate_label" >/dev/null
+    if resolved="$(
+      oci_resolve_gateway_service_container "$compose_project" "$compose_service" "$@"
+    )"; then
+      :
+    else
+      return $?
+    fi
+    [[ "$resolved" == "$new_gateway" ]] ||
+      fail "Verifier recovery found a different container under the Gateway service identity."
+    printf '%s' "$new_gateway"
+    return
+  fi
+  if resolved="$(
+    oci_resolve_gateway_service_container "$compose_project" "$compose_service" "$@"
+  )"; then
+    :
+  else
+    return $?
+  fi
+  if [[ -z "$resolved" ]]; then
+    [[ "$phase" == "gateway-create-intent" && -z "$new_gateway" ]] ||
+      fail "Verifier recovery cannot resolve its journaled Gateway container."
+    return
+  fi
+  if [[ "$resolved" == "$old_gateway" ]]; then
+    [[ -z "$new_gateway" && "$old_gateway_image" =~ ^sha256:[a-f0-9]{64}$ ]] ||
+      fail "Verifier recovery found contradictory prior Gateway identity."
+    oci_validate_gateway_container_identity \
+      "$resolved" "$old_gateway_image" "$compose_project" "$compose_service" >/dev/null
+    printf '%s' "$resolved"
+    return
+  fi
+  running="$(
+    oci_validate_gateway_container_identity \
+      "$resolved" "$runtime_image" "$compose_project" "$compose_service" \
+      "" "$candidate_label"
+  )"
+  if [[ "$running" == "true" ]]; then
+    docker stop "$resolved" >/dev/null
+  fi
+  oci_validate_gateway_container_identity \
+    "$resolved" "$runtime_image" "$compose_project" "$compose_service" \
+    "false" "$candidate_label" >/dev/null
+  printf '%s' "$resolved"
+}
+
+oci_load_transaction_contract() {
+  local transaction_format=""
+  local config_policy=""
+  local transaction_id=""
+  local operation_binding=""
+  local expected_operation_binding=""
+  transaction_format="$(oci_read_journal transaction-format legacy)"
+  config_policy="$(oci_read_journal config-policy write)"
+  transaction_id="$(oci_read_journal transaction-id)"
+  operation_binding="$(oci_read_journal operation-binding)"
+  [[ "$transaction_format" == "legacy" || "$transaction_format" == "2" ]] ||
+    fail "Verifier journal contains an unknown transaction format."
+  [[ "$config_policy" == "write" || "$config_policy" == "read-only" ]] ||
+    fail "Verifier journal contains an unknown config policy."
+  [[ "$transaction_format" != "legacy" || "$config_policy" == "write" ]] ||
+    fail "Legacy verifier journals cannot claim read-only config handling."
+  if [[ -n "$VERIFIER_OPERATION_FORMAT" &&
+    ( "$VERIFIER_OPERATION_FORMAT" != "$transaction_format" ||
+      "$VERIFIER_OPERATION_CONFIG_POLICY" != "$config_policy" ) ]]; then
+    fail "Verifier journal policy conflicts with its active-state marker."
+  fi
+  expected_operation_binding="$(
+    oci_operation_binding "$transaction_id" "$transaction_format" "$config_policy"
+  )"
+  [[ "$transaction_id" =~ ^[a-f0-9]{32}$ &&
+    "$operation_binding" == "$expected_operation_binding" ]] ||
+    fail "Verifier journal policy is not bound to its state operation."
+  VERIFIER_OPERATION_FORMAT="$transaction_format"
+  VERIFIER_OPERATION_CONFIG_POLICY="$config_policy"
+  printf '%s|%s' "$transaction_format" "$config_policy"
 }
 
 oci_prepare_state_instance_token() {
@@ -2065,6 +3153,8 @@ oci_prepare_state_marker_contract() {
   local identity=""
   VERIFIER_STATE_MARKER_PHASE=""
   VERIFIER_STATE_TOKEN_DIGEST=""
+  VERIFIER_OPERATION_FORMAT=""
+  VERIFIER_OPERATION_CONFIG_POLICY=""
   VERIFIER_STATE_PARENT_PATH="$(dirname "$VERIFIER_STATE_PATH")"
   identity="$(
     node - "$VERIFIER_STATE_PARENT_PATH" "$VERIFIER_STATE_PATH" <<'NODE'
@@ -2107,6 +3197,8 @@ const lstatOptional = (value) => {
 let markerState = lstatOptional(markerPath);
 let markerTokenDigest = "";
 let markerPhase = "";
+let markerOperationFormat = "";
+let markerConfigPolicy = "";
 const markerTemporaryState = lstatOptional(markerTemporaryPath);
 if (markerTemporaryState) {
   if (
@@ -2160,8 +3252,30 @@ if (markerState) {
   } finally {
     fs.closeSync(fd);
   }
+  const legacyBinding =
+    marker?.contractVersion === 2 &&
+    marker.operationBinding ===
+      crypto
+        .createHash("sha256")
+        .update(`${marker.stateTokenDigest}\0${marker.operationId}`)
+        .digest("hex") &&
+    Object.keys(marker).join(",") ===
+      "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,operationId,operationBinding";
+  const currentBinding =
+    marker?.contractVersion === 3 &&
+    marker.transactionFormat === "2" &&
+    (marker.configPolicy === "write" || marker.configPolicy === "read-only") &&
+    marker.operationBinding ===
+      crypto
+        .createHash("sha256")
+        .update(
+          `${marker.stateTokenDigest}\0${marker.operationId}\0${marker.transactionFormat}\0${marker.configPolicy}`,
+        )
+        .digest("hex") &&
+    Object.keys(marker).join(",") ===
+      "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,transactionFormat,configPolicy,operationId,operationBinding";
   if (
-    marker?.contractVersion !== 2 ||
+    (!legacyBinding && !currentBinding) ||
     (marker.markerState !== "active" && marker.markerState !== "cleanup") ||
     marker.statePath !== statePath ||
     !/^[0-9]+$/.test(marker.stateDev) ||
@@ -2172,19 +3286,15 @@ if (markerState) {
     typeof marker.operationId !== "string" ||
     !/^(?:recovery|cleanup|[a-f0-9]{32})$/.test(marker.operationId) ||
     !/^[a-f0-9]{64}$/.test(marker.operationBinding) ||
-    marker.operationBinding !==
-      crypto
-        .createHash("sha256")
-        .update(`${marker.stateTokenDigest}\0${marker.operationId}`)
-        .digest("hex") ||
     markerRaw !== `${JSON.stringify(marker)}\n` ||
-    Object.keys(marker).join(",") !==
-      "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,operationId,operationBinding"
+    (marker.contractVersion !== 2 && marker.contractVersion !== 3)
   ) {
     throw new Error("Guarded verifier active-state marker is malformed.");
   }
   markerTokenDigest = marker.stateTokenDigest;
   markerPhase = marker.markerState;
+  markerOperationFormat = marker.contractVersion === 2 ? "legacy" : marker.transactionFormat;
+  markerConfigPolicy = marker.contractVersion === 2 ? "write" : marker.configPolicy;
   const expectedDev = BigInt(marker.stateDev);
   const expectedIno = BigInt(marker.stateIno);
   const current = lstatOptional(statePath);
@@ -2278,14 +3388,23 @@ if (markerState) {
   }
 }
 process.stdout.write(
-  `${parent.dev}|${parent.ino}|${markerName}|${markerTokenDigest}|${markerPhase}`,
+  [
+    parent.dev,
+    parent.ino,
+    markerName,
+    markerTokenDigest,
+    markerPhase,
+    markerOperationFormat,
+    markerConfigPolicy,
+  ].join("|"),
 );
 NODE
   )" || fail "Guarded verifier active-state marker contract is unsafe."
   IFS='|' read -r \
     VERIFIER_STATE_PARENT_DEV VERIFIER_STATE_PARENT_INO \
     VERIFIER_STATE_MARKER_NAME VERIFIER_STATE_TOKEN_DIGEST \
-    VERIFIER_STATE_MARKER_PHASE <<<"$identity"
+    VERIFIER_STATE_MARKER_PHASE VERIFIER_OPERATION_FORMAT \
+    VERIFIER_OPERATION_CONFIG_POLICY <<<"$identity"
   [[ "$VERIFIER_STATE_PARENT_DEV" =~ ^[0-9]+$ &&
     "$VERIFIER_STATE_PARENT_INO" =~ ^[0-9]+$ &&
     "$VERIFIER_STATE_MARKER_NAME" =~ ^\.openclaw-verifier-active-[a-f0-9]{64}$ &&
@@ -2293,7 +3412,13 @@ NODE
       "$VERIFIER_STATE_TOKEN_DIGEST" =~ ^[a-f0-9]{64}$ ) &&
     ( -z "$VERIFIER_STATE_MARKER_PHASE" ||
       "$VERIFIER_STATE_MARKER_PHASE" == "active" ||
-      "$VERIFIER_STATE_MARKER_PHASE" == "cleanup" ) ]] ||
+      "$VERIFIER_STATE_MARKER_PHASE" == "cleanup" ) &&
+    ( -z "$VERIFIER_OPERATION_FORMAT" ||
+      "$VERIFIER_OPERATION_FORMAT" == "legacy" ||
+      "$VERIFIER_OPERATION_FORMAT" == "2" ) &&
+    ( -z "$VERIFIER_OPERATION_CONFIG_POLICY" ||
+      "$VERIFIER_OPERATION_CONFIG_POLICY" == "write" ||
+      "$VERIFIER_OPERATION_CONFIG_POLICY" == "read-only" ) ]] ||
     fail "Guarded verifier active-state marker identity is malformed."
 }
 
@@ -2308,7 +3433,8 @@ oci_publish_state_marker() {
   node - "$VERIFIER_STATE_MARKER_NAME" \
     "$VERIFIER_STATE_PARENT_DEV" "$VERIFIER_STATE_PARENT_INO" \
     "$VERIFIER_STATE_PATH" "$VERIFIER_STATE_DIR_DEV" "$VERIFIER_STATE_DIR_INO" \
-    "$VERIFIER_STATE_TOKEN_DIGEST" "$operation_id" "$operation_binding" <<'NODE'
+    "$VERIFIER_STATE_TOKEN_DIGEST" "$operation_id" "$operation_binding" \
+    "$VERIFIER_OPERATION_FORMAT" "$VERIFIER_OPERATION_CONFIG_POLICY" <<'NODE'
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 
@@ -2322,6 +3448,8 @@ const [
   stateTokenDigest,
   operationId,
   operationBinding,
+  transactionFormat,
+  configPolicy,
 ] = process.argv.slice(2);
 const expectedUid = BigInt(process.getuid());
 process.chdir("..");
@@ -2335,8 +3463,17 @@ if (
 ) {
   throw new Error("Guarded verifier active-state marker parent identity changed.");
 }
+if (
+  !(
+    (transactionFormat === "legacy" && configPolicy === "write") ||
+    (transactionFormat === "2" &&
+      (configPolicy === "write" || configPolicy === "read-only"))
+  )
+) {
+  throw new Error("Guarded verifier active-state marker policy is malformed.");
+}
 const expected = {
-  contractVersion: 2,
+  contractVersion: transactionFormat === "legacy" ? 2 : 3,
   markerState: "active",
   statePath,
   stateDev,
@@ -2344,6 +3481,7 @@ const expected = {
   parentDev: expectedParentDev,
   parentIno: expectedParentIno,
   stateTokenDigest,
+  ...(transactionFormat === "legacy" ? {} : { transactionFormat, configPolicy }),
   operationId,
   operationBinding,
 };
@@ -2388,8 +3526,29 @@ const readExisting = () => {
 };
 const existing = readExisting();
 if (existing) {
+  const existingFormat =
+    existing.contractVersion === 2 ? "legacy" : existing.transactionFormat;
+  const existingPolicy = existing.contractVersion === 2 ? "write" : existing.configPolicy;
+  const existingBinding =
+    existingFormat === "legacy"
+      ? crypto
+          .createHash("sha256")
+          .update(`${stateTokenDigest}\0${existing.operationId}`)
+          .digest("hex")
+      : crypto
+          .createHash("sha256")
+          .update(
+            `${stateTokenDigest}\0${existing.operationId}\0${existingFormat}\0${existingPolicy}`,
+          )
+          .digest("hex");
+  const expectedKeys =
+    existingFormat === "legacy"
+      ? "contractVersion,markerState,operationBinding,operationId,parentDev,parentIno,stateDev,stateIno,statePath,stateTokenDigest"
+      : "configPolicy,contractVersion,markerState,operationBinding,operationId,parentDev,parentIno,stateDev,stateIno,statePath,stateTokenDigest,transactionFormat";
   if (
-    existing.contractVersion !== 2 ||
+    (existing.contractVersion !== 2 && existing.contractVersion !== 3) ||
+    existingFormat !== transactionFormat ||
+    existingPolicy !== configPolicy ||
     (existing.markerState !== "active" && existing.markerState !== "cleanup") ||
     existing.statePath !== statePath ||
     existing.stateDev !== stateDev ||
@@ -2400,13 +3559,8 @@ if (existing) {
     typeof existing.operationId !== "string" ||
     !/^(?:recovery|cleanup|[a-f0-9]{32})$/.test(existing.operationId) ||
     !/^[a-f0-9]{64}$/.test(existing.operationBinding) ||
-    existing.operationBinding !==
-      crypto
-        .createHash("sha256")
-        .update(`${stateTokenDigest}\0${existing.operationId}`)
-        .digest("hex") ||
-    Object.keys(existing).sort().join(",") !==
-      "contractVersion,markerState,operationBinding,operationId,parentDev,parentIno,stateDev,stateIno,statePath,stateTokenDigest"
+    existing.operationBinding !== existingBinding ||
+    Object.keys(existing).sort().join(",") !== expectedKeys
   ) {
     throw new Error("Guarded verifier active-state marker conflicts with pinned state.");
   }
@@ -2516,8 +3670,26 @@ try {
 } finally {
   fs.closeSync(markerFd);
 }
+const markerFormat = marker?.contractVersion === 2 ? "legacy" : marker?.transactionFormat;
+const markerPolicy = marker?.contractVersion === 2 ? "write" : marker?.configPolicy;
+const markerBinding =
+  markerFormat === "legacy"
+    ? crypto
+        .createHash("sha256")
+        .update(`${stateTokenDigest}\0${marker.operationId}`)
+        .digest("hex")
+    : crypto
+        .createHash("sha256")
+        .update(
+          `${stateTokenDigest}\0${marker.operationId}\0${markerFormat}\0${markerPolicy}`,
+        )
+        .digest("hex");
+const expectedKeys =
+  markerFormat === "legacy"
+    ? "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,operationId,operationBinding"
+    : "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,transactionFormat,configPolicy,operationId,operationBinding";
 if (
-  marker?.contractVersion !== 2 ||
+  (marker?.contractVersion !== 2 && marker?.contractVersion !== 3) ||
   (marker.markerState !== "active" && marker.markerState !== "cleanup") ||
   marker.statePath !== statePath ||
   marker.stateDev !== stateDev ||
@@ -2527,14 +3699,9 @@ if (
   marker.stateTokenDigest !== stateTokenDigest ||
   typeof marker.operationId !== "string" ||
   !/^(?:recovery|cleanup|[a-f0-9]{32})$/.test(marker.operationId) ||
-  marker.operationBinding !==
-    crypto
-      .createHash("sha256")
-      .update(`${stateTokenDigest}\0${marker.operationId}`)
-      .digest("hex") ||
+  marker.operationBinding !== markerBinding ||
   raw !== `${JSON.stringify(marker)}\n` ||
-  Object.keys(marker).join(",") !==
-    "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,operationId,operationBinding"
+  Object.keys(marker).join(",") !== expectedKeys
 ) {
   throw new Error("Guarded verifier active-state marker is malformed before cleanup phase.");
 }
@@ -2664,8 +3831,26 @@ try {
 } finally {
   fs.closeSync(markerFd);
 }
+const markerFormat = marker?.contractVersion === 2 ? "legacy" : marker?.transactionFormat;
+const markerPolicy = marker?.contractVersion === 2 ? "write" : marker?.configPolicy;
+const expectedBinding =
+  markerFormat === "legacy"
+    ? crypto
+        .createHash("sha256")
+        .update(`${stateTokenDigest}\0${marker.operationId}`)
+        .digest("hex")
+    : crypto
+        .createHash("sha256")
+        .update(
+          `${stateTokenDigest}\0${marker.operationId}\0${markerFormat}\0${markerPolicy}`,
+        )
+        .digest("hex");
+const expectedKeys =
+  markerFormat === "legacy"
+    ? "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,operationId,operationBinding"
+    : "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,transactionFormat,configPolicy,operationId,operationBinding";
 if (
-  marker?.contractVersion !== 2 ||
+  (marker?.contractVersion !== 2 && marker?.contractVersion !== 3) ||
   marker.markerState !== "cleanup" ||
   marker.statePath !== statePath ||
   marker.stateDev !== stateDev ||
@@ -2676,14 +3861,9 @@ if (
   typeof marker.operationId !== "string" ||
   marker.operationId !== "cleanup" ||
   !/^[a-f0-9]{64}$/.test(marker.operationBinding) ||
-  marker.operationBinding !==
-    crypto
-      .createHash("sha256")
-      .update(`${stateTokenDigest}\0${marker.operationId}`)
-      .digest("hex") ||
+  marker.operationBinding !== expectedBinding ||
   markerRaw !== `${JSON.stringify(marker)}\n` ||
-  Object.keys(marker).join(",") !==
-    "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,operationId,operationBinding"
+  Object.keys(marker).join(",") !== expectedKeys
 ) {
   throw new Error("Guarded verifier active-state marker identity changed before cleanup.");
 }
@@ -3181,6 +4361,125 @@ NODE
     [[ "$required" == "0" && -z "${!mode_var}" && -z "${!digest_var}" ]] ||
       fail "Verifier transaction backup returned contradictory absent-file metadata."
   fi
+}
+
+oci_assert_transaction_file_unchanged() {
+  local target="$1"
+  local present="$2"
+  local digest="$3"
+  local mode="$4"
+  local parent_dev="$5"
+  local parent_ino="$6"
+  local config_dev="$7"
+  local config_ino="$8"
+  local label="$9"
+  [[ "$present" == "1" &&
+    "$digest" =~ ^[a-f0-9]{64}$ &&
+    "$mode" =~ ^[0-7]{3,4}$ &&
+    "$parent_dev" =~ ^[0-9]+$ &&
+    "$parent_ino" =~ ^[0-9]+$ &&
+    "$config_dev" =~ ^[0-9]+$ &&
+    "$config_ino" =~ ^[0-9]+$ ]] ||
+    fail "Read-only verifier transaction metadata is malformed."
+  oci_assert_pinned_state_dir
+  node - "$target" "$digest" "$mode" "$parent_dev" "$parent_ino" \
+    "$config_dev" "$config_ino" "$label" <<'NODE'
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const [
+  target,
+  expectedDigest,
+  expectedMode,
+  expectedParentDev,
+  expectedParentIno,
+  expectedDev,
+  expectedIno,
+  label,
+] = process.argv.slice(2);
+if (!path.isAbsolute(target) || !label) {
+  throw new Error("Read-only verifier target metadata is malformed.");
+}
+const directory = path.dirname(target);
+const leaf = path.basename(target);
+const sameParent = (value) =>
+  value.isDirectory() &&
+  !value.isSymbolicLink() &&
+  String(value.dev) === expectedParentDev &&
+  String(value.ino) === expectedParentIno;
+const requestedParent = fs.lstatSync(directory, { bigint: true });
+if (!sameParent(requestedParent)) {
+  throw new Error(`${label} parent identity changed.`);
+}
+process.chdir(directory);
+if (!sameParent(fs.lstatSync(".", { bigint: true }))) {
+  throw new Error(`${label} parent changed before inspection.`);
+}
+const before = fs.lstatSync(leaf);
+if (
+  !before.isFile() ||
+  before.isSymbolicLink() ||
+  before.nlink !== 1 ||
+  String(before.dev) !== expectedDev ||
+  String(before.ino) !== expectedIno ||
+  (before.mode & 0o7777).toString(8) !== expectedMode
+) {
+  throw new Error(`${label} metadata changed.`);
+}
+const fd = fs.openSync(leaf, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+try {
+  const opened = fs.fstatSync(fd);
+  if (
+    opened.dev !== before.dev ||
+    opened.ino !== before.ino ||
+    opened.mode !== before.mode ||
+    opened.nlink !== 1
+  ) {
+    throw new Error(`${label} identity changed before read.`);
+  }
+  const readSnapshot = (size) => {
+    const value = Buffer.alloc(size);
+    let offset = 0;
+    while (offset < size) {
+      const count = fs.readSync(fd, value, offset, size - offset, offset);
+      if (count === 0) {
+        throw new Error(`${label} changed while being read.`);
+      }
+      offset += count;
+    }
+    return value;
+  };
+  const first = readSnapshot(opened.size);
+  const middle = fs.fstatSync(fd);
+  const second = readSnapshot(middle.size);
+  const after = fs.fstatSync(fd);
+  const finalPath = fs.lstatSync(leaf);
+  if (
+    opened.dev !== after.dev ||
+    opened.ino !== after.ino ||
+    opened.mode !== after.mode ||
+    opened.nlink !== after.nlink ||
+    opened.size !== after.size ||
+    opened.mtimeMs !== after.mtimeMs ||
+    opened.ctimeMs !== after.ctimeMs ||
+    middle.size !== opened.size ||
+    finalPath.dev !== opened.dev ||
+    finalPath.ino !== opened.ino ||
+    finalPath.mode !== opened.mode ||
+    finalPath.nlink !== 1 ||
+    !first.equals(second) ||
+    crypto.createHash("sha256").update(first).digest("hex") !== expectedDigest
+  ) {
+    throw new Error(`${label} changed during read-only verification.`);
+  }
+  if (!sameParent(fs.lstatSync(".", { bigint: true }))) {
+    throw new Error(`${label} parent changed after inspection.`);
+  }
+} finally {
+  fs.closeSync(fd);
+}
+NODE
 }
 
 oci_restore_transaction_file() {
@@ -4009,15 +5308,23 @@ NODE
 
 write_sandbox_compose_overlay() {
   local tmp=""
+  [[ "$VERIFIER_GATEWAY_CANDIDATE_LABEL" =~ ^[a-f0-9]{64}$ ]] ||
+    fail "Guarded verifier Gateway candidate label is unavailable."
   [[ -S "$DOCKER_SOCKET_PATH" ]] ||
     fail "Guarded verifier setup requires the configured Docker socket."
   tmp="$(mktemp "$ROOT_DIR/.docker-compose.sandbox.XXXXXX")"
-  node - "$tmp" "$DOCKER_SOCKET_PATH" "${DOCKER_GID:-}" <<'NODE'
+  node - "$tmp" "$DOCKER_SOCKET_PATH" "${DOCKER_GID:-}" \
+    "$VERIFIER_GATEWAY_CANDIDATE_LABEL" <<'NODE'
 const fs = require("node:fs");
-const [outputPath, socketPath, dockerGid] = process.argv.slice(2);
+const [outputPath, socketPath, dockerGid, candidateLabel] = process.argv.slice(2);
+if (!/^[a-f0-9]{64}$/.test(candidateLabel)) {
+  throw new Error("Gateway candidate label is malformed.");
+}
 const lines = [
   "services:",
   "  openclaw-gateway:",
+  "    labels:",
+  `      ai.openclaw.verifier.gateway-candidate: ${JSON.stringify(candidateLabel)}`,
   "    volumes:",
   `      - source: ${JSON.stringify(socketPath)}`,
   "        target: /var/run/docker.sock",
@@ -4083,6 +5390,7 @@ NODE
 }
 
 finish_committed_verifier_transaction() {
+  local phase=""
   local transaction_id=""
   local state_instance_digest=""
   local operation_binding=""
@@ -4094,6 +5402,10 @@ finish_committed_verifier_transaction() {
   local new_gateway=""
   local old_gateway=""
   local old_gateway_image=""
+  local compose_project=""
+  local compose_service=""
+  local candidate_label=""
+  local create_binding=""
   local old_image=""
   local old_stable=""
   local gateway_was_running=""
@@ -4101,11 +5413,15 @@ finish_committed_verifier_transaction() {
   local env_backup_mode=""
   local env_backup_parent_dev=""
   local env_backup_parent_ino=""
+  local transaction_format=""
+  local config_policy=""
   local config_backup_present=""
   local config_backup_digest=""
   local config_backup_mode=""
   local config_backup_parent_dev=""
   local config_backup_parent_ino=""
+  local config_dev=""
+  local config_ino=""
   local overlay_backup_present=""
   local overlay_backup_digest=""
   local overlay_backup_mode=""
@@ -4120,8 +5436,12 @@ finish_committed_verifier_transaction() {
   oci_reconcile_journal_temps
   oci_assert_transaction_tree
   oci_validate_journal_shape
-  oci_assert_known_phase "$(oci_read_journal phase)"
-  [[ "$(oci_read_journal phase)" == "committed" ]] ||
+  oci_load_transaction_contract >/dev/null
+  transaction_format="$VERIFIER_OPERATION_FORMAT"
+  config_policy="$VERIFIER_OPERATION_CONFIG_POLICY"
+  phase="$(oci_read_journal phase)"
+  oci_assert_known_phase "$phase"
+  [[ "$phase" == "committed" ]] ||
     fail "Refusing committed cleanup for an uncommitted verifier transaction."
   transaction_id="$(oci_read_journal transaction-id)"
   state_instance_digest="$(oci_read_journal state-instance-digest)"
@@ -4136,6 +5456,10 @@ finish_committed_verifier_transaction() {
   new_gateway="$(oci_read_journal new-gateway-id)"
   old_gateway="$(oci_read_journal old-gateway-id)"
   old_gateway_image="$(oci_read_journal old-gateway-image-id)"
+  compose_project="$(oci_read_journal gateway-compose-project '')"
+  compose_service="$(oci_read_journal gateway-compose-service '')"
+  candidate_label="$(oci_read_journal gateway-candidate-label '')"
+  create_binding="$(oci_read_journal gateway-create-binding '')"
   old_image="$(oci_read_journal old-image-id)"
   old_stable="$(oci_read_journal old-stable-image-id)"
   gateway_was_running="$(oci_read_journal gateway-was-running)"
@@ -4148,6 +5472,8 @@ finish_committed_verifier_transaction() {
   config_backup_mode="$(oci_read_journal config-backup-mode)"
   config_backup_parent_dev="$(oci_read_journal config-backup-parent-dev)"
   config_backup_parent_ino="$(oci_read_journal config-backup-parent-ino)"
+  config_dev="$(oci_read_journal config-dev '')"
+  config_ino="$(oci_read_journal config-ino '')"
   overlay_backup_present="$(oci_read_journal sandbox-overlay-backup-present)"
   overlay_backup_digest="$(oci_read_journal sandbox-overlay-backup-digest)"
   overlay_backup_mode="$(oci_read_journal sandbox-overlay-backup-mode)"
@@ -4158,20 +5484,49 @@ finish_committed_verifier_transaction() {
   oci_validate_journal_identities \
     "$transaction_id" "$state_instance_digest" "$operation_binding" \
     "$candidate" "$final" "$new_gateway" \
-    "$old_image" "$old_stable" "$gateway_was_running"
+    "$old_image" "$old_stable" "$gateway_was_running" \
+    "$transaction_format" "$config_policy"
   oci_validate_transaction_metadata \
     "$transaction_id" "$candidate_tag" "$final_tag" "$runtime_image" \
     "$old_gateway" "$old_gateway_image" "$env_backup_digest" "$env_backup_mode" \
     "$env_backup_parent_dev" "$env_backup_parent_ino" \
-    "$config_backup_present" "$config_backup_digest" "$config_backup_mode" \
+    "$transaction_format" "$config_policy" "$config_backup_present" \
+    "$config_backup_digest" "$config_backup_mode" \
     "$config_backup_parent_dev" "$config_backup_parent_ino" \
+    "$config_dev" "$config_ino" \
     "$overlay_backup_present" "$overlay_backup_digest" "$overlay_backup_mode" \
     "$overlay_backup_parent_dev" "$overlay_backup_parent_ino" \
     "$docker_socket_path" "$gc_old_image"
+  oci_validate_gateway_create_contract \
+    "$phase" "$transaction_format" "$operation_binding" "$old_gateway" \
+    "$transaction_id" "$runtime_image" "$compose_project" "$compose_service" \
+    "$candidate_label" "$create_binding" "$config_policy"
+  oci_validate_config_transaction_artifact \
+    "$config_policy" "$config_backup_present" "$config_backup_digest"
   oci_validate_restore_state
   [[ -z "$(oci_read_journal restore-state)" ]] ||
     fail "Committed verifier transaction retains incomplete restore state."
+  if [[ "$config_policy" == "read-only" ]]; then
+    [[ ! -e "$VERIFIER_TRANSACTION_DIR/config.backup" &&
+      ! -L "$VERIFIER_TRANSACTION_DIR/config.backup" ]] ||
+      fail "Read-only verifier transaction contains a plaintext config backup."
+    oci_assert_transaction_file_unchanged \
+      "$OPENCLAW_CONFIG_DIR/openclaw.json" \
+      "$config_backup_present" "$config_backup_digest" "$config_backup_mode" \
+      "$config_backup_parent_dev" "$config_backup_parent_ino" \
+      "$config_dev" "$config_ino" \
+      "Protected OpenClaw config"
+    assert_protected_config_immutable \
+      "Protected OpenClaw config at committed recovery" \
+      "$config_dev" "$config_ino" "$config_backup_digest" "$config_backup_mode" \
+      "$config_backup_parent_dev" "$config_backup_parent_ino"
+  fi
   oci_validate_phase_state "committed" "$candidate" "$final" "$new_gateway"
+  if [[ "$transaction_format" == "2" ]]; then
+    oci_validate_gateway_container_identity \
+      "$new_gateway" "$runtime_image" "$compose_project" "$compose_service" \
+      "true" "$candidate_label" >/dev/null
+  fi
   oci_assert_exact_gateway_ready "$new_gateway" "$runtime_image" "$docker_socket_path"
   if [[ -n "$candidate" ]]; then
     oci_remove_exact_tag "$candidate_tag" "$candidate"
@@ -4208,6 +5563,10 @@ rollback_verifier_transaction() {
   local new_gateway=""
   local old_gateway=""
   local old_gateway_image=""
+  local compose_project=""
+  local compose_service=""
+  local candidate_label=""
+  local create_binding=""
   local old_image=""
   local old_stable=""
   local gateway_was_running=""
@@ -4218,11 +5577,15 @@ rollback_verifier_transaction() {
   local env_backup_mode=""
   local env_backup_parent_dev=""
   local env_backup_parent_ino=""
+  local transaction_format=""
+  local config_policy=""
   local config_backup_present=""
   local config_backup_digest=""
   local config_backup_mode=""
   local config_backup_parent_dev=""
   local config_backup_parent_ino=""
+  local config_dev=""
+  local config_ino=""
   local overlay_backup_present=""
   local overlay_backup_digest=""
   local overlay_backup_mode=""
@@ -4231,7 +5594,9 @@ rollback_verifier_transaction() {
   local docker_socket_path=""
   local gc_old_image=""
   local current_gateway=""
+  local candidate_status=""
   local restored_gateway=""
+  local -a rollback_args=()
   trap - EXIT INT TERM
   set -e
   if [[ -n "$VERIFIER_STATE_IDENTITY_FAILED" ]]; then
@@ -4246,6 +5611,9 @@ rollback_verifier_transaction() {
     oci_reconcile_journal_temps
     oci_assert_transaction_tree
     oci_validate_journal_shape
+    oci_load_transaction_contract >/dev/null
+    transaction_format="$VERIFIER_OPERATION_FORMAT"
+    config_policy="$VERIFIER_OPERATION_CONFIG_POLICY"
     phase="$(oci_read_journal phase)"
     oci_assert_known_phase "$phase"
     if [[ "$phase" == "committed" ]]; then
@@ -4265,6 +5633,10 @@ rollback_verifier_transaction() {
     new_gateway="$(oci_read_journal new-gateway-id)"
     old_gateway="$(oci_read_journal old-gateway-id)"
     old_gateway_image="$(oci_read_journal old-gateway-image-id)"
+    compose_project="$(oci_read_journal gateway-compose-project '')"
+    compose_service="$(oci_read_journal gateway-compose-service '')"
+    candidate_label="$(oci_read_journal gateway-candidate-label '')"
+    create_binding="$(oci_read_journal gateway-create-binding '')"
     old_image="$(oci_read_journal old-image-id)"
     old_stable="$(oci_read_journal old-stable-image-id)"
     gateway_was_running="$(oci_read_journal gateway-was-running)"
@@ -4277,6 +5649,8 @@ rollback_verifier_transaction() {
     config_backup_mode="$(oci_read_journal config-backup-mode)"
     config_backup_parent_dev="$(oci_read_journal config-backup-parent-dev)"
     config_backup_parent_ino="$(oci_read_journal config-backup-parent-ino)"
+    config_dev="$(oci_read_journal config-dev '')"
+    config_ino="$(oci_read_journal config-ino '')"
     overlay_backup_present="$(oci_read_journal sandbox-overlay-backup-present)"
     overlay_backup_digest="$(oci_read_journal sandbox-overlay-backup-digest)"
     overlay_backup_mode="$(oci_read_journal sandbox-overlay-backup-mode)"
@@ -4287,18 +5661,64 @@ rollback_verifier_transaction() {
     oci_validate_journal_identities \
       "$transaction_id" "$state_instance_digest" "$operation_binding" \
       "$candidate" "$final" "$new_gateway" \
-      "$old_image" "$old_stable" "$gateway_was_running"
+      "$old_image" "$old_stable" "$gateway_was_running" \
+      "$transaction_format" "$config_policy"
     oci_validate_transaction_metadata \
       "$transaction_id" "$candidate_tag" "$final_tag" "$runtime_image" \
       "$old_gateway" "$old_gateway_image" "$env_backup_digest" "$env_backup_mode" \
       "$env_backup_parent_dev" "$env_backup_parent_ino" \
-      "$config_backup_present" "$config_backup_digest" "$config_backup_mode" \
+      "$transaction_format" "$config_policy" "$config_backup_present" \
+      "$config_backup_digest" "$config_backup_mode" \
       "$config_backup_parent_dev" "$config_backup_parent_ino" \
+      "$config_dev" "$config_ino" \
       "$overlay_backup_present" "$overlay_backup_digest" "$overlay_backup_mode" \
       "$overlay_backup_parent_dev" "$overlay_backup_parent_ino" \
       "$docker_socket_path" "$gc_old_image"
+    oci_validate_gateway_create_contract \
+      "$phase" "$transaction_format" "$operation_binding" "$old_gateway" \
+      "$transaction_id" "$runtime_image" "$compose_project" "$compose_service" \
+      "$candidate_label" "$create_binding" "$config_policy"
+    oci_validate_config_transaction_artifact \
+      "$config_policy" "$config_backup_present" "$config_backup_digest"
     oci_validate_restore_state
     oci_validate_phase_state "$phase" "$candidate" "$final" "$new_gateway"
+    rollback_args=(-f "$COMPOSE_FILE")
+    [[ ! -f "$EXTRA_COMPOSE_FILE" ]] ||
+      rollback_args+=("-f" "$EXTRA_COMPOSE_FILE")
+    [[ ! "$old_image" =~ ^sha256:[a-f0-9]{64}$ ]] ||
+      rollback_args+=("-f" "$VERIFIER_COMPOSE_FILE")
+    [[ ! -f "$SANDBOX_COMPOSE_FILE" ]] ||
+      rollback_args+=("-f" "$SANDBOX_COMPOSE_FILE")
+    if current_gateway="$(
+      oci_stop_authenticated_gateway_candidate \
+        "$phase" "$transaction_format" "$old_gateway" "$old_gateway_image" \
+        "$runtime_image" "$new_gateway" "$compose_project" "$compose_service" \
+        "$candidate_label" "${rollback_args[@]}"
+    )"; then
+      :
+    else
+      candidate_status="$?"
+      if [[ "$candidate_status" == "2" ]]; then
+        echo "ERROR: Retaining verifier journal, lock, and active-state marker after ambiguous Gateway service recovery." >&2
+        exit "$status"
+      fi
+      fail "Verifier recovery could not authenticate its exact Gateway candidate."
+    fi
+    if [[ "$config_policy" == "read-only" ]]; then
+      [[ ! -e "$VERIFIER_TRANSACTION_DIR/config.backup" &&
+        ! -L "$VERIFIER_TRANSACTION_DIR/config.backup" ]] ||
+        fail "Read-only verifier transaction contains a plaintext config backup."
+      oci_assert_transaction_file_unchanged \
+        "$OPENCLAW_CONFIG_DIR/openclaw.json" \
+        "$config_backup_present" "$config_backup_digest" "$config_backup_mode" \
+        "$config_backup_parent_dev" "$config_backup_parent_ino" \
+        "$config_dev" "$config_ino" \
+        "Protected OpenClaw config before verifier recovery"
+      assert_protected_config_immutable \
+        "Protected OpenClaw config before verifier recovery" \
+        "$config_dev" "$config_ino" "$config_backup_digest" "$config_backup_mode" \
+        "$config_backup_parent_dev" "$config_backup_parent_ino"
+    fi
     oci_assert_owned_mode "$VERIFIER_TRANSACTION_DIR/env.backup" 600
     oci_restore_transaction_file \
       "$ENV_FILE" \
@@ -4307,28 +5727,47 @@ rollback_verifier_transaction() {
       "$env_backup_parent_dev" "$env_backup_parent_ino" "env"
     reload_verifier_shell_from_env
     oci_restore_stable_tag "$old_stable"
-    oci_restore_transaction_file \
-      "$OPENCLAW_CONFIG_DIR/openclaw.json" \
-      "$VERIFIER_TRANSACTION_DIR/config.backup" \
-      "$config_backup_present" "$config_backup_digest" "$config_backup_mode" \
-      "$config_backup_parent_dev" "$config_backup_parent_ino" "config"
+    if [[ "$config_policy" == "write" ]]; then
+      oci_restore_transaction_file \
+        "$OPENCLAW_CONFIG_DIR/openclaw.json" \
+        "$VERIFIER_TRANSACTION_DIR/config.backup" \
+        "$config_backup_present" "$config_backup_digest" "$config_backup_mode" \
+        "$config_backup_parent_dev" "$config_backup_parent_ino" "config"
+    fi
     oci_restore_transaction_file \
       "$SANDBOX_COMPOSE_FILE" \
       "$VERIFIER_TRANSACTION_DIR/sandbox-overlay.backup" \
       "$overlay_backup_present" "$overlay_backup_digest" "$overlay_backup_mode" \
       "$overlay_backup_parent_dev" "$overlay_backup_parent_ino" "overlay"
 
-    local -a rollback_args=(-f "$COMPOSE_FILE")
+    rollback_args=(-f "$COMPOSE_FILE")
     [[ ! -f "$EXTRA_COMPOSE_FILE" ]] ||
       rollback_args+=("-f" "$EXTRA_COMPOSE_FILE")
     [[ ! "$old_image" =~ ^sha256:[a-f0-9]{64}$ ]] ||
       rollback_args+=("-f" "$VERIFIER_COMPOSE_FILE")
     [[ ! -f "$SANDBOX_COMPOSE_FILE" ]] ||
       rollback_args+=("-f" "$SANDBOX_COMPOSE_FILE")
-    current_gateway="$(docker compose "${rollback_args[@]}" ps -q openclaw-gateway)"
-    [[ -z "$current_gateway" || "$current_gateway" =~ ^[a-f0-9]{64}$ ]] ||
-      fail "Verifier recovery found a malformed current Gateway identity."
+    if [[ -z "$current_gateway" ]] &&
+      { [[ "$transaction_format" == "legacy" ]] ||
+        ! oci_phase_has_gateway_create_intent "$phase"; }; then
+      current_gateway="$(
+        docker compose "${rollback_args[@]}" ps -a -q --no-trunc openclaw-gateway
+      )"
+      [[ "$current_gateway" != *$'\n'* &&
+        ( -z "$current_gateway" || "$current_gateway" =~ ^[a-f0-9]{64}$ ) ]] ||
+        fail "Verifier recovery found an ambiguous current Gateway identity."
+    fi
     if [[ -n "$current_gateway" && "$current_gateway" != "$old_gateway" ]]; then
+      if [[ "$transaction_format" == "2" ]] &&
+        oci_phase_has_gateway_create_intent "$phase"; then
+        [[ "$current_gateway" == "${new_gateway:-$current_gateway}" ]] ||
+          fail "Verifier recovery candidate changed before exact removal."
+        oci_validate_gateway_container_identity \
+          "$current_gateway" "$runtime_image" \
+          "$compose_project" "$compose_service" "false" "$candidate_label" >/dev/null
+      elif [[ "$transaction_format" == "2" ]]; then
+        fail "Verifier recovery found an unjournaled Gateway before create intent."
+      fi
       docker rm -f "$current_gateway" >/dev/null
       current_gateway=""
     fi
@@ -4390,6 +5829,20 @@ recover_existing_verifier_transaction_before_mutation() {
       fail "Active verifier state marker has no matching lock or transaction."
     fi
     return
+  fi
+  if [[ -z "$VERIFIER_OPERATION_FORMAT" &&
+    ( -e "$VERIFIER_TRANSACTION_DIR" || -L "$VERIFIER_TRANSACTION_DIR" ) ]]; then
+    [[ ! -L "$VERIFIER_TRANSACTION_DIR" && -d "$VERIFIER_TRANSACTION_DIR" ]] ||
+      fail "Existing verifier transaction state is unsafe."
+    oci_pin_transaction_dir
+    oci_reconcile_journal_temps
+    oci_assert_transaction_tree
+    oci_validate_journal_shape
+    oci_load_transaction_contract >/dev/null
+  fi
+  if [[ -z "$VERIFIER_OPERATION_FORMAT" ]]; then
+    VERIFIER_OPERATION_FORMAT="legacy"
+    VERIFIER_OPERATION_CONFIG_POLICY="write"
   fi
   oci_publish_state_marker recovery
   [[ ! -L "$VERIFIER_LOCK_DIR" ]] ||
@@ -4529,12 +5982,27 @@ begin_verifier_transaction() {
     VERIFIER_ENV_BACKUP_PARENT_DEV VERIFIER_ENV_BACKUP_PARENT_INO
   [[ "$env_backup_present" == "1" ]] ||
     fail "Required verifier environment backup was not captured."
-  oci_backup_transaction_file \
-    "$OPENCLAW_CONFIG_DIR/openclaw.json" \
-    "$VERIFIER_TRANSACTION_DIR/config.backup" \
-    "0" VERIFIER_CONFIG_BACKUP_PRESENT VERIFIER_CONFIG_BACKUP_DIGEST \
-    VERIFIER_CONFIG_BACKUP_MODE VERIFIER_CONFIG_BACKUP_PARENT_DEV \
-    VERIFIER_CONFIG_BACKUP_PARENT_INO
+  if [[ "$VERIFIER_CONFIG_POLICY" == "read-only" ]]; then
+    assert_protected_config_unchanged \
+      "Protected OpenClaw config before verifier transaction"
+    VERIFIER_CONFIG_BACKUP_PRESENT="1"
+    VERIFIER_CONFIG_BACKUP_DIGEST="$PROTECTED_CONFIG_DIGEST"
+    VERIFIER_CONFIG_BACKUP_MODE="$PROTECTED_CONFIG_MODE"
+    VERIFIER_CONFIG_BACKUP_PARENT_DEV="$PROTECTED_CONFIG_PARENT_DEV"
+    VERIFIER_CONFIG_BACKUP_PARENT_INO="$PROTECTED_CONFIG_PARENT_INO"
+    VERIFIER_CONFIG_DEV="$PROTECTED_CONFIG_DEV"
+    VERIFIER_CONFIG_INO="$PROTECTED_CONFIG_INO"
+    [[ ! -e "$VERIFIER_TRANSACTION_DIR/config.backup" &&
+      ! -L "$VERIFIER_TRANSACTION_DIR/config.backup" ]] ||
+      fail "Read-only verifier transaction must not contain a plaintext config backup."
+  else
+    oci_backup_transaction_file \
+      "$OPENCLAW_CONFIG_DIR/openclaw.json" \
+      "$VERIFIER_TRANSACTION_DIR/config.backup" \
+      "0" VERIFIER_CONFIG_BACKUP_PRESENT VERIFIER_CONFIG_BACKUP_DIGEST \
+      VERIFIER_CONFIG_BACKUP_MODE VERIFIER_CONFIG_BACKUP_PARENT_DEV \
+      VERIFIER_CONFIG_BACKUP_PARENT_INO
+  fi
   oci_backup_transaction_file \
     "$SANDBOX_COMPOSE_FILE" \
     "$VERIFIER_TRANSACTION_DIR/sandbox-overlay.backup" \
@@ -4586,6 +6054,7 @@ prepare_and_publish_verifier_toolchain() {
   local declared=""
   local gateway=""
   local gateway_health=""
+  local compose_identity=""
   local digest=""
   local candidate_layers=""
   local final_layers=""
@@ -4593,6 +6062,8 @@ prepare_and_publish_verifier_toolchain() {
   OPENCLAW_VERIFIER_TRANSACTION_ID="$(
     node -e 'process.stdout.write(require("node:crypto").randomBytes(16).toString("hex"))'
   )"
+  VERIFIER_OPERATION_FORMAT="$VERIFIER_TRANSACTION_FORMAT"
+  VERIFIER_OPERATION_CONFIG_POLICY="$VERIFIER_CONFIG_POLICY"
   VERIFIER_OPERATION_BINDING="$(
     oci_operation_binding "$OPENCLAW_VERIFIER_TRANSACTION_ID"
   )"
@@ -4604,6 +6075,12 @@ prepare_and_publish_verifier_toolchain() {
   VERIFIER_RUNTIME_IMAGE_ID=""
   VERIFIER_OLD_GATEWAY_ID=""
   VERIFIER_OLD_GATEWAY_IMAGE_ID=""
+  VERIFIER_GATEWAY_COMPOSE_PROJECT=""
+  VERIFIER_GATEWAY_COMPOSE_SERVICE=""
+  VERIFIER_GATEWAY_CANDIDATE_LABEL="$(
+    oci_gateway_candidate_label "$OPENCLAW_VERIFIER_TRANSACTION_ID"
+  )"
+  VERIFIER_GATEWAY_CREATE_BINDING=""
   VERIFIER_OLD_IMAGE_ID="${OPENCLAW_VERIFIER_IMAGE_ID:-}"
   VERIFIER_OLD_STABLE_IMAGE_ID="$(
     docker image inspect --format '{{.Id}}' openclaw-sandbox-verifier:bookworm-slim 2>/dev/null ||
@@ -4619,6 +6096,8 @@ prepare_and_publish_verifier_toolchain() {
   VERIFIER_CONFIG_BACKUP_MODE=""
   VERIFIER_CONFIG_BACKUP_PARENT_DEV=""
   VERIFIER_CONFIG_BACKUP_PARENT_INO=""
+  VERIFIER_CONFIG_DEV=""
+  VERIFIER_CONFIG_INO=""
   VERIFIER_OVERLAY_BACKUP_PRESENT="0"
   VERIFIER_OVERLAY_BACKUP_DIGEST=""
   VERIFIER_OVERLAY_BACKUP_MODE=""
@@ -4762,6 +6241,16 @@ NODE
     COMPOSE_HINT+=" -f ${VERIFIER_COMPOSE_FILE}"
     VERIFIER_RUNTIME_READY="1"
   fi
+  if [[ "$VERIFIER_CONFIG_POLICY" == "read-only" ]]; then
+    validate_read_only_existing_config
+    oci_assert_transaction_file_unchanged \
+      "$OPENCLAW_CONFIG_DIR/openclaw.json" \
+      "$VERIFIER_CONFIG_BACKUP_PRESENT" "$VERIFIER_CONFIG_BACKUP_DIGEST" \
+      "$VERIFIER_CONFIG_BACKUP_MODE" \
+      "$VERIFIER_CONFIG_BACKUP_PARENT_DEV" "$VERIFIER_CONFIG_BACKUP_PARENT_INO" \
+      "$VERIFIER_CONFIG_DEV" "$VERIFIER_CONFIG_INO" \
+      "Protected OpenClaw config before socket publication"
+  fi
   write_sandbox_compose_overlay
   if [[ -z "$VERIFIER_SOCKET_OVERLAY_READY" ]]; then
     COMPOSE_ARGS+=("-f" "$SANDBOX_COMPOSE_FILE")
@@ -4769,21 +6258,58 @@ NODE
     VERIFIER_SOCKET_OVERLAY_READY="1"
   fi
   oci_write_journal socket-overlay-written
-  OPENCLAW_IMAGE="$VERIFIER_RUNTIME_IMAGE_ID" \
-    run_prestart_cli config set --batch-json \
-    '[{"path":"agents.defaults.sandbox.mode","value":"non-main"},{"path":"agents.defaults.sandbox.scope","value":"agent"},{"path":"agents.defaults.sandbox.workspaceAccess","value":"none"}]' >/dev/null
+  if [[ "$VERIFIER_CONFIG_POLICY" == "write" ]]; then
+    OPENCLAW_IMAGE="$VERIFIER_RUNTIME_IMAGE_ID" \
+      run_prestart_cli config set --batch-json \
+      '[{"path":"agents.defaults.sandbox.mode","value":"non-main"},{"path":"agents.defaults.sandbox.scope","value":"agent"},{"path":"agents.defaults.sandbox.workspaceAccess","value":"none"}]' >/dev/null
+  fi
   oci_write_journal sandbox-configured
 
+  if [[ "$VERIFIER_CONFIG_POLICY" == "read-only" ]]; then
+    oci_assert_transaction_file_unchanged \
+      "$OPENCLAW_CONFIG_DIR/openclaw.json" \
+      "$VERIFIER_CONFIG_BACKUP_PRESENT" "$VERIFIER_CONFIG_BACKUP_DIGEST" \
+      "$VERIFIER_CONFIG_BACKUP_MODE" \
+      "$VERIFIER_CONFIG_BACKUP_PARENT_DEV" "$VERIFIER_CONFIG_BACKUP_PARENT_INO" \
+      "$VERIFIER_CONFIG_DEV" "$VERIFIER_CONFIG_INO" \
+      "Protected OpenClaw config before Gateway recreation"
+    assert_protected_config_immutable \
+      "Protected OpenClaw config at final pre-exec boundary"
+  fi
+  compose_identity="$(
+    oci_compose_gateway_identity \
+      "$VERIFIER_GATEWAY_CANDIDATE_LABEL" "${COMPOSE_ARGS[@]}"
+  )"
+  IFS='|' read -r \
+    VERIFIER_GATEWAY_COMPOSE_PROJECT VERIFIER_GATEWAY_COMPOSE_SERVICE \
+    <<<"$compose_identity"
+  VERIFIER_GATEWAY_CREATE_BINDING="$(
+    oci_gateway_create_binding \
+      "$VERIFIER_OPERATION_BINDING" "$VERIFIER_OLD_GATEWAY_ID" \
+      "$VERIFIER_RUNTIME_IMAGE_ID" "$VERIFIER_GATEWAY_COMPOSE_PROJECT" \
+      "$VERIFIER_GATEWAY_COMPOSE_SERVICE" "$VERIFIER_GATEWAY_CANDIDATE_LABEL" \
+      "$VERIFIER_TRANSACTION_FORMAT" "$VERIFIER_CONFIG_POLICY"
+  )"
+  oci_write_journal gateway-create-intent
   OPENCLAW_IMAGE="$VERIFIER_RUNTIME_IMAGE_ID" \
     docker compose "${COMPOSE_ARGS[@]}" up -d --no-deps --force-recreate openclaw-gateway
-  gateway="$(docker compose "${COMPOSE_ARGS[@]}" ps -q openclaw-gateway)"
-  if [[ ! "$gateway" =~ ^[a-f0-9]{64}$ ]] ||
-    [[ "$(docker inspect --format '{{.Image}}' "$gateway")" != "$VERIFIER_RUNTIME_IMAGE_ID" ]] ||
-    [[ "$(docker inspect --format '{{.State.Running}}' "$gateway")" != "true" ]]; then
-    fail "Guarded verifier publication did not produce a running exact-image Gateway."
-  fi
+  gateway="$(
+    oci_resolve_gateway_service_container \
+      "$VERIFIER_GATEWAY_COMPOSE_PROJECT" "$VERIFIER_GATEWAY_COMPOSE_SERVICE" \
+      "${COMPOSE_ARGS[@]}"
+  )"
+  [[ -n "$gateway" ]] ||
+    fail "Guarded verifier publication did not resolve its Gateway service container."
+  oci_validate_gateway_container_identity \
+    "$gateway" "$VERIFIER_RUNTIME_IMAGE_ID" \
+    "$VERIFIER_GATEWAY_COMPOSE_PROJECT" "$VERIFIER_GATEWAY_COMPOSE_SERVICE" \
+    "true" "$VERIFIER_GATEWAY_CANDIDATE_LABEL" >/dev/null
   VERIFIER_NEW_GATEWAY_ID="$gateway"
   oci_write_journal gateway-started
+  if [[ "$VERIFIER_CONFIG_POLICY" == "read-only" ]]; then
+    assert_protected_config_immutable \
+      "Protected OpenClaw config at post-create boundary"
+  fi
   gateway_health=""
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     gateway_health="$(
@@ -4819,6 +6345,23 @@ commit_verifier_transaction() {
   oci_assert_transaction_parent_identity \
     "$SANDBOX_COMPOSE_FILE" \
     "$VERIFIER_OVERLAY_BACKUP_PARENT_DEV" "$VERIFIER_OVERLAY_BACKUP_PARENT_INO"
+  if [[ "$VERIFIER_CONFIG_POLICY" == "read-only" ]]; then
+    [[ ! -e "$VERIFIER_TRANSACTION_DIR/config.backup" &&
+      ! -L "$VERIFIER_TRANSACTION_DIR/config.backup" ]] ||
+      fail "Read-only verifier transaction contains a plaintext config backup."
+    oci_assert_transaction_file_unchanged \
+      "$OPENCLAW_CONFIG_DIR/openclaw.json" \
+      "$VERIFIER_CONFIG_BACKUP_PRESENT" "$VERIFIER_CONFIG_BACKUP_DIGEST" \
+      "$VERIFIER_CONFIG_BACKUP_MODE" \
+      "$VERIFIER_CONFIG_BACKUP_PARENT_DEV" "$VERIFIER_CONFIG_BACKUP_PARENT_INO" \
+      "$VERIFIER_CONFIG_DEV" "$VERIFIER_CONFIG_INO" \
+      "Protected OpenClaw config"
+    assert_protected_config_immutable \
+      "Protected OpenClaw config at transaction commit"
+  fi
+  oci_validate_config_transaction_artifact \
+    "$VERIFIER_CONFIG_POLICY" "$VERIFIER_CONFIG_BACKUP_PRESENT" \
+    "$VERIFIER_CONFIG_BACKUP_DIGEST"
   oci_write_journal committed
   finish_committed_verifier_transaction
   trap - EXIT INT TERM
@@ -4831,7 +6374,19 @@ if [[ -n "$VERIFIER_ENABLED" ]]; then
   recover_existing_verifier_transaction_before_mutation
   oci_assert_pinned_state_dir
 fi
+if [[ -n "$READ_ONLY_CONFIG_ENABLED" ]]; then
+  if [[ -n "$DEFER_PROTECTED_CONFIG_VALIDATION" ]]; then
+    prepare_read_only_existing_config_contract
+    DEFER_PROTECTED_CONFIG_VALIDATION=""
+  fi
+  validate_read_only_existing_config
+fi
 
+if [[ -n "$READ_ONLY_CONFIG_SETTING_PRESENT" ]]; then
+  # Persist an explicit choice so interrupted verifier recovery cannot silently
+  # fall back to the config-mutating default on retry.
+  upsert_env "$ENV_FILE" OPENCLAW_SETUP_READ_ONLY_CONFIG
+fi
 upsert_env "$ENV_FILE" \
   OPENCLAW_CONFIG_DIR \
   OPENCLAW_WORKSPACE_DIR \
@@ -4924,36 +6479,43 @@ fi
 export OPENCLAW_SOURCE_REVISION="$SOURCE_REVISION"
 upsert_env "$ENV_FILE" OPENCLAW_SOURCE_REVISION
 
-# Ensure bind-mounted data directories are writable by the container's `node`
-# user (uid 1000). Host-created dirs inherit the host user's uid which may
-# differ, causing EACCES when the container tries to mkdir/write.
-# Running a brief root container to chown is the portable Docker idiom --
-# it works regardless of the host uid and doesn't require host-side root.
-echo ""
-echo "==> Fixing data-directory permissions"
-# Use -xdev to restrict chown to the config-dir mount only — without it,
-# the recursive chown would cross into the workspace bind mount and rewrite
-# ownership of all user project files on Linux hosts.
-# After fixing the config dir, only the OpenClaw metadata subdirectory
-# (.openclaw/) inside the workspace gets chowned, not the user's project files.
-run_prestart_gateway --user root --entrypoint sh openclaw-gateway -c \
-  'find /home/node/.openclaw -xdev -exec chown node:node {} +; \
-   [ -d /home/node/.openclaw/workspace/.openclaw ] && chown -R node:node /home/node/.openclaw/workspace/.openclaw || true'
+if [[ -n "$READ_ONLY_CONFIG_ENABLED" ]]; then
+  echo ""
+  echo "==> Validating protected existing config (read-only)"
+  validate_read_only_existing_config
+  echo "Skipping config ownership normalization, onboarding, and setup config writes."
+else
+  # Ensure bind-mounted data directories are writable by the container's `node`
+  # user (uid 1000). Host-created dirs inherit the host user's uid which may
+  # differ, causing EACCES when the container tries to mkdir/write.
+  # Running a brief root container to chown is the portable Docker idiom --
+  # it works regardless of the host uid and doesn't require host-side root.
+  echo ""
+  echo "==> Fixing data-directory permissions"
+  # Use -xdev to restrict chown to the config-dir mount only — without it,
+  # the recursive chown would cross into the workspace bind mount and rewrite
+  # ownership of all user project files on Linux hosts.
+  # After fixing the config dir, only the OpenClaw metadata subdirectory
+  # (.openclaw/) inside the workspace gets chowned, not the user's project files.
+  run_prestart_gateway --user root --entrypoint sh openclaw-gateway -c \
+    'find /home/node/.openclaw -xdev -exec chown node:node {} +; \
+     [ -d /home/node/.openclaw/workspace/.openclaw ] && chown -R node:node /home/node/.openclaw/workspace/.openclaw || true'
 
-echo ""
-echo "==> Onboarding (interactive)"
-echo "Docker setup pins Gateway mode to local."
-echo "Gateway runtime bind comes from OPENCLAW_GATEWAY_BIND (default: lan)."
-echo "Current runtime bind: $OPENCLAW_GATEWAY_BIND"
-echo "Gateway token: $OPENCLAW_GATEWAY_TOKEN"
-echo "Tailscale exposure: Off (use host-level tailnet/Tailscale setup separately)."
-echo "Install Gateway daemon: No (managed by Docker Compose)"
-echo ""
-run_prestart_cli onboard --mode local --no-install-daemon
+  echo ""
+  echo "==> Onboarding (interactive)"
+  echo "Docker setup pins Gateway mode to local."
+  echo "Gateway runtime bind comes from OPENCLAW_GATEWAY_BIND (default: lan)."
+  echo "Current runtime bind: $OPENCLAW_GATEWAY_BIND"
+  echo "Gateway token: $OPENCLAW_GATEWAY_TOKEN"
+  echo "Tailscale exposure: Off (use host-level tailnet/Tailscale setup separately)."
+  echo "Install Gateway daemon: No (managed by Docker Compose)"
+  echo ""
+  run_prestart_cli onboard --mode local --no-install-daemon
 
-echo ""
-echo "==> Docker gateway defaults"
-sync_gateway_config
+  echo ""
+  echo "==> Docker gateway defaults"
+  sync_gateway_config
+fi
 
 echo ""
 echo "==> Provider setup (optional)"
@@ -5090,8 +6652,14 @@ echo "Gateway running with host port mapping."
 echo "Access from tailnet devices via the host's tailnet IP."
 echo "Config: $OPENCLAW_CONFIG_DIR"
 echo "Workspace: $OPENCLAW_WORKSPACE_DIR"
-echo "Token: $OPENCLAW_GATEWAY_TOKEN"
+if [[ -z "$READ_ONLY_CONFIG_ENABLED" ]]; then
+  echo "Token: $OPENCLAW_GATEWAY_TOKEN"
+fi
 echo ""
 echo "Commands:"
 echo "  ${COMPOSE_HINT} logs -f openclaw-gateway"
-echo "  ${COMPOSE_HINT} exec openclaw-gateway node dist/index.js health --token \"$OPENCLAW_GATEWAY_TOKEN\""
+if [[ -n "$READ_ONLY_CONFIG_ENABLED" ]]; then
+  echo "  ${COMPOSE_HINT} exec openclaw-gateway node dist/index.js health --token \"\$OPENCLAW_GATEWAY_TOKEN\""
+else
+  echo "  ${COMPOSE_HINT} exec openclaw-gateway node dist/index.js health --token \"$OPENCLAW_GATEWAY_TOKEN\""
+fi

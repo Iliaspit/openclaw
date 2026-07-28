@@ -46,7 +46,69 @@ failure_dir="$DOCKER_STUB_FAILURE_DIR"
 mkdir -p "$image_dir"
 mkdir -p "$failure_dir"
 image_registry="$image_dir/registry"
+gateway_id_file="$image_dir/gateway-id"
+gateway_running_file="$image_dir/gateway-running"
+gateway_absent_file="$image_dir/gateway-absent"
+container_dir="$image_dir/containers"
+mkdir -p "$container_dir"
 touch "$image_registry"
+current_gateway_id() {
+  if [[ -f "$gateway_id_file" ]]; then
+    cat "$gateway_id_file"
+  elif [[ ! -f "$gateway_absent_file" && -n "\${DOCKER_STUB_OLD_GATEWAY_ID:-}" ]]; then
+    printf '%s' "$DOCKER_STUB_OLD_GATEWAY_ID"
+  fi
+  return 0
+}
+container_field() {
+  container_id="$1"
+  field="$2"
+  if [[ -f "$container_dir/$container_id/$field" ]]; then
+    cat "$container_dir/$container_id/$field"
+    return 0
+  fi
+  if [[ "$container_id" == "\${DOCKER_STUB_OLD_GATEWAY_ID:-}" ]]; then
+    case "$field" in
+      image) printf '%s' "\${DOCKER_STUB_OLD_GATEWAY_IMAGE:-}" ;;
+      running) printf '%s' "\${DOCKER_STUB_OLD_GATEWAY_RUNNING:-false}" ;;
+      project) printf '%s' "\${DOCKER_STUB_COMPOSE_PROJECT:-openclaw}" ;;
+      service) printf '%s' openclaw-gateway ;;
+      oneoff) printf '%s' False ;;
+      candidate-label) printf '%s' "\${DOCKER_STUB_OLD_GATEWAY_CANDIDATE_LABEL:-}" ;;
+    esac
+  fi
+  return 0
+}
+record_gateway_container() {
+  container_id="$1"
+  container_image="$2"
+  container_running="$3"
+  container_project="$4"
+  container_service="$5"
+  container_candidate_label="$6"
+  rm -rf "$container_dir/$container_id"
+  mkdir -p "$container_dir/$container_id"
+  printf '%s\n' "$container_image" >"$container_dir/$container_id/image"
+  printf '%s\n' "$container_running" >"$container_dir/$container_id/running"
+  printf '%s\n' "$container_project" >"$container_dir/$container_id/project"
+  printf '%s\n' "$container_service" >"$container_dir/$container_id/service"
+  printf '%s\n' False >"$container_dir/$container_id/oneoff"
+  node - \
+    "$container_dir/$container_id/labels.json" \
+    "$container_project" "$container_service" "$container_candidate_label" <<'NODE'
+const fs = require("node:fs");
+const [outputPath, project, service, candidate] = process.argv.slice(2);
+const labels = {
+  "com.docker.compose.project": project,
+  "com.docker.compose.service": service,
+  "com.docker.compose.oneoff": "False",
+};
+if (candidate !== "") {
+  labels["ai.openclaw.verifier.gateway-candidate"] = candidate;
+}
+fs.writeFileSync(outputPath, JSON.stringify(labels));
+NODE
+}
 record_image() {
   image_reference="$1"
   image_id="$2"
@@ -108,6 +170,15 @@ if [[ "\${1:-}" == "build" ]]; then
   if [[ "$*" == *":candidate-"* && -n "\${DOCKER_STUB_SUBSTITUTE_PATH:-}" ]]; then
     substitute_verifier_path
   fi
+  if [[ "$*" == *":candidate-"* && -n "\${DOCKER_STUB_MUTATE_CONFIG_PATH:-}" ]]; then
+    if [[ "\${DOCKER_STUB_MUTATE_CONFIG_KIND:-}" == "bytes" ]]; then
+      printf '%s\n' '{"changed":true}' >"$DOCKER_STUB_MUTATE_CONFIG_PATH"
+    elif [[ "\${DOCKER_STUB_MUTATE_CONFIG_KIND:-}" == "mode" ]]; then
+      chmod 600 "$DOCKER_STUB_MUTATE_CONFIG_PATH"
+    else
+      exit 1
+    fi
+  fi
   if [[ -n "$fail_match" && "$*" == *"$fail_match"* ]]; then
     echo "build-fail $*" >>"$log"
     exit 1
@@ -161,7 +232,29 @@ if [[ "\${1:-}" == "ps" ]]; then
   fi
   exit 0
 fi
+if [[ "\${1:-}" == "stop" ]]; then
+  gateway_id="\${!#}"
+  echo "stop $gateway_id" >>"$log"
+  if [[ -f "$container_dir/$gateway_id/running" ]]; then
+    printf '%s\n' false >"$container_dir/$gateway_id/running"
+  fi
+  if [[ "$gateway_id" == "$(current_gateway_id)" ]]; then
+    printf '%s\n' false >"$gateway_running_file"
+  fi
+  exit 0
+fi
+if [[ "\${1:-}" == "rm" ]]; then
+  gateway_id="\${!#}"
+  echo "rm $gateway_id" >>"$log"
+  rm -rf "$container_dir/$gateway_id"
+  if [[ "$gateway_id" == "$(current_gateway_id)" ]]; then
+    rm -f "$gateway_id_file" "$gateway_running_file"
+    touch "$gateway_absent_file"
+  fi
+  exit 0
+fi
 if [[ "\${1:-}" == "inspect" ]]; then
+  inspected_id="\${!#}"
   if [[ "$*" == *"{{json .Mounts}}"* ]]; then
     if [[ -f "$image_dir/gateway-socket-source" ]]; then
       printf '[{"Type":"bind","Source":"%s","Destination":"/var/run/docker.sock","RW":true}]\n' \
@@ -172,22 +265,47 @@ if [[ "\${1:-}" == "inspect" ]]; then
   elif [[ "$*" == *"State.Health"* ]]; then
     printf '%s\n' healthy
   elif [[ "$*" == *"{{.State.Running}}"* ]]; then
-    if [[ "\${!#}" == "\${DOCKER_STUB_OLD_GATEWAY_ID:-}" ]]; then
-      printf '%s\n' false
+    running="$(container_field "$inspected_id" running)"
+    if [[ -n "$running" ]]; then
+      printf '%s\n' "$running"
+    elif [[ "$inspected_id" == "$(current_gateway_id)" && -f "$gateway_running_file" ]]; then
+      cat "$gateway_running_file"
     else
       printf '%s\n' true
     fi
   elif [[ "$*" == *"{{.Image}}"* ]]; then
-    if [[ "\${!#}" == "\${DOCKER_STUB_CONSUMER_ID:-}" &&
+    if [[ "$inspected_id" == "\${DOCKER_STUB_CONSUMER_ID:-}" &&
       -n "\${DOCKER_STUB_CONSUMER_IMAGE:-}" ]]; then
       printf '%s\n' "$DOCKER_STUB_CONSUMER_IMAGE"
-    elif [[ "\${!#}" == "\${DOCKER_STUB_OLD_GATEWAY_ID:-}" &&
-      -n "\${DOCKER_STUB_OLD_GATEWAY_IMAGE:-}" ]]; then
-      printf '%s\n' "$DOCKER_STUB_OLD_GATEWAY_IMAGE"
+    elif container_image="$(container_field "$inspected_id" image)" &&
+      [[ -n "$container_image" ]]; then
+      printf '%s\n' "$container_image"
     elif [[ -f "$image_dir/gateway-image" ]]; then
       cat "$image_dir/gateway-image"
     else
       printf '%s\n' "sha256:${"e".repeat(64)}"
+    fi
+  elif [[ "$*" == *"{{json .Config.Labels}}"* ]]; then
+    if [[ -f "$container_dir/$inspected_id/labels-inspect-json" ]]; then
+      cat "$container_dir/$inspected_id/labels-inspect-json"
+    elif [[ -f "$container_dir/$inspected_id/labels.json" ]]; then
+      cat "$container_dir/$inspected_id/labels.json"
+    else
+      node - \
+        "\${DOCKER_STUB_COMPOSE_PROJECT:-openclaw}" \
+        openclaw-gateway \
+        "\${DOCKER_STUB_OLD_GATEWAY_CANDIDATE_LABEL:-}" <<'NODE'
+const [project, service, candidate] = process.argv.slice(2);
+const labels = {
+  "com.docker.compose.project": project,
+  "com.docker.compose.service": service,
+  "com.docker.compose.oneoff": "False",
+};
+if (candidate !== "") {
+  labels["ai.openclaw.verifier.gateway-candidate"] = candidate;
+}
+process.stdout.write(JSON.stringify(labels));
+NODE
     fi
   fi
   exit 0
@@ -279,6 +397,7 @@ if [[ "\${1:-}" == "compose" ]]; then
   fi
   echo "compose $*" >>"$log"
   compose_socket_source=""
+  compose_candidate_label=""
   expect_compose_file=""
   for argument in "$@"; do
     if [[ -n "$expect_compose_file" ]]; then
@@ -289,6 +408,18 @@ if [[ "\${1:-}" == "compose" ]]; then
       if grep -Fq "target: /var/run/docker.sock" "$argument" &&
         grep -Fq "$OPENCLAW_DOCKER_SOCKET" "$argument"; then
         compose_socket_source="$OPENCLAW_DOCKER_SOCKET"
+      fi
+      candidate_label="$(
+        sed -n \
+          's/^[[:space:]]*ai\\.openclaw\\.verifier\\.gateway-candidate:[[:space:]]*"\\([a-f0-9]\\{64\\}\\)"[[:space:]]*$/\\1/p' \
+          "$argument"
+      )"
+      if [[ -n "$candidate_label" ]]; then
+        if [[ -n "$compose_candidate_label" ]]; then
+          compose_candidate_label="$compose_candidate_label|$candidate_label"
+        else
+          compose_candidate_label="$candidate_label"
+        fi
       fi
       expect_compose_file=""
     elif [[ "$argument" == "-f" ]]; then
@@ -302,8 +433,30 @@ if [[ "\${1:-}" == "compose" ]]; then
   fi
   if [[ "$*" == *" config --format json"* ]]; then
     read_only="\${DOCKER_STUB_CONFIG_READ_ONLY:-false}"
-    printf '{"services":{"openclaw-gateway":{"volumes":[{"type":"bind","source":"%s","read_only":%s},{"type":"bind","source":"%s","read_only":%s}]}}}\n' \
+    printf '{"name":"%s","services":{"openclaw-gateway":{"labels":{"ai.openclaw.verifier.gateway-candidate":"%s"},"volumes":[{"type":"bind","source":"%s","read_only":%s},{"type":"bind","source":"%s","read_only":%s}]}}}\n' \
+      "\${DOCKER_STUB_COMPOSE_PROJECT:-openclaw}" \
+      "$compose_candidate_label" \
       "$OPENCLAW_CONFIG_DIR" "$read_only" "$OPENCLAW_WORKSPACE_DIR" "$read_only"
+    exit 0
+  fi
+  if [[ "$*" == *"dist/index.js config get gateway.mode"* ]]; then
+    printf '%s\n' "\${DOCKER_STUB_CONFIG_MODE:-local}"
+    exit 0
+  fi
+  if [[ "$*" == *"dist/index.js config get gateway.bind"* ]]; then
+    printf '%s\n' "\${DOCKER_STUB_CONFIG_BIND:-\${OPENCLAW_GATEWAY_BIND:-lan}}"
+    exit 0
+  fi
+  if [[ "$*" == *"dist/index.js config get agents.defaults.sandbox.mode"* ]]; then
+    printf '%s\n' "\${DOCKER_STUB_SANDBOX_MODE:-non-main}"
+    exit 0
+  fi
+  if [[ "$*" == *"dist/index.js config get agents.defaults.sandbox.scope"* ]]; then
+    printf '%s\n' "\${DOCKER_STUB_SANDBOX_SCOPE:-agent}"
+    exit 0
+  fi
+  if [[ "$*" == *"dist/index.js config get agents.defaults.sandbox.workspaceAccess"* ]]; then
+    printf '%s\n' "\${DOCKER_STUB_SANDBOX_WORKSPACE_ACCESS:-none}"
     exit 0
   fi
   if [[ "$*" == *"config set --batch-json"* && "$*" == *"agents.defaults.sandbox.mode"* ]]; then
@@ -312,7 +465,30 @@ if [[ "\${1:-}" == "compose" ]]; then
       >"$OPENCLAW_CONFIG_DIR/openclaw.json"
   fi
   if [[ "$*" == *" up -d "* && "$*" == *"openclaw-gateway"* && -n "\${OPENCLAW_IMAGE:-}" ]]; then
-    printf '%s\n' "$OPENCLAW_IMAGE" >"$image_dir/gateway-image"
+    gateway_image="$(lookup_image "$OPENCLAW_IMAGE")"
+    gateway_image="\${gateway_image:-$OPENCLAW_IMAGE}"
+    gateway_id="${"d".repeat(64)}"
+    record_gateway_container \
+      "$gateway_id" "$gateway_image" true \
+      "\${DOCKER_STUB_COMPOSE_PROJECT:-openclaw}" openclaw-gateway \
+      "$compose_candidate_label"
+    printf '%s\n' "$gateway_image" >"$image_dir/gateway-image"
+    printf '%s\n' "$gateway_id" >"$gateway_id_file"
+    printf '%s\n' true >"$gateway_running_file"
+    rm -f "$gateway_absent_file"
+  fi
+  if [[ "$*" == *" create "* && "$*" == *"openclaw-gateway"* && -n "\${OPENCLAW_IMAGE:-}" ]]; then
+    gateway_image="$(lookup_image "$OPENCLAW_IMAGE")"
+    gateway_image="\${gateway_image:-$OPENCLAW_IMAGE}"
+    gateway_id="${"d".repeat(64)}"
+    record_gateway_container \
+      "$gateway_id" "$gateway_image" false \
+      "\${DOCKER_STUB_COMPOSE_PROJECT:-openclaw}" openclaw-gateway \
+      "$compose_candidate_label"
+    printf '%s\n' "$gateway_image" >"$image_dir/gateway-image"
+    printf '%s\n' "$gateway_id" >"$gateway_id_file"
+    printf '%s\n' false >"$gateway_running_file"
+    rm -f "$gateway_absent_file"
   fi
   if [[ "$*" == *" up -d --no-deps --force-recreate openclaw-gateway"* ]]; then
     if [[ -n "$compose_socket_source" &&
@@ -322,12 +498,21 @@ if [[ "\${1:-}" == "compose" ]]; then
       rm -f "$image_dir/gateway-socket-source"
     fi
   fi
-  if [[ "$*" == *" ps -q openclaw-gateway"* ]]; then
-    printf '%s\n' "${"d".repeat(64)}"
-  fi
-  if [[ "$*" == *" ps -a -q openclaw-gateway"* &&
-    -n "\${DOCKER_STUB_OLD_GATEWAY_ID:-}" ]]; then
-    printf '%s\n' "$DOCKER_STUB_OLD_GATEWAY_ID"
+  if [[ "$*" == *" ps -a -q --no-trunc openclaw-gateway"* ||
+    "$*" == *" ps -a -q openclaw-gateway"* ]]; then
+    if [[ -n "\${DOCKER_STUB_GATEWAY_SERVICE_IDS:-}" ]]; then
+      printf '%b\n' "$DOCKER_STUB_GATEWAY_SERVICE_IDS"
+    else
+      current_gateway_id
+      [[ -z "$(current_gateway_id)" ]] || printf '\n'
+    fi
+  elif [[ "$*" == *" ps -q openclaw-gateway"* ]]; then
+    current_id="$(current_gateway_id)"
+    running="\${DOCKER_STUB_OLD_GATEWAY_RUNNING:-false}"
+    [[ ! -f "$gateway_running_file" ]] || running="$(cat "$gateway_running_file")"
+    if [[ -n "$current_id" && "$running" == "true" ]]; then
+      printf '%s\n' "$current_id"
+    fi
   fi
   if [[ "$*" == *"run --rm --no-deps openclaw-verifier-bootstrap"* ]]; then
     printf '%s\n' '{"status":"prepared","dependencyManifestDigest":"${"1".repeat(64)}","browserManifestDigest":"${"2".repeat(64)}","toolchainDigest":"${"3".repeat(64)}"}'
@@ -335,6 +520,11 @@ if [[ "\${1:-}" == "compose" ]]; then
   if [[ -n "$fail_after_match" && "$*" == *"$fail_after_match"* ]]; then
     echo "compose-fail-after $*" >>"$log"
     exit 1
+  fi
+  if [[ -n "$kill_parent_match" && "$*" == *"$kill_parent_match"* ]]; then
+    echo "compose-kill-parent $*" >>"$log"
+    kill -KILL "$PPID"
+    exit 137
   fi
   exit 0
 fi
@@ -469,7 +659,7 @@ function runDockerSetup(
     cwd: sandbox.rootDir,
     env: createEnv(sandbox, overrides),
     encoding: "utf8",
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
   });
 }
 
@@ -489,9 +679,14 @@ function runDockerSetupAsync(
     cwd: sandbox.rootDir,
     detached: process.platform !== "win32",
     env: createEnv(sandbox, overrides),
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
   });
+  let stdout = "";
   let stderr = "";
+  child.stdout?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
   child.stderr?.setEncoding("utf8");
   child.stderr?.on("data", (chunk: string) => {
     stderr += chunk;
@@ -518,7 +713,7 @@ function runDockerSetupAsync(
       }
       settled = true;
       clearTimeout(deadline);
-      resolve({ status, signal, stdout: "", stderr, error: spawnError });
+      resolve({ status, signal, stdout, stderr, error: spawnError });
     };
     child.once("error", (error) => {
       spawnError = error;
@@ -543,6 +738,134 @@ async function runVerifierDockerSetup(
       OPENCLAW_DOCKER_SOCKET: socketPath,
     }),
   );
+}
+
+async function prepareReadOnlyVerifierFixture(
+  sandbox: DockerSetupSandbox,
+  configOverrides: {
+    mode?: string;
+    bind?: string;
+    sandboxMode?: string;
+    sandboxScope?: string;
+    workspaceAccess?: string;
+    token?: string;
+  } = {},
+) {
+  const configDir = join(sandbox.rootDir, "protected-config");
+  const workspaceDir = join(sandbox.rootDir, "protected-workspace");
+  const configPath = join(configDir, "openclaw.json");
+  const flagStatPath = join(sandbox.binDir, "protected-config-stat");
+  await mkdir(join(configDir, "ssh"), { recursive: true });
+  await mkdir(workspaceDir, { recursive: true });
+  await writeFile(
+    flagStatPath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args.length !== 3 || args[0] !== "-f" || args[1] !== "%d|%i|%Sf") {
+  process.exit(2);
+}
+const value = fs.lstatSync(args[2], { bigint: true });
+const missing =
+  process.env.OPENCLAW_TEST_PROTECTED_CONFIG_FLAGS === "none" ||
+  process.env.OPENCLAW_PROTECTED_CONFIG_FLAG_CHECK_LABEL ===
+    process.env.OPENCLAW_TEST_REMOVE_UCHG_AT;
+if (process.env.DOCKER_STUB_LOG) {
+  fs.appendFileSync(
+    process.env.DOCKER_STUB_LOG,
+    \`flag-stat \${process.env.OPENCLAW_PROTECTED_CONFIG_FLAG_CHECK_LABEL ?? ""} \${missing ? "-" : "uchg"}\\n\`,
+  );
+}
+process.stdout.write(\`\${value.dev}|\${value.ino}|\${missing ? "-" : "uchg"}\`);
+`,
+    { mode: 0o755 },
+  );
+  await writeFile(
+    configPath,
+    `${JSON.stringify({
+      gateway: {
+        mode: configOverrides.mode ?? "local",
+        bind: configOverrides.bind ?? "lan",
+        auth: { token: configOverrides.token ?? "protected-config-token" },
+      },
+      agents: {
+        defaults: {
+          sandbox: {
+            mode: configOverrides.sandboxMode ?? "non-main",
+            scope: configOverrides.sandboxScope ?? "agent",
+            workspaceAccess: configOverrides.workspaceAccess ?? "none",
+          },
+        },
+      },
+    })}\n`,
+    { mode: 0o640 },
+  );
+  return {
+    configDir,
+    configPath,
+    workspaceDir,
+    env: {
+      OPENCLAW_SETUP_READ_ONLY_CONFIG: "1",
+      OPENCLAW_CONFIG_DIR: configDir,
+      OPENCLAW_WORKSPACE_DIR: workspaceDir,
+      OPENCLAW_SANDBOX: "1",
+      OPENCLAW_VERIFIER_WORKSPACE_DIR: sandbox.rootDir,
+      OPENCLAW_VERIFIER_GATEWAY_WORKSPACE: "/workspace/project",
+      OPENCLAW_VERIFIER_PACKAGE_MANAGER: "yarn@4.9.2",
+      OPENCLAW_DOCKER_SETUP_TEST: "1",
+      OPENCLAW_TEST_HOST_PLATFORM: "Darwin",
+      OPENCLAW_TEST_PROTECTED_CONFIG_STAT_COMMAND: flagStatPath,
+    },
+  };
+}
+
+async function beginInterruptedReadOnlyVerifier(sandbox: DockerSetupSandbox) {
+  const fixture = await prepareReadOnlyVerifierFixture(sandbox);
+  const result = await runVerifierDockerSetup(sandbox, {
+    ...fixture.env,
+    DOCKER_STUB_KILL_PARENT_MATCH: ":candidate-",
+  });
+  const stateRoot = join(sandbox.stateRoot, "operator-state", "openclaw", "verifier");
+  const markerName = `.openclaw-verifier-active-${createHash("sha256")
+    .update(stateRoot)
+    .digest("hex")}`;
+  return {
+    ...fixture,
+    result,
+    stateRoot,
+    transactionRoot: join(stateRoot, "transaction"),
+    journalPath: join(stateRoot, "transaction", "journal"),
+    markerPath: join(dirname(stateRoot), markerName),
+  };
+}
+
+async function beginInterruptedGatewayCreateIntent(sandbox: DockerSetupSandbox) {
+  const fixture = await prepareReadOnlyVerifierFixture(sandbox);
+  const priorGateway = "9".repeat(64);
+  const priorImage = `sha256:${"8".repeat(64)}`;
+  const candidateGateway = "d".repeat(64);
+  const env = {
+    ...fixture.env,
+    OPENCLAW_GATEWAY_TOKEN: undefined,
+    DOCKER_STUB_OLD_GATEWAY_ID: priorGateway,
+    DOCKER_STUB_OLD_GATEWAY_IMAGE: priorImage,
+    DOCKER_STUB_OLD_GATEWAY_RUNNING: "true",
+  };
+  const result = await runVerifierDockerSetup(sandbox, {
+    ...env,
+    DOCKER_STUB_KILL_PARENT_MATCH: "up -d --no-deps --force-recreate openclaw-gateway",
+  });
+  const stateRoot = join(sandbox.stateRoot, "operator-state", "openclaw", "verifier");
+  return {
+    ...fixture,
+    result,
+    env,
+    priorGateway,
+    priorImage,
+    candidateGateway,
+    transactionRoot: join(stateRoot, "transaction"),
+    journalPath: join(stateRoot, "transaction", "journal"),
+  };
 }
 
 async function replaceParentAtBackupBarrier(params: {
@@ -669,6 +992,75 @@ async function resetDockerLog(sandbox: DockerSetupSandbox) {
   await writeFile(sandbox.logPath, "");
 }
 
+async function resetSharedDockerSetupFixture(sandbox: DockerSetupSandbox) {
+  await Promise.all(
+    [
+      ".env",
+      "docker-compose.extra.yml",
+      "docker-compose.sandbox.yml",
+      "docker-images",
+      "docker-failures",
+      "docker-volumes",
+      "config",
+      "openclaw",
+    ].map((entry) => rm(join(sandbox.rootDir, entry), { recursive: true, force: true })),
+  );
+  await writeDockerStub(sandbox.binDir, sandbox.logPath);
+}
+
+function dockerStubContainerPath(sandbox: DockerSetupSandbox, containerId: string) {
+  return join(sandbox.rootDir, "docker-images", "containers", containerId);
+}
+
+async function writeDockerStubContainer(
+  sandbox: DockerSetupSandbox,
+  containerId: string,
+  fields: {
+    image: string;
+    running: boolean;
+    project: string;
+    service: string;
+    candidateLabel?: string;
+  },
+) {
+  const containerPath = dockerStubContainerPath(sandbox, containerId);
+  await rm(containerPath, { recursive: true, force: true });
+  await mkdir(containerPath, { recursive: true });
+  await Promise.all([
+    writeFile(join(containerPath, "image"), `${fields.image}\n`),
+    writeFile(join(containerPath, "running"), `${fields.running}\n`),
+    writeFile(join(containerPath, "project"), `${fields.project}\n`),
+    writeFile(join(containerPath, "service"), `${fields.service}\n`),
+    writeFile(join(containerPath, "oneoff"), "False\n"),
+    writeFile(
+      join(containerPath, "labels.json"),
+      JSON.stringify({
+        "com.docker.compose.project": fields.project,
+        "com.docker.compose.service": fields.service,
+        "com.docker.compose.oneoff": "False",
+        ...(fields.candidateLabel === undefined
+          ? {}
+          : { "ai.openclaw.verifier.gateway-candidate": fields.candidateLabel }),
+      }),
+    ),
+  ]);
+}
+
+async function setDockerStubCurrentGateway(
+  sandbox: DockerSetupSandbox,
+  containerId: string,
+  image: string,
+  running: boolean,
+) {
+  const imageDir = join(sandbox.rootDir, "docker-images");
+  await Promise.all([
+    writeFile(join(imageDir, "gateway-id"), `${containerId}\n`),
+    writeFile(join(imageDir, "gateway-image"), `${image}\n`),
+    writeFile(join(imageDir, "gateway-running"), `${running}\n`),
+    rm(join(imageDir, "gateway-absent"), { force: true }),
+  ]);
+}
+
 async function readDockerLog(sandbox: DockerSetupSandbox) {
   return readFile(sandbox.logPath, "utf8");
 }
@@ -699,6 +1091,19 @@ async function rewriteJournalValues(
     throw new Error(`test journal lacks keys: ${[...remaining].join(", ")}`);
   }
   await writeFile(journalPath, `${rewritten.join("\n")}\n`);
+}
+
+async function removeJournalKeys(journalPath: string, keys: string[]): Promise<void> {
+  const removeKeys = new Set(keys);
+  const lines = (await readFile(journalPath, "utf8")).split("\n");
+  if (lines.at(-1) !== "") {
+    throw new Error("test journal is not newline terminated");
+  }
+  lines.pop();
+  await writeFile(
+    journalPath,
+    `${lines.filter((line) => !removeKeys.has(line.slice(0, line.indexOf("=")))).join("\n")}\n`,
+  );
 }
 
 function readJournalValue(journal: string, key: string): string {
@@ -1015,9 +1420,9 @@ describe("scripts/docker/setup.sh", () => {
 
   it("forces BuildKit for local and sandbox docker builds", async () => {
     const activeSandbox = requireSandbox(sandbox);
+    await resetSharedDockerSetupFixture(activeSandbox);
     await writeFile(join(activeSandbox.rootDir, "Dockerfile.sandbox"), "FROM scratch\n");
     await writeFile(join(activeSandbox.rootDir, "Dockerfile.sandbox-verifier"), "FROM scratch\n");
-    await resetDockerLog(activeSandbox);
 
     const result = await runVerifierDockerSetup(activeSandbox, {
       OPENCLAW_SANDBOX: "1",
@@ -1056,6 +1461,733 @@ describe("scripts/docker/setup.sh", () => {
     await expect(
       stat(join(activeSandbox.stateRoot, "operator-state", "openclaw", "verifier", "transaction")),
     ).rejects.toThrow();
+  });
+
+  it("keeps protected existing-config mode default-off and rejects invalid values", async () => {
+    const normal = await createDockerSetupSandbox();
+    const defaultResult = runDockerSetup(normal);
+    expect(defaultResult.status).toBe(0);
+    expect(await readDockerLog(normal)).toContain(" onboard --mode local ");
+
+    const explicitlyFalse = await createDockerSetupSandbox();
+    const falseResult = runDockerSetup(explicitlyFalse, {
+      OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
+    });
+    expect(falseResult.status).toBe(0);
+    expect(await readDockerLog(explicitlyFalse)).toContain(" config set --batch-json ");
+
+    const invalid = await createDockerSetupSandbox();
+    const invalidResult = runDockerSetup(invalid, {
+      OPENCLAW_SETUP_READ_ONLY_CONFIG: "sometimes",
+    });
+    expect(invalidResult.status).not.toBe(0);
+    expect(invalidResult.stderr).toContain(
+      "OPENCLAW_SETUP_READ_ONLY_CONFIG must be a boolean value",
+    );
+  });
+
+  it.each(["1", "true", "yes", "on"])(
+    "accepts protected existing-config truthy value %s only with verifier publication",
+    async (value) => {
+      const isolated = await createDockerSetupSandbox();
+      const fixture = await prepareReadOnlyVerifierFixture(isolated);
+      const result = await runVerifierDockerSetup(isolated, {
+        ...fixture.env,
+        OPENCLAW_SETUP_READ_ONLY_CONFIG: value,
+      });
+      expect(result.status, result.stderr).toBe(0);
+    },
+  );
+
+  it("requires verifier publication whenever protected existing-config mode is enabled", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await prepareReadOnlyVerifierFixture(isolated);
+    const result = runDockerSetup(isolated, {
+      ...fixture.env,
+      OPENCLAW_SANDBOX: "",
+      OPENCLAW_VERIFIER_WORKSPACE_DIR: "",
+      OPENCLAW_VERIFIER_GATEWAY_WORKSPACE: "",
+      OPENCLAW_VERIFIER_PACKAGE_MANAGER: "",
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("requires guarded verifier publication");
+    expect(await readDockerLog(isolated)).not.toContain(" up -d ");
+  });
+
+  it("lets an explicit process false override a persisted protected-config true", async () => {
+    const isolated = await createDockerSetupSandbox();
+    await writeFile(join(isolated.rootDir, ".env"), "OPENCLAW_SETUP_READ_ONLY_CONFIG=1\n", {
+      mode: 0o600,
+    });
+    const result = runDockerSetup(isolated, {
+      OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
+    });
+    expect(result.status).toBe(0);
+    expect(await readFile(join(isolated.rootDir, ".env"), "utf8")).toContain(
+      "OPENCLAW_SETUP_READ_ONLY_CONFIG=0",
+    );
+    expect(await readDockerLog(isolated)).toContain(" onboard --mode local ");
+  });
+
+  it.each([
+    { kind: "missing", expected: "capture failed" },
+    { kind: "malformed", expected: "policy validation failed" },
+    { kind: "symlink", expected: "capture failed" },
+    { kind: "hardlink", expected: "capture failed" },
+    { kind: "special", expected: "capture failed" },
+    { kind: "unreadable", expected: "capture failed" },
+  ])("rejects a $kind protected config before setup mutation", async ({ kind, expected }) => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await prepareReadOnlyVerifierFixture(isolated);
+    const victim = join(isolated.rootDir, `protected-config-${kind}-victim`);
+    if (kind === "missing") {
+      await rm(fixture.configPath);
+    } else if (kind === "malformed") {
+      await writeFile(fixture.configPath, "{\n");
+    } else if (kind === "symlink") {
+      await writeFile(victim, '{"victim":true}\n');
+      await rm(fixture.configPath);
+      await symlink(victim, fixture.configPath);
+    } else if (kind === "hardlink") {
+      await writeFile(victim, '{"victim":true}\n');
+      await rm(fixture.configPath);
+      await link(victim, fixture.configPath);
+    } else if (kind === "special") {
+      await rm(fixture.configPath);
+      await mkdir(fixture.configPath);
+    } else {
+      await chmod(fixture.configPath, 0o000);
+    }
+    const result = await runVerifierDockerSetup(isolated, fixture.env);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(expected);
+    const log = await readDockerLog(isolated);
+    expect(log).not.toContain("build ");
+    expect(log).not.toContain(" up -d ");
+  });
+
+  it.each([
+    { field: "mode", overrides: { mode: "remote" } },
+    { field: "bind", overrides: { bind: "loopback" } },
+    { field: "sandbox mode", overrides: { sandboxMode: "off" } },
+    { field: "sandbox scope", overrides: { sandboxScope: "session" } },
+    { field: "workspace access", overrides: { workspaceAccess: "rw" } },
+  ])("rejects an exact protected $field mismatch", async ({ overrides }) => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await prepareReadOnlyVerifierFixture(isolated, overrides);
+    const result = await runVerifierDockerSetup(isolated, fixture.env);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("policy validation failed");
+    expect(await readDockerLog(isolated)).not.toContain(" up -d ");
+  });
+
+  it.each([
+    {
+      description: "non-Darwin host",
+      override: { OPENCLAW_TEST_HOST_PLATFORM: "Linux" },
+      expected: "requires macOS user-immutable config protection",
+    },
+    {
+      description: "missing uchg flag",
+      override: { OPENCLAW_TEST_PROTECTED_CONFIG_FLAGS: "none" },
+      expected: "requires the macOS user-immutable uchg flag",
+    },
+  ])(
+    "rejects a protected config on $description before mutation",
+    async ({ override, expected }) => {
+      const isolated = await createDockerSetupSandbox();
+      const fixture = await prepareReadOnlyVerifierFixture(isolated);
+      const result = await runVerifierDockerSetup(isolated, {
+        ...fixture.env,
+        ...override,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(expected);
+      const log = await readDockerLog(isolated);
+      expect(log).not.toContain("build ");
+      expect(log).not.toContain(" up -d ");
+      await expect(stat(join(isolated.rootDir, ".env"))).rejects.toThrow();
+    },
+  );
+
+  it("resolves an unset token only after immutable protected-config validation", async () => {
+    const rejected = await createDockerSetupSandbox();
+    const rejectedFixture = await prepareReadOnlyVerifierFixture(rejected, {
+      token: "protected-unset-token-rejected",
+    });
+    const rejectedResult = await runVerifierDockerSetup(rejected, {
+      ...rejectedFixture.env,
+      OPENCLAW_GATEWAY_TOKEN: undefined,
+      OPENCLAW_TEST_PROTECTED_CONFIG_FLAGS: "none",
+    });
+    expect(rejectedResult.status).not.toBe(0);
+    expect(rejectedResult.stdout).not.toContain("protected-unset-token-rejected");
+    await expect(stat(join(rejected.rootDir, ".env"))).rejects.toThrow();
+
+    const accepted = await createDockerSetupSandbox();
+    const acceptedFixture = await prepareReadOnlyVerifierFixture(accepted, {
+      token: "protected-unset-token-accepted",
+    });
+    const acceptedResult = await runVerifierDockerSetup(accepted, {
+      ...acceptedFixture.env,
+      OPENCLAW_GATEWAY_TOKEN: undefined,
+    });
+    expect(acceptedResult.status, acceptedResult.stderr).toBe(0);
+    expect(acceptedResult.stdout).not.toContain("protected-unset-token-accepted");
+    expect(await readFile(join(accepted.rootDir, ".env"), "utf8")).toContain(
+      "OPENCLAW_GATEWAY_TOKEN=protected-unset-token-accepted",
+    );
+  });
+
+  it.each([
+    {
+      boundary: "final pre-exec",
+      label: "Protected OpenClaw config at final pre-exec boundary",
+      gatewayStarted: false,
+    },
+    {
+      boundary: "post-create",
+      label: "Protected OpenClaw config at post-create boundary",
+      gatewayStarted: true,
+    },
+  ])("rejects uchg removal at the $boundary boundary", async ({ label, gatewayStarted }) => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await prepareReadOnlyVerifierFixture(isolated);
+    const result = await runVerifierDockerSetup(isolated, {
+      ...fixture.env,
+      OPENCLAW_TEST_REMOVE_UCHG_AT: label,
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("requires the macOS user-immutable uchg flag");
+    const log = await readDockerLog(isolated);
+    const recreate = log.includes("up -d --no-deps --force-recreate openclaw-gateway");
+    expect(recreate).toBe(gatewayStarted);
+    expect(await readFile(join(isolated.rootDir, ".env"), "utf8")).not.toMatch(
+      /OPENCLAW_VERIFIER_IMAGE_ID=sha256:/u,
+    );
+    await expect(
+      stat(join(isolated.stateRoot, "operator-state", "openclaw", "verifier", "transaction")),
+    ).rejects.toThrow();
+  });
+
+  it("stops only the transaction-labeled pre-ID Gateway before missing-uchg recovery fails", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const interrupted = await beginInterruptedGatewayCreateIntent(isolated);
+    expect(interrupted.result.signal).toBe("SIGKILL");
+    const interruptedJournal = await readFile(interrupted.journalPath, "utf8");
+    const candidateLabel = readJournalValue(interruptedJournal, "gateway-candidate-label");
+    const runtimeImage = readJournalValue(interruptedJournal, "runtime-image-id");
+    expect(readJournalValue(interruptedJournal, "phase")).toBe("gateway-create-intent");
+    expect(readJournalValue(interruptedJournal, "new-gateway-id")).toBe("");
+    expect(readJournalValue(interruptedJournal, "old-gateway-id")).toBe(interrupted.priorGateway);
+    expect(readJournalValue(interruptedJournal, "gateway-compose-project")).toBe("openclaw");
+    expect(readJournalValue(interruptedJournal, "gateway-compose-service")).toBe(
+      "openclaw-gateway",
+    );
+    expect(candidateLabel).toMatch(/^[a-f0-9]{64}$/u);
+    expect(readJournalValue(interruptedJournal, "gateway-create-binding")).toMatch(
+      /^[a-f0-9]{64}$/u,
+    );
+    const unrelatedGateway = "f".repeat(64);
+    await writeDockerStubContainer(isolated, unrelatedGateway, {
+      image: runtimeImage,
+      running: true,
+      project: "openclaw",
+      service: "openclaw-gateway",
+      candidateLabel: "0".repeat(64),
+    });
+
+    await resetDockerLog(isolated);
+    const rejectedRecovery = await runVerifierDockerSetup(isolated, {
+      ...interrupted.env,
+      OPENCLAW_TEST_PROTECTED_CONFIG_FLAGS: "none",
+    });
+    expect(rejectedRecovery.status).not.toBe(0);
+    expect(rejectedRecovery.stderr).toContain("requires the macOS user-immutable uchg flag");
+    const recoveryLines = await readDockerLogLines(isolated);
+    const stopIndex = recoveryLines.indexOf(`stop ${interrupted.candidateGateway}`);
+    const immutableFailureIndex = recoveryLines.findIndex((line) =>
+      line.includes("flag-stat Protected OpenClaw config before verifier recovery -"),
+    );
+    expect(stopIndex).toBeGreaterThanOrEqual(0);
+    expect(immutableFailureIndex).toBeGreaterThan(stopIndex);
+    expect(recoveryLines).not.toContain(`stop ${unrelatedGateway}`);
+    expect(recoveryLines).not.toContain(`rm ${interrupted.candidateGateway}`);
+    expect(
+      recoveryLines.some((line) => line.includes("ps -a -q --no-trunc openclaw-gateway")),
+    ).toBe(true);
+    expect(await readFile(join(isolated.rootDir, "docker-images", "gateway-running"), "utf8")).toBe(
+      "false\n",
+    );
+    expect(readJournalValue(await readFile(interrupted.journalPath, "utf8"), "phase")).toBe(
+      "gateway-create-intent",
+    );
+
+    const restoredRecovery = await runVerifierDockerSetup(isolated, interrupted.env);
+    expect(restoredRecovery.status).not.toBe(0);
+    await expect(stat(interrupted.transactionRoot)).rejects.toThrow();
+    expect(await readFile(join(isolated.rootDir, "docker-images", "gateway-image"), "utf8")).toBe(
+      `${interrupted.priorImage}\n`,
+    );
+    expect(await readFile(join(isolated.rootDir, "docker-images", "gateway-running"), "utf8")).toBe(
+      "true\n",
+    );
+  });
+
+  it.each(["missing", "altered", "duplicate", "trailing newline"] as const)(
+    "rejects a same-service pre-ID Gateway with a %s transaction label",
+    async (mutation) => {
+      const isolated = await createDockerSetupSandbox();
+      const interrupted = await beginInterruptedGatewayCreateIntent(isolated);
+      expect(interrupted.result.signal).toBe("SIGKILL");
+      const journal = await readFile(interrupted.journalPath, "utf8");
+      const candidateLabel = readJournalValue(journal, "gateway-candidate-label");
+      const containerPath = dockerStubContainerPath(isolated, interrupted.candidateGateway);
+      const labelsPath = join(containerPath, "labels.json");
+      const labels = JSON.parse(await readFile(labelsPath, "utf8")) as Record<string, string>;
+      if (mutation === "duplicate") {
+        await writeFile(
+          join(containerPath, "labels-inspect-json"),
+          [
+            `{"com.docker.compose.project":"openclaw",`,
+            `"com.docker.compose.service":"openclaw-gateway",`,
+            `"com.docker.compose.oneoff":"False",`,
+            `"ai.openclaw.verifier.gateway-candidate":"${candidateLabel}",`,
+            `"ai.openclaw.verifier.gateway-candidate":"${candidateLabel}"}`,
+          ].join(""),
+        );
+      } else {
+        if (mutation === "missing") {
+          delete labels["ai.openclaw.verifier.gateway-candidate"];
+        } else if (mutation === "altered") {
+          labels["ai.openclaw.verifier.gateway-candidate"] = "0".repeat(64);
+        } else {
+          labels["ai.openclaw.verifier.gateway-candidate"] = `${candidateLabel}\n`;
+        }
+        await writeFile(labelsPath, JSON.stringify(labels));
+      }
+      await resetDockerLog(isolated);
+
+      const recovery = await runVerifierDockerSetup(isolated, interrupted.env);
+      expect(recovery.status).not.toBe(0);
+      expect(recovery.stderr).toContain("does not match the exact Compose service identity");
+      const recoveryLines = await readDockerLogLines(isolated);
+      expect(recoveryLines).not.toContain(`stop ${interrupted.candidateGateway}`);
+      expect(await stat(interrupted.transactionRoot)).toBeDefined();
+    },
+  );
+
+  it("rejects an ambiguous pre-ID Gateway service without stopping either candidate", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const interrupted = await beginInterruptedGatewayCreateIntent(isolated);
+    const otherGateway = "f".repeat(64);
+    const journal = await readFile(interrupted.journalPath, "utf8");
+    const runtimeImage = readJournalValue(journal, "runtime-image-id");
+    const candidateLabel = readJournalValue(journal, "gateway-candidate-label");
+    await writeDockerStubContainer(isolated, otherGateway, {
+      image: runtimeImage,
+      running: true,
+      project: "openclaw",
+      service: "openclaw-gateway",
+      candidateLabel,
+    });
+    await resetDockerLog(isolated);
+
+    const recovery = await runVerifierDockerSetup(isolated, {
+      ...interrupted.env,
+      DOCKER_STUB_GATEWAY_SERVICE_IDS: `${interrupted.candidateGateway}\\n${otherGateway}`,
+    });
+    expect(recovery.status).not.toBe(0);
+    expect(recovery.stderr).toContain("ambiguous Gateway service container identity");
+    const recoveryLines = await readDockerLogLines(isolated);
+    expect(recoveryLines).not.toContain(`stop ${interrupted.candidateGateway}`);
+    expect(recoveryLines).not.toContain(`stop ${otherGateway}`);
+    expect(
+      await readFile(
+        join(dockerStubContainerPath(isolated, interrupted.candidateGateway), "running"),
+        "utf8",
+      ),
+    ).toBe("true\n");
+    expect(
+      await readFile(join(dockerStubContainerPath(isolated, otherGateway), "running"), "utf8"),
+    ).toBe("true\n");
+    const verifierStateRoot = dirname(interrupted.transactionRoot);
+    const markerPath = join(
+      dirname(verifierStateRoot),
+      `.openclaw-verifier-active-${createHash("sha256").update(verifierStateRoot).digest("hex")}`,
+    );
+    expect(await stat(interrupted.transactionRoot)).toBeDefined();
+    expect(await stat(join(verifierStateRoot, "lock"))).toBeDefined();
+    expect(await stat(markerPath)).toBeDefined();
+    expect(recovery.stderr).toContain("Retaining verifier journal, lock, and active-state marker");
+  });
+
+  it("rejects a pre-ID Gateway with the exact transaction label but a different image", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const interrupted = await beginInterruptedGatewayCreateIntent(isolated);
+    await writeFile(
+      join(dockerStubContainerPath(isolated, interrupted.candidateGateway), "image"),
+      `sha256:${"f".repeat(64)}\n`,
+    );
+    await resetDockerLog(isolated);
+
+    const recovery = await runVerifierDockerSetup(isolated, interrupted.env);
+    expect(recovery.status).not.toBe(0);
+    expect(recovery.stderr).toContain("does not match the exact runtime image");
+    expect(await readDockerLogLines(isolated)).not.toContain(
+      `stop ${interrupted.candidateGateway}`,
+    );
+    expect(await stat(interrupted.transactionRoot)).toBeDefined();
+  });
+
+  it("stops the journaled post-ID Gateway but rejects its same-label service replacement", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await prepareReadOnlyVerifierFixture(isolated);
+    const stateRoot = join(isolated.stateRoot, "operator-state", "openclaw", "verifier");
+    const transactionRoot = join(stateRoot, "transaction");
+    const journalPath = join(transactionRoot, "journal");
+    const readyPath = join(isolated.stateRoot, "gateway-started-ready");
+    const continuePath = join(isolated.stateRoot, "gateway-started-continue");
+    const verifierEnv = {
+      ...fixture.env,
+      OPENCLAW_GATEWAY_TOKEN: undefined,
+      DOCKER_STUB_OLD_GATEWAY_ID: "9".repeat(64),
+      DOCKER_STUB_OLD_GATEWAY_IMAGE: `sha256:${"8".repeat(64)}`,
+      DOCKER_STUB_OLD_GATEWAY_RUNNING: "true",
+    };
+    const release = mutateAtTransactionStateBarrier({
+      readyPath,
+      continuePath,
+      phase: "gateway-started",
+      stateRoot,
+      mutate: async () => undefined,
+    });
+    const [interrupted] = await Promise.all([
+      runVerifierDockerSetup(isolated, {
+        ...verifierEnv,
+        OPENCLAW_TEST_TRANSACTION_STATE_PHASE: "gateway-started",
+        OPENCLAW_TEST_TRANSACTION_STATE_READY: readyPath,
+        OPENCLAW_TEST_TRANSACTION_STATE_CONTINUE: continuePath,
+        OPENCLAW_TEST_TRANSACTION_STATE_SIGKILL: "1",
+      }),
+      release,
+    ]);
+    expect(interrupted.signal).toBe("SIGKILL");
+    const journal = await readFile(journalPath, "utf8");
+    const journaledGateway = readJournalValue(journal, "new-gateway-id");
+    const replacementGateway = "f".repeat(64);
+    const runtimeImage = readJournalValue(journal, "runtime-image-id");
+    const candidateLabel = readJournalValue(journal, "gateway-candidate-label");
+    await writeDockerStubContainer(isolated, replacementGateway, {
+      image: runtimeImage,
+      running: true,
+      project: "openclaw",
+      service: "openclaw-gateway",
+      candidateLabel,
+    });
+    await setDockerStubCurrentGateway(isolated, replacementGateway, runtimeImage, true);
+    await resetDockerLog(isolated);
+
+    const recovery = await runVerifierDockerSetup(isolated, verifierEnv);
+    expect(recovery.status).not.toBe(0);
+    expect(recovery.stderr).toContain("different container under the Gateway service identity");
+    const recoveryLines = await readDockerLogLines(isolated);
+    expect(recoveryLines).toContain(`stop ${journaledGateway}`);
+    expect(recoveryLines).not.toContain(`stop ${replacementGateway}`);
+    expect(await stat(transactionRoot)).toBeDefined();
+  });
+
+  it("validates protected semantics before socket publication without writes or secret output", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await prepareReadOnlyVerifierFixture(isolated, {
+      token: "protected-summary-secret",
+    });
+    await resetDockerLog(isolated);
+    const result = await runVerifierDockerSetup(isolated, {
+      ...fixture.env,
+      OPENCLAW_GATEWAY_TOKEN: "protected-summary-secret",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).not.toContain("protected-summary-secret");
+    expect(result.stdout).toContain("$OPENCLAW_GATEWAY_TOKEN");
+    const lines = await readDockerLogLines(isolated);
+    expect(lines.some((line) => line.includes(" onboard "))).toBe(false);
+    expect(lines.some((line) => line.includes(" config set "))).toBe(false);
+    expect(lines.some((line) => line.includes("--entrypoint sh openclaw-gateway"))).toBe(false);
+    expect(lines.some((line) => line.includes("dist/index.js config get"))).toBe(false);
+    const gatewayRecreate = lines.findIndex((line) =>
+      line.includes("up -d --no-deps --force-recreate openclaw-gateway"),
+    );
+    expect(gatewayRecreate).toBeGreaterThanOrEqual(0);
+    expect(await readFile(fixture.configPath, "utf8")).toContain("protected-summary-secret");
+  });
+
+  it("does not re-read protected semantics through the path-following container CLI", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await prepareReadOnlyVerifierFixture(isolated);
+    const result = await runVerifierDockerSetup(isolated, {
+      ...fixture.env,
+      DOCKER_STUB_CONFIG_BIND: "loopback",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(await readDockerLog(isolated)).not.toContain("dist/index.js config get");
+  });
+
+  it.each(["bytes", "mode"] as const)(
+    "rejects protected config %s drift before socket publication",
+    async (kind) => {
+      const isolated = await createDockerSetupSandbox();
+      const fixture = await prepareReadOnlyVerifierFixture(isolated);
+      const result = await runVerifierDockerSetup(isolated, {
+        ...fixture.env,
+        DOCKER_STUB_MUTATE_CONFIG_PATH: fixture.configPath,
+        DOCKER_STUB_MUTATE_CONFIG_KIND: kind,
+      });
+      expect(result.status).not.toBe(0);
+      expect(await readDockerLog(isolated)).not.toContain(
+        "up -d --no-deps --force-recreate openclaw-gateway",
+      );
+    },
+  );
+
+  it.each(["hardlink", "parent"] as const)(
+    "rejects protected config %s identity drift before socket publication",
+    async (kind) => {
+      const isolated = await createDockerSetupSandbox();
+      const fixture = await prepareReadOnlyVerifierFixture(isolated);
+      const victim = join(isolated.rootDir, `protected-${kind}-victim`);
+      await writeFile(victim, await readFile(fixture.configPath));
+      const displacedParent = join(isolated.rootDir, `protected-${kind}-displaced`);
+      const result = await runVerifierDockerSetup(isolated, {
+        ...fixture.env,
+        DOCKER_STUB_SUBSTITUTE_PATH: fixture.configPath,
+        DOCKER_STUB_SUBSTITUTE_KIND: kind,
+        DOCKER_STUB_SUBSTITUTE_VICTIM: victim,
+        DOCKER_STUB_SUBSTITUTE_DISPLACED_PARENT: kind === "parent" ? displacedParent : undefined,
+      });
+      expect(result.status).not.toBe(0);
+      expect(await readDockerLog(isolated)).not.toContain(
+        "up -d --no-deps --force-recreate openclaw-gateway",
+      );
+    },
+  );
+
+  it("persists and reloads the explicit protected-config choice", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await prepareReadOnlyVerifierFixture(isolated);
+    const first = await runVerifierDockerSetup(isolated, fixture.env);
+    expect(first.status, first.stderr).toBe(0);
+    expect(await readFile(join(isolated.rootDir, ".env"), "utf8")).toContain(
+      "OPENCLAW_SETUP_READ_ONLY_CONFIG=1",
+    );
+    const second = await runVerifierDockerSetup(isolated, {
+      ...fixture.env,
+      OPENCLAW_SETUP_READ_ONLY_CONFIG: undefined,
+    });
+    expect(second.status, second.stderr).toBe(0);
+  });
+
+  it("retains metadata-only protected config state across crash recovery", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const interrupted = await beginInterruptedReadOnlyVerifier(isolated);
+    expect(interrupted.result.signal).toBe("SIGKILL");
+    await expect(stat(join(interrupted.transactionRoot, "config.backup"))).rejects.toThrow();
+    const journal = await readFile(interrupted.journalPath, "utf8");
+    expect(readJournalValue(journal, "transaction-format")).toBe("2");
+    expect(readJournalValue(journal, "config-policy")).toBe("read-only");
+    expect(readJournalValue(journal, "config-dev")).toMatch(/^[0-9]+$/u);
+    expect(readJournalValue(journal, "config-ino")).toMatch(/^[0-9]+$/u);
+
+    const recovery = await runVerifierDockerSetup(isolated, interrupted.env);
+    expect(recovery.status).not.toBe(0);
+    await expect(stat(interrupted.transactionRoot)).rejects.toThrow();
+    const retry = await runVerifierDockerSetup(isolated, interrupted.env);
+    expect(retry.status, retry.stderr).toBe(0);
+  });
+
+  it.each([
+    { description: "missing format", remove: ["transaction-format"] },
+    { description: "missing policy", remove: ["config-policy"] },
+    {
+      description: "missing all current discriminator fields",
+      remove: [
+        "transaction-format",
+        "config-policy",
+        "config-dev",
+        "config-ino",
+        "gateway-compose-project",
+        "gateway-compose-service",
+        "gateway-candidate-label",
+        "gateway-create-binding",
+      ],
+    },
+  ])("rejects a current journal with $description", async ({ remove }) => {
+    const isolated = await createDockerSetupSandbox();
+    const interrupted = await beginInterruptedReadOnlyVerifier(isolated);
+    await removeJournalKeys(interrupted.journalPath, remove);
+    const result = await runVerifierDockerSetup(isolated, interrupted.env);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/journal|policy|marker/iu);
+  });
+
+  it.each([
+    { mutation: "duplicate", field: "config-policy", value: "read-only" },
+    { mutation: "duplicate", field: "transaction-format", value: "2" },
+    { mutation: "duplicate", field: "gateway-candidate-label", value: "0".repeat(64) },
+    { mutation: "altered", field: "config-policy", value: "write" },
+    { mutation: "altered", field: "transaction-format", value: "legacy" },
+    { mutation: "altered", field: "gateway-candidate-label", value: "0".repeat(64) },
+  ] as const)(
+    "rejects a $mutation current journal $field field",
+    async ({ mutation, field, value }) => {
+      const isolated = await createDockerSetupSandbox();
+      const interrupted = await beginInterruptedReadOnlyVerifier(isolated);
+      if (mutation === "duplicate") {
+        const journal = await readFile(interrupted.journalPath, "utf8");
+        await writeFile(interrupted.journalPath, `${journal}${field}=${value}\n`);
+      } else {
+        await rewriteJournalValues(interrupted.journalPath, { [field]: value });
+      }
+      const result = await runVerifierDockerSetup(isolated, interrupted.env);
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toMatch(/journal|policy|marker/iu);
+    },
+  );
+
+  it.each([
+    { field: "configPolicy", value: "write" },
+    { field: "transactionFormat", value: "legacy" },
+  ] as const)("rejects an altered current active-marker $field", async ({ field, value }) => {
+    const isolated = await createDockerSetupSandbox();
+    const interrupted = await beginInterruptedReadOnlyVerifier(isolated);
+    const marker = JSON.parse(await readFile(interrupted.markerPath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    await writeFile(interrupted.markerPath, `${JSON.stringify({ ...marker, [field]: value })}\n`, {
+      mode: 0o600,
+    });
+    const result = await runVerifierDockerSetup(isolated, interrupted.env);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("active-state marker contract is unsafe");
+  });
+
+  it("rejects a recomputed legacy downgrade of metadata-only read-only recovery", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const interrupted = await beginInterruptedReadOnlyVerifier(isolated);
+    const journal = await readFile(interrupted.journalPath, "utf8");
+    const transactionId = readJournalValue(journal, "transaction-id");
+    const marker = JSON.parse(await readFile(interrupted.markerPath, "utf8")) as {
+      markerState: "active" | "cleanup";
+      statePath: string;
+      stateDev: string;
+      stateIno: string;
+      parentDev: string;
+      parentIno: string;
+      stateTokenDigest: string;
+    };
+    const legacyBinding = createHash("sha256")
+      .update(`${marker.stateTokenDigest}\0${transactionId}`)
+      .digest("hex");
+    await removeJournalKeys(interrupted.journalPath, [
+      "transaction-format",
+      "config-policy",
+      "config-dev",
+      "config-ino",
+      "gateway-compose-project",
+      "gateway-compose-service",
+      "gateway-candidate-label",
+      "gateway-create-binding",
+    ]);
+    await rewriteJournalValues(interrupted.journalPath, {
+      "operation-binding": legacyBinding,
+    });
+    await writeFile(
+      interrupted.markerPath,
+      `${JSON.stringify({
+        contractVersion: 2,
+        markerState: marker.markerState,
+        statePath: marker.statePath,
+        stateDev: marker.stateDev,
+        stateIno: marker.stateIno,
+        parentDev: marker.parentDev,
+        parentIno: marker.parentIno,
+        stateTokenDigest: marker.stateTokenDigest,
+        operationId: transactionId,
+        operationBinding: legacyBinding,
+      })}\n`,
+      { mode: 0o600 },
+    );
+    const envPath = join(isolated.rootDir, ".env");
+    const envSentinel = "DOWNGRADE_SENTINEL=preserved\n";
+    const configBefore = await readFile(interrupted.configPath);
+    await writeFile(envPath, envSentinel, { mode: 0o600 });
+
+    const result = await runVerifierDockerSetup(isolated, interrupted.env);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("missing its captured backup");
+    expect(await readFile(envPath, "utf8")).toBe(envSentinel);
+    expect(await readFile(interrupted.configPath)).toEqual(configBefore);
+    expect(await stat(interrupted.transactionRoot)).toBeDefined();
+  });
+
+  it("retains genuine legacy config-writing transaction recovery", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const interrupted = await beginInterruptedVerifierTransaction(isolated);
+    expect(interrupted.interrupted.signal).toBe("SIGKILL");
+    const journal = await readFile(interrupted.journalPath, "utf8");
+    const transactionId = readJournalValue(journal, "transaction-id");
+    const stateRoot = interrupted.verifierStateRoot;
+    const markerPath = join(
+      dirname(stateRoot),
+      `.openclaw-verifier-active-${createHash("sha256").update(stateRoot).digest("hex")}`,
+    );
+    const marker = JSON.parse(await readFile(markerPath, "utf8")) as {
+      markerState: "active" | "cleanup";
+      statePath: string;
+      stateDev: string;
+      stateIno: string;
+      parentDev: string;
+      parentIno: string;
+      stateTokenDigest: string;
+      operationId: string;
+    };
+    const legacyBinding = createHash("sha256")
+      .update(`${marker.stateTokenDigest}\0${transactionId}`)
+      .digest("hex");
+    await removeJournalKeys(interrupted.journalPath, [
+      "transaction-format",
+      "config-policy",
+      "config-dev",
+      "config-ino",
+      "gateway-compose-project",
+      "gateway-compose-service",
+      "gateway-candidate-label",
+      "gateway-create-binding",
+    ]);
+    await rewriteJournalValues(interrupted.journalPath, {
+      "operation-binding": legacyBinding,
+    });
+    await writeFile(
+      markerPath,
+      `${JSON.stringify({
+        contractVersion: 2,
+        markerState: marker.markerState,
+        statePath: marker.statePath,
+        stateDev: marker.stateDev,
+        stateIno: marker.stateIno,
+        parentDev: marker.parentDev,
+        parentIno: marker.parentIno,
+        stateTokenDigest: marker.stateTokenDigest,
+        operationId: transactionId,
+        operationBinding: legacyBinding,
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    const recovery = await runVerifierDockerSetup(isolated, interrupted.verifierEnv);
+    expect(recovery.status).not.toBe(0);
+    await expect(stat(interrupted.transactionRoot)).rejects.toThrow();
   });
 
   it("rolls back exact publication state when Gateway readiness fails", async () => {
@@ -2028,6 +3160,7 @@ describe("scripts/docker/setup.sh", () => {
 
   it("loads the persisted verifier overlay before deriving setup defaults", async () => {
     const activeSandbox = requireSandbox(sandbox);
+    await resetSharedDockerSetupFixture(activeSandbox);
     await writeFile(join(activeSandbox.rootDir, "Dockerfile.sandbox"), "FROM scratch\n");
     await writeFile(join(activeSandbox.rootDir, "Dockerfile.sandbox-verifier"), "FROM scratch\n");
     await writeFile(
@@ -2385,13 +3518,15 @@ describe("scripts/docker/setup.sh", () => {
         stateIno: string;
         statePath: string;
         stateTokenDigest: string;
+        transactionFormat: string;
+        configPolicy: string;
       };
       const stateToken = (
         await readFile(join(displacedStateRoot, ".state-instance"), "utf8")
       ).trim();
       const stateTokenDigest = createHash("sha256").update(stateToken).digest("hex");
       expect(marker).toMatchObject({
-        contractVersion: 2,
+        contractVersion: 3,
         markerState: "active",
         parentDev: String((await stat(shortParent)).dev),
         parentIno: String((await stat(shortParent)).ino),
@@ -2399,10 +3534,16 @@ describe("scripts/docker/setup.sh", () => {
         stateIno: String(captured.pinnedIdentity.ino),
         statePath: verifierStateRoot,
         stateTokenDigest,
+        transactionFormat: "2",
+        configPolicy: "write",
       });
       expect(marker.operationId).toMatch(/^[a-f0-9]{32}$/u);
       expect(marker.operationBinding).toBe(
-        createHash("sha256").update(`${stateTokenDigest}\0${marker.operationId}`).digest("hex"),
+        createHash("sha256")
+          .update(
+            `${stateTokenDigest}\0${marker.operationId}\0${marker.transactionFormat}\0${marker.configPolicy}`,
+          )
+          .digest("hex"),
       );
       if (replacementKind === "directory") {
         expect(await readFile(replacementMarker, "utf8")).toBe("replacement-preserved\n");

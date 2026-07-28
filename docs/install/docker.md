@@ -222,20 +222,77 @@ repo paths such as `/workspace/astino`. Without the extra compose file, those
 paths do not exist in the container even though the gateway itself may still
 start and pass basic health checks.
 
+### Rebuild with an existing protected config
+
+The setup script normally runs interactive onboarding and writes Docker defaults
+to `openclaw.json`. For an existing installation whose config is protected
+against replacement, opt into the read-only config path:
+
+```bash
+OPENCLAW_SETUP_READ_ONLY_CONFIG=1 ./scripts/docker/setup.sh
+```
+
+This mode is only supported with guarded verifier publication. It requires the
+existing config, workspace, and SSH bind-source directories. It is a macOS-only
+path and requires the exact captured `openclaw.json` inode to already carry the
+user-immutable `uchg` flag. Before any config-derived token or setup-state
+write, the script captures `openclaw.json` as one direct, single-link regular
+file under its canonical parent, verifies `uchg` through the fixed host
+`/usr/bin/stat` contract, and then performs a separate no-follow semantic read.
+It requires `gateway.mode=local`, requires `gateway.bind` to exactly equal
+`OPENCLAW_GATEWAY_BIND`, and requires the installed sandbox policy to already
+be `mode=non-main`, `scope=agent`, and `workspaceAccess=none`. Exact bind
+equality is required because Compose passes `OPENCLAW_GATEWAY_BIND` as the
+Gateway's explicit `--bind` argument.
+
+The script skips ownership normalization, interactive onboarding, and every
+setup-time OpenClaw config write. Guarded verifier publication binds its
+versioned transaction format and read-only policy into both the active marker
+and journal. The journal retains only the protected config's identity, mode,
+parent identity, and digest; it never writes plaintext config bytes into
+verifier state. Semantic validation, token resolution, transaction execution,
+commit, and recovery each use separately opened, no-follow reads and revalidate
+the captured identity, mode, parent, digest, and `uchg` flag. The flag is also
+checked immediately before the socket-equipped Gateway recreation and
+immediately after container creation. The script never clears or changes the
+flag or the config ACL, and it never replaces the protected file.
+
+The operator remains part of this trust boundary. Clearing `uchg` during setup
+voids the execution-continuity guarantee, just as replacing the owner-controlled
+verifier-state parent voids that state-root trust anchor. The script fails
+closed and retains recoverable transaction state when the flag or captured file
+identity changes. Before Gateway recreation, the durable journal records an
+authenticated create intent bound to the prior Gateway ID, exact runtime image,
+Compose project/service identity, and a transaction-specific candidate label
+derived from the active marker's cryptographically random transaction ID. The
+generated overlay applies that label before recreation. After creation, the
+journal records the exact new container ID before checking `uchg` again.
+Recovery resolves that exact Compose service and requires the exact transaction
+label, image, and Compose labels before stopping a candidate ahead of
+protected-config validation. It removes the stopped container only after those
+checks pass; a missing, duplicate, altered, substituted, or ambiguous identity
+retains the journal and fails closed.
+Auth, model, channel, and agent settings remain untouched, and the setup summary
+does not print the gateway token. An explicitly supplied choice is persisted in
+the project `.env` so an interrupted retry does not silently return to the
+config-writing path. Set `OPENCLAW_SETUP_READ_ONLY_CONFIG=0` explicitly to
+return to normal setup behavior.
+
 ### Environment variables
 
 The setup script accepts these optional environment variables:
 
-| Variable                       | Purpose                                                                               |
-| ------------------------------ | ------------------------------------------------------------------------------------- |
-| `OPENCLAW_IMAGE`               | Use a remote image instead of building locally                                        |
-| `OPENCLAW_DOCKER_APT_PACKAGES` | Install extra apt packages during build (space-separated)                             |
-| `OPENCLAW_EXTENSIONS`          | Pre-install extension deps at build time (space-separated names)                      |
-| `OPENCLAW_INSTALL_BROWSER`     | Bake Chromium and Linux browser deps into local builds (default `1`; set `0` to skip) |
-| `OPENCLAW_EXTRA_MOUNTS`        | Extra host bind mounts (comma-separated `source:target[:opts]`)                       |
-| `OPENCLAW_HOME_VOLUME`         | Persist `/home/node` in a named Docker volume                                         |
-| `OPENCLAW_SANDBOX`             | Opt in to sandbox bootstrap (`1`, `true`, `yes`, `on`)                                |
-| `OPENCLAW_DOCKER_SOCKET`       | Override Docker socket path                                                           |
+| Variable                          | Purpose                                                                                |
+| --------------------------------- | -------------------------------------------------------------------------------------- |
+| `OPENCLAW_IMAGE`                  | Use a remote image instead of building locally                                         |
+| `OPENCLAW_DOCKER_APT_PACKAGES`    | Install extra apt packages during build (space-separated)                              |
+| `OPENCLAW_EXTENSIONS`             | Pre-install extension deps at build time (space-separated names)                       |
+| `OPENCLAW_INSTALL_BROWSER`        | Bake Chromium and Linux browser deps into local builds (default `1`; set `0` to skip)  |
+| `OPENCLAW_EXTRA_MOUNTS`           | Extra host bind mounts (comma-separated `source:target[:opts]`)                        |
+| `OPENCLAW_HOME_VOLUME`            | Persist `/home/node` in a named Docker volume                                          |
+| `OPENCLAW_SANDBOX`                | Opt in to sandbox bootstrap (`1`, `true`, `yes`, `on`)                                 |
+| `OPENCLAW_DOCKER_SOCKET`          | Override Docker socket path                                                            |
+| `OPENCLAW_SETUP_READ_ONLY_CONFIG` | Validate and preserve an existing protected `openclaw.json` (`1`, `true`, `yes`, `on`) |
 
 ### Health checks
 
