@@ -239,11 +239,83 @@ user-immutable `uchg` flag. Before any config-derived token or setup-state
 write, the script captures `openclaw.json` as one direct, single-link regular
 file under its canonical parent, verifies `uchg` through the fixed host
 `/usr/bin/stat` contract, and then performs a separate no-follow semantic read.
-It requires `gateway.mode=local`, requires `gateway.bind` to exactly equal
-`OPENCLAW_GATEWAY_BIND`, and requires the installed sandbox policy to already
-be `mode=non-main`, `scope=agent`, and `workspaceAccess=none`. Exact bind
-equality is required because Compose passes `OPENCLAW_GATEWAY_BIND` as the
-Gateway's explicit `--bind` argument.
+It requires `gateway.mode=local` and requires the installed sandbox policy to
+already be `mode=non-main`, `scope=agent`, and `workspaceAccess=none`. By
+default, protected `gateway.bind` must exactly equal `OPENCLAW_GATEWAY_BIND`
+because Compose passes the latter as the Gateway's explicit `--bind` argument.
+
+An installation that already authorizes a different Docker CLI bind may opt
+into that exact mismatch explicitly:
+
+```bash
+OPENCLAW_SETUP_READ_ONLY_CONFIG=1 \
+OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=1 \
+OPENCLAW_GATEWAY_BIND=lan \
+./scripts/docker/setup.sh
+```
+
+The override is valid only for read-only guarded verifier publication and only
+when `OPENCLAW_GATEWAY_BIND` is explicitly supplied or reloaded from the
+persisted setup environment. It does not mutate the protected config. It binds
+the configured bind, runtime bind, and authorization into the transaction
+journal, operation binding, active marker, and Gateway create identity, and
+revalidates the same protected semantics during recovery. The authorization
+must represent an actual mismatch; it cannot be inferred from the normal `lan`
+default.
+
+Recovery distinguishes three exact state contracts: genuine legacy version 2,
+the pre-override version 3 journal and marker emitted by the b48 deployment,
+and current version 4 state. Version 3 is accepted only with its original
+no-override journal shape and authenticated marker and create bindings; adding
+current bind fields, removing legacy fields, or mixing versions fails closed.
+For an authenticated replacement, structural journal, marker, image, Compose
+service, container ID, and candidate-label validation is independent of the
+current live bind policy. Recovery stops only that exact candidate before
+checking whether the current bind and override authorization still permit
+rollback. A revoked override or changed runtime bind leaves the candidate
+stopped and retains the immutable transaction state for an authorized retry.
+The exception is an exactly authenticated `committed` journal: publication and
+readiness have already succeeded, so recovery revalidates the committed
+transaction, protected-config identity, and exact running Gateway using the
+journaled policy, clears its transaction, lock, marker, and temporary image
+tags, and exits successfully. It may additionally remove the journaled old
+image only when the already-committed authenticated `gc-old-image=1` policy is
+present and the image has no consumers. It does not consult a newly changed
+live bind policy, roll back, stop or recreate the Gateway, or begin another
+publication.
+
+When that cleanup invocation explicitly sets
+`OPENCLAW_SETUP_READ_ONLY_CONFIG=0` without a contradictory override, the
+cleanup atomically persists both read-only mode and bind-override authorization
+as disabled after committed tag/optional old-image cleanup succeeds but while
+the authenticated transaction, marker, and lifecycle lock are still retained.
+After the atomic rename, setup fsyncs the final `.env` file and then its
+repository directory. Only after those best-effort filesystem persistence
+barriers succeed are the owned recovery artifacts removed and the lock
+released. This ordering is the fail-closed contract for ordinary process
+failure, `SIGKILL`, and atomic-rename recovery: a failure before the rename
+leaves the old environment and recoverable committed state intact. A failure
+after the rename but before either fsync may leave the disabled values visible
+without completing the barrier, so recovery keeps the transaction and lock and
+repeats the same file-plus-parent sync before cleanup. An abrupt process stop
+after both fsyncs likewise leaves the committed state available for a plain
+retry, which recognizes the persisted `0/0` handoff and completes cleanup
+without republishing, rolling back, or restarting the Gateway. A concurrent
+setup cannot pass the lifecycle lock before this handoff.
+
+This bounded path uses Node's portable `fsync` support on macOS and Linux. It
+does not use macOS `F_FULLFSYNC`, so it does not claim guaranteed persistence
+across sudden power loss; that stronger platform-specific durability contract
+is outside this slice. A later ordinary invocation remains in normal
+config-writing mode. Explicitly combining that setting with
+`OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=1` is still rejected after
+the committed state and running Gateway are authenticated; recovery state is
+retained and the contradictory values are not persisted.
+
+This option is not a more restrictive bind. For example, authorizing runtime
+`lan` while protected config says `loopback` preserves the existing Docker
+exposure and can make the Gateway reachable from the LAN through published
+ports. Use it only when that exposure is already intended and authorized.
 
 The script skips ownership normalization, interactive onboarding, and every
 setup-time OpenClaw config write. Guarded verifier publication binds its
@@ -276,23 +348,28 @@ Auth, model, channel, and agent settings remain untouched, and the setup summary
 does not print the gateway token. An explicitly supplied choice is persisted in
 the project `.env` so an interrupted retry does not silently return to the
 config-writing path. Set `OPENCLAW_SETUP_READ_ONLY_CONFIG=0` explicitly to
-return to normal setup behavior.
+return to normal setup behavior. That explicit process-level choice also
+persists the effective bind-override authorization as disabled when an older
+protected run left it enabled. An explicitly supplied contradictory
+`OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=1` still fails instead of
+being silently ignored.
 
 ### Environment variables
 
 The setup script accepts these optional environment variables:
 
-| Variable                          | Purpose                                                                                |
-| --------------------------------- | -------------------------------------------------------------------------------------- |
-| `OPENCLAW_IMAGE`                  | Use a remote image instead of building locally                                         |
-| `OPENCLAW_DOCKER_APT_PACKAGES`    | Install extra apt packages during build (space-separated)                              |
-| `OPENCLAW_EXTENSIONS`             | Pre-install extension deps at build time (space-separated names)                       |
-| `OPENCLAW_INSTALL_BROWSER`        | Bake Chromium and Linux browser deps into local builds (default `1`; set `0` to skip)  |
-| `OPENCLAW_EXTRA_MOUNTS`           | Extra host bind mounts (comma-separated `source:target[:opts]`)                        |
-| `OPENCLAW_HOME_VOLUME`            | Persist `/home/node` in a named Docker volume                                          |
-| `OPENCLAW_SANDBOX`                | Opt in to sandbox bootstrap (`1`, `true`, `yes`, `on`)                                 |
-| `OPENCLAW_DOCKER_SOCKET`          | Override Docker socket path                                                            |
-| `OPENCLAW_SETUP_READ_ONLY_CONFIG` | Validate and preserve an existing protected `openclaw.json` (`1`, `true`, `yes`, `on`) |
+| Variable                                              | Purpose                                                                                |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `OPENCLAW_IMAGE`                                      | Use a remote image instead of building locally                                         |
+| `OPENCLAW_DOCKER_APT_PACKAGES`                        | Install extra apt packages during build (space-separated)                              |
+| `OPENCLAW_EXTENSIONS`                                 | Pre-install extension deps at build time (space-separated names)                       |
+| `OPENCLAW_INSTALL_BROWSER`                            | Bake Chromium and Linux browser deps into local builds (default `1`; set `0` to skip)  |
+| `OPENCLAW_EXTRA_MOUNTS`                               | Extra host bind mounts (comma-separated `source:target[:opts]`)                        |
+| `OPENCLAW_HOME_VOLUME`                                | Persist `/home/node` in a named Docker volume                                          |
+| `OPENCLAW_SANDBOX`                                    | Opt in to sandbox bootstrap (`1`, `true`, `yes`, `on`)                                 |
+| `OPENCLAW_DOCKER_SOCKET`                              | Override Docker socket path                                                            |
+| `OPENCLAW_SETUP_READ_ONLY_CONFIG`                     | Validate and preserve an existing protected `openclaw.json` (`1`, `true`, `yes`, `on`) |
+| `OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE` | Explicitly authorize the protected/runtime bind mismatch (`1`, `true`, `yes`, `on`)    |
 
 ### Health checks
 

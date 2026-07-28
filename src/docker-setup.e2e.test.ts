@@ -60,6 +60,12 @@ current_gateway_id() {
   fi
   return 0
 }
+is_modeled_gateway_container() {
+  container_id="$1"
+  [[ -d "$container_dir/$container_id" ]] ||
+    [[ -n "\${DOCKER_STUB_OLD_GATEWAY_ID:-}" &&
+      "$container_id" == "$DOCKER_STUB_OLD_GATEWAY_ID" ]]
+}
 container_field() {
   container_id="$1"
   field="$2"
@@ -76,8 +82,9 @@ container_field() {
       oneoff) printf '%s' False ;;
       candidate-label) printf '%s' "\${DOCKER_STUB_OLD_GATEWAY_CANDIDATE_LABEL:-}" ;;
     esac
+    return 0
   fi
-  return 0
+  return 1
 }
 record_gateway_container() {
   container_id="$1"
@@ -234,6 +241,10 @@ if [[ "\${1:-}" == "ps" ]]; then
 fi
 if [[ "\${1:-}" == "stop" ]]; then
   gateway_id="\${!#}"
+  if ! is_modeled_gateway_container "$gateway_id"; then
+    echo "stop-missing $gateway_id" >>"$log"
+    exit 1
+  fi
   echo "stop $gateway_id" >>"$log"
   if [[ -f "$container_dir/$gateway_id/running" ]]; then
     printf '%s\n' false >"$container_dir/$gateway_id/running"
@@ -245,9 +256,21 @@ if [[ "\${1:-}" == "stop" ]]; then
 fi
 if [[ "\${1:-}" == "rm" ]]; then
   gateway_id="\${!#}"
+  if ! is_modeled_gateway_container "$gateway_id"; then
+    echo "rm-missing $gateway_id" >>"$log"
+    exit 1
+  fi
   echo "rm $gateway_id" >>"$log"
-  rm -rf "$container_dir/$gateway_id"
+  if [[ -n "$fail_match" && "$*" == *"$fail_match"* ]]; then
+    echo "rm-fail $gateway_id" >>"$log"
+    exit 1
+  fi
+  was_current=""
   if [[ "$gateway_id" == "$(current_gateway_id)" ]]; then
+    was_current="1"
+  fi
+  rm -rf "$container_dir/$gateway_id"
+  if [[ -n "$was_current" ]]; then
     rm -f "$gateway_id_file" "$gateway_running_file"
     touch "$gateway_absent_file"
   fi
@@ -255,6 +278,15 @@ if [[ "\${1:-}" == "rm" ]]; then
 fi
 if [[ "\${1:-}" == "inspect" ]]; then
   inspected_id="\${!#}"
+  if [[ "$*" == *"{{.Image}}"* &&
+    "$inspected_id" == "\${DOCKER_STUB_CONSUMER_ID:-}" &&
+    -n "\${DOCKER_STUB_CONSUMER_IMAGE:-}" ]]; then
+    printf '%s\n' "$DOCKER_STUB_CONSUMER_IMAGE"
+    exit 0
+  fi
+  if ! is_modeled_gateway_container "$inspected_id"; then
+    exit 1
+  fi
   if [[ "$*" == *"{{json .Mounts}}"* ]]; then
     if [[ -f "$image_dir/gateway-socket-source" ]]; then
       printf '[{"Type":"bind","Source":"%s","Destination":"/var/run/docker.sock","RW":true}]\n' \
@@ -266,31 +298,18 @@ if [[ "\${1:-}" == "inspect" ]]; then
     printf '%s\n' healthy
   elif [[ "$*" == *"{{.State.Running}}"* ]]; then
     running="$(container_field "$inspected_id" running)"
-    if [[ -n "$running" ]]; then
-      printf '%s\n' "$running"
-    elif [[ "$inspected_id" == "$(current_gateway_id)" && -f "$gateway_running_file" ]]; then
-      cat "$gateway_running_file"
-    else
-      printf '%s\n' true
-    fi
+    [[ -n "$running" ]] || exit 1
+    printf '%s\n' "$running"
   elif [[ "$*" == *"{{.Image}}"* ]]; then
-    if [[ "$inspected_id" == "\${DOCKER_STUB_CONSUMER_ID:-}" &&
-      -n "\${DOCKER_STUB_CONSUMER_IMAGE:-}" ]]; then
-      printf '%s\n' "$DOCKER_STUB_CONSUMER_IMAGE"
-    elif container_image="$(container_field "$inspected_id" image)" &&
-      [[ -n "$container_image" ]]; then
-      printf '%s\n' "$container_image"
-    elif [[ -f "$image_dir/gateway-image" ]]; then
-      cat "$image_dir/gateway-image"
-    else
-      printf '%s\n' "sha256:${"e".repeat(64)}"
-    fi
+    container_image="$(container_field "$inspected_id" image)"
+    [[ -n "$container_image" ]] || exit 1
+    printf '%s\n' "$container_image"
   elif [[ "$*" == *"{{json .Config.Labels}}"* ]]; then
     if [[ -f "$container_dir/$inspected_id/labels-inspect-json" ]]; then
       cat "$container_dir/$inspected_id/labels-inspect-json"
     elif [[ -f "$container_dir/$inspected_id/labels.json" ]]; then
       cat "$container_dir/$inspected_id/labels.json"
-    else
+    elif [[ "$inspected_id" == "\${DOCKER_STUB_OLD_GATEWAY_ID:-}" ]]; then
       node - \
         "\${DOCKER_STUB_COMPOSE_PROJECT:-openclaw}" \
         openclaw-gateway \
@@ -306,6 +325,8 @@ if (candidate !== "") {
 }
 process.stdout.write(JSON.stringify(labels));
 NODE
+    else
+      exit 1
     fi
   fi
   exit 0
@@ -467,7 +488,11 @@ if [[ "\${1:-}" == "compose" ]]; then
   if [[ "$*" == *" up -d "* && "$*" == *"openclaw-gateway"* && -n "\${OPENCLAW_IMAGE:-}" ]]; then
     gateway_image="$(lookup_image "$OPENCLAW_IMAGE")"
     gateway_image="\${gateway_image:-$OPENCLAW_IMAGE}"
-    gateway_id="${"d".repeat(64)}"
+    if [[ -n "$compose_candidate_label" ]]; then
+      gateway_id="${"d".repeat(64)}"
+    else
+      gateway_id="${"7".repeat(64)}"
+    fi
     record_gateway_container \
       "$gateway_id" "$gateway_image" true \
       "\${DOCKER_STUB_COMPOSE_PROJECT:-openclaw}" openclaw-gateway \
@@ -480,7 +505,11 @@ if [[ "\${1:-}" == "compose" ]]; then
   if [[ "$*" == *" create "* && "$*" == *"openclaw-gateway"* && -n "\${OPENCLAW_IMAGE:-}" ]]; then
     gateway_image="$(lookup_image "$OPENCLAW_IMAGE")"
     gateway_image="\${gateway_image:-$OPENCLAW_IMAGE}"
-    gateway_id="${"d".repeat(64)}"
+    if [[ -n "$compose_candidate_label" ]]; then
+      gateway_id="${"d".repeat(64)}"
+    else
+      gateway_id="${"7".repeat(64)}"
+    fi
     record_gateway_container \
       "$gateway_id" "$gateway_image" false \
       "\${DOCKER_STUB_COMPOSE_PROJECT:-openclaw}" openclaw-gateway \
@@ -819,10 +848,17 @@ process.stdout.write(\`\${value.dev}|\${value.ino}|\${missing ? "-" : "uchg"}\`)
   };
 }
 
-async function beginInterruptedReadOnlyVerifier(sandbox: DockerSetupSandbox) {
-  const fixture = await prepareReadOnlyVerifierFixture(sandbox);
+async function beginInterruptedReadOnlyVerifier(
+  sandbox: DockerSetupSandbox,
+  options: {
+    configOverrides?: Parameters<typeof prepareReadOnlyVerifierFixture>[1];
+    envOverrides?: Record<string, string | undefined>;
+  } = {},
+) {
+  const fixture = await prepareReadOnlyVerifierFixture(sandbox, options.configOverrides);
   const result = await runVerifierDockerSetup(sandbox, {
     ...fixture.env,
+    ...options.envOverrides,
     DOCKER_STUB_KILL_PARENT_MATCH: ":candidate-",
   });
   const stateRoot = join(sandbox.stateRoot, "operator-state", "openclaw", "verifier");
@@ -831,6 +867,7 @@ async function beginInterruptedReadOnlyVerifier(sandbox: DockerSetupSandbox) {
     .digest("hex")}`;
   return {
     ...fixture,
+    env: { ...fixture.env, ...options.envOverrides },
     result,
     stateRoot,
     transactionRoot: join(stateRoot, "transaction"),
@@ -839,13 +876,20 @@ async function beginInterruptedReadOnlyVerifier(sandbox: DockerSetupSandbox) {
   };
 }
 
-async function beginInterruptedGatewayCreateIntent(sandbox: DockerSetupSandbox) {
-  const fixture = await prepareReadOnlyVerifierFixture(sandbox);
+async function beginInterruptedGatewayCreateIntent(
+  sandbox: DockerSetupSandbox,
+  options: {
+    configOverrides?: Parameters<typeof prepareReadOnlyVerifierFixture>[1];
+    envOverrides?: Record<string, string | undefined>;
+  } = {},
+) {
+  const fixture = await prepareReadOnlyVerifierFixture(sandbox, options.configOverrides);
   const priorGateway = "9".repeat(64);
   const priorImage = `sha256:${"8".repeat(64)}`;
   const candidateGateway = "d".repeat(64);
   const env = {
     ...fixture.env,
+    ...options.envOverrides,
     OPENCLAW_GATEWAY_TOKEN: undefined,
     DOCKER_STUB_OLD_GATEWAY_ID: priorGateway,
     DOCKER_STUB_OLD_GATEWAY_IMAGE: priorImage,
@@ -856,6 +900,9 @@ async function beginInterruptedGatewayCreateIntent(sandbox: DockerSetupSandbox) 
     DOCKER_STUB_KILL_PARENT_MATCH: "up -d --no-deps --force-recreate openclaw-gateway",
   });
   const stateRoot = join(sandbox.stateRoot, "operator-state", "openclaw", "verifier");
+  const markerName = `.openclaw-verifier-active-${createHash("sha256")
+    .update(stateRoot)
+    .digest("hex")}`;
   return {
     ...fixture,
     result,
@@ -863,8 +910,54 @@ async function beginInterruptedGatewayCreateIntent(sandbox: DockerSetupSandbox) 
     priorGateway,
     priorImage,
     candidateGateway,
+    markerPath: join(dirname(stateRoot), markerName),
     transactionRoot: join(stateRoot, "transaction"),
     journalPath: join(stateRoot, "transaction", "journal"),
+  };
+}
+
+async function beginInterruptedCommittedOverride(sandbox: DockerSetupSandbox) {
+  const fixture = await prepareReadOnlyVerifierFixture(sandbox, { bind: "loopback" });
+  const stateRoot = join(sandbox.stateRoot, "operator-state", "openclaw", "verifier");
+  const transactionRoot = join(stateRoot, "transaction");
+  const readyPath = join(sandbox.stateRoot, "committed-fixture-ready");
+  const continuePath = join(sandbox.stateRoot, "committed-fixture-continue");
+  const verifierEnv = {
+    ...fixture.env,
+    OPENCLAW_GATEWAY_BIND: "lan",
+    OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: "1",
+  };
+  const release = mutateAtTransactionStateBarrier({
+    readyPath,
+    continuePath,
+    phase: "committed",
+    stateRoot,
+    mutate: async () => undefined,
+  });
+  const [result] = await Promise.all([
+    runVerifierDockerSetup(sandbox, {
+      ...verifierEnv,
+      OPENCLAW_TEST_TRANSACTION_STATE_PHASE: "committed",
+      OPENCLAW_TEST_TRANSACTION_STATE_READY: readyPath,
+      OPENCLAW_TEST_TRANSACTION_STATE_CONTINUE: continuePath,
+      OPENCLAW_TEST_TRANSACTION_STATE_SIGKILL: "1",
+    }),
+    release,
+  ]);
+  const journal = await readFile(join(transactionRoot, "journal"), "utf8");
+  const markerPath = join(
+    dirname(stateRoot),
+    `.openclaw-verifier-active-${createHash("sha256").update(stateRoot).digest("hex")}`,
+  );
+  return {
+    ...fixture,
+    result,
+    verifierEnv,
+    stateRoot,
+    transactionRoot,
+    markerPath,
+    committedGateway: readJournalValue(journal, "new-gateway-id"),
+    runtimeImage: readJournalValue(journal, "runtime-image-id"),
   };
 }
 
@@ -1115,6 +1208,70 @@ function readJournalValue(journal: string, key: string): string {
     throw new Error(`test journal has an ambiguous ${key} value`);
   }
   return matches[0];
+}
+
+async function rewriteGatewayCreateIntentAsB48(params: {
+  journalPath: string;
+  markerPath: string;
+}) {
+  const journal = await readFile(params.journalPath, "utf8");
+  const marker = JSON.parse(await readFile(params.markerPath, "utf8")) as {
+    markerState: "active" | "cleanup";
+    statePath: string;
+    stateDev: string;
+    stateIno: string;
+    parentDev: string;
+    parentIno: string;
+    stateTokenDigest: string;
+  };
+  const transactionId = readJournalValue(journal, "transaction-id");
+  const transactionFormat = readJournalValue(journal, "transaction-format");
+  const configPolicy = readJournalValue(journal, "config-policy");
+  const operationBinding = createHash("sha256")
+    .update([marker.stateTokenDigest, transactionId, transactionFormat, configPolicy].join("\0"))
+    .digest("hex");
+  const createBinding = createHash("sha256")
+    .update(
+      [
+        operationBinding,
+        readJournalValue(journal, "old-gateway-id"),
+        readJournalValue(journal, "runtime-image-id"),
+        readJournalValue(journal, "gateway-compose-project"),
+        readJournalValue(journal, "gateway-compose-service"),
+        readJournalValue(journal, "gateway-candidate-label"),
+        transactionFormat,
+        configPolicy,
+      ].join("\0"),
+    )
+    .digest("hex");
+  await rewriteJournalValues(params.journalPath, {
+    "operation-binding": operationBinding,
+    "gateway-create-binding": createBinding,
+  });
+  await removeJournalKeys(params.journalPath, [
+    "configured-gateway-bind",
+    "runtime-gateway-bind",
+    "bind-override-authorized",
+  ]);
+  await writeFile(
+    params.markerPath,
+    `${JSON.stringify({
+      contractVersion: 3,
+      markerState: marker.markerState,
+      statePath: marker.statePath,
+      stateDev: marker.stateDev,
+      stateIno: marker.stateIno,
+      parentDev: marker.parentDev,
+      parentIno: marker.parentIno,
+      stateTokenDigest: marker.stateTokenDigest,
+      transactionFormat,
+      configPolicy,
+      operationId: transactionId,
+      operationBinding,
+    })}\n`,
+    { mode: 0o600 },
+  );
+  return { operationBinding };
 }
 
 async function beginInterruptedVerifierTransaction(
@@ -1514,18 +1671,125 @@ describe("scripts/docker/setup.sh", () => {
     expect(await readDockerLog(isolated)).not.toContain(" up -d ");
   });
 
+  it("rejects a protected-config bind mismatch without explicit override authorization", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await prepareReadOnlyVerifierFixture(isolated, { bind: "loopback" });
+    const result = await runVerifierDockerSetup(isolated, {
+      ...fixture.env,
+      OPENCLAW_GATEWAY_BIND: "lan",
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      "Protected existing config Gateway bind differs from the Docker runtime bind",
+    );
+    expect(await readDockerLog(isolated)).not.toMatch(/build | up -d /u);
+  });
+
+  it("preserves the exact protected-config bind path without override authorization", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await prepareReadOnlyVerifierFixture(isolated, { bind: "lan" });
+    const result = await runVerifierDockerSetup(isolated, {
+      ...fixture.env,
+      OPENCLAW_GATEWAY_BIND: "lan",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(await readFile(join(isolated.rootDir, ".env"), "utf8")).not.toContain(
+      "OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE",
+    );
+  });
+
+  it("accepts and persists an explicit protected-config bind override without config writes", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await prepareReadOnlyVerifierFixture(isolated, {
+      bind: "loopback",
+      token: "bind-override-secret",
+    });
+    const result = await runVerifierDockerSetup(isolated, {
+      ...fixture.env,
+      OPENCLAW_GATEWAY_BIND: "lan",
+      OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: "1",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(`${result.stdout}\n${result.stderr}`).not.toContain("bind-override-secret");
+    const persisted = await readFile(join(isolated.rootDir, ".env"), "utf8");
+    expect(persisted).toContain("OPENCLAW_GATEWAY_BIND=lan");
+    expect(persisted).toContain("OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=1");
+    const log = await readDockerLog(isolated);
+    expect(log).not.toContain(" onboard ");
+    expect(log).not.toContain(" config set ");
+  });
+
+  it.each([
+    {
+      description: "invalid boolean",
+      overrides: { OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: "sometimes" },
+      expected: "must be a boolean value",
+    },
+    {
+      description: "non-read-only context",
+      overrides: {
+        OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
+        OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: "1",
+        OPENCLAW_GATEWAY_BIND: "lan",
+      },
+      expected: "requires read-only guarded verifier publication",
+    },
+  ])("rejects bind-override $description", async ({ overrides, expected }) => {
+    const isolated = await createDockerSetupSandbox();
+    const result = runDockerSetup(isolated, overrides);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(expected);
+  });
+
+  it.each([
+    {
+      description: "implicit runtime bind",
+      configBind: "loopback",
+      runtimeBind: undefined,
+      expected: "requires an explicit OPENCLAW_GATEWAY_BIND",
+    },
+    {
+      description: "matching runtime bind",
+      configBind: "lan",
+      runtimeBind: "lan",
+      expected: "requires an actual bind mismatch",
+    },
+    {
+      description: "unsupported runtime bind",
+      configBind: "loopback",
+      runtimeBind: "invalid",
+      expected: "is not a supported Gateway bind mode",
+    },
+  ])(
+    "rejects bind-override use with $description",
+    async ({ configBind, runtimeBind, expected }) => {
+      const isolated = await createDockerSetupSandbox();
+      const fixture = await prepareReadOnlyVerifierFixture(isolated, { bind: configBind });
+      const result = await runVerifierDockerSetup(isolated, {
+        ...fixture.env,
+        OPENCLAW_GATEWAY_BIND: runtimeBind,
+        OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: "1",
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(expected);
+      expect(await readDockerLog(isolated)).not.toMatch(/build | up -d /u);
+    },
+  );
+
   it("lets an explicit process false override a persisted protected-config true", async () => {
     const isolated = await createDockerSetupSandbox();
-    await writeFile(join(isolated.rootDir, ".env"), "OPENCLAW_SETUP_READ_ONLY_CONFIG=1\n", {
-      mode: 0o600,
-    });
+    await writeFile(
+      join(isolated.rootDir, ".env"),
+      "OPENCLAW_SETUP_READ_ONLY_CONFIG=1\nOPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=1\n",
+      { mode: 0o600 },
+    );
     const result = runDockerSetup(isolated, {
       OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
     });
     expect(result.status).toBe(0);
-    expect(await readFile(join(isolated.rootDir, ".env"), "utf8")).toContain(
-      "OPENCLAW_SETUP_READ_ONLY_CONFIG=0",
-    );
+    const persisted = await readFile(join(isolated.rootDir, ".env"), "utf8");
+    expect(persisted).toContain("OPENCLAW_SETUP_READ_ONLY_CONFIG=0");
+    expect(persisted).toContain("OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=0");
     expect(await readDockerLog(isolated)).toContain(" onboard --mode local ");
   });
 
@@ -1568,7 +1832,6 @@ describe("scripts/docker/setup.sh", () => {
 
   it.each([
     { field: "mode", overrides: { mode: "remote" } },
-    { field: "bind", overrides: { bind: "loopback" } },
     { field: "sandbox mode", overrides: { sandboxMode: "off" } },
     { field: "sandbox scope", overrides: { sandboxScope: "session" } },
     { field: "workspace access", overrides: { workspaceAccess: "rw" } },
@@ -1734,6 +1997,197 @@ describe("scripts/docker/setup.sh", () => {
     );
   });
 
+  it.each([
+    {
+      policy: "revoked bind override",
+      recoveryOverrides: {
+        OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
+        OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: undefined,
+      },
+      expected: "bind override is no longer authorized",
+    },
+    {
+      policy: "changed runtime bind",
+      recoveryOverrides: {
+        OPENCLAW_GATEWAY_BIND: "tailnet",
+      },
+      expected: "runtime bind conflicts with the current Docker setup bind",
+    },
+    {
+      policy: "explicit contradictory override",
+      recoveryOverrides: {
+        OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
+        OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: "1",
+      },
+      expected: "bind override is no longer authorized",
+    },
+  ])(
+    "stops only the authenticated override candidate before $policy fails closed",
+    async ({ recoveryOverrides, expected }) => {
+      const isolated = await createDockerSetupSandbox();
+      const interrupted = await beginInterruptedGatewayCreateIntent(isolated, {
+        configOverrides: { bind: "loopback" },
+        envOverrides: {
+          OPENCLAW_GATEWAY_BIND: "lan",
+          OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: "1",
+        },
+      });
+      expect(interrupted.result.signal).toBe("SIGKILL");
+      const unrelatedGateway = "f".repeat(64);
+      const runtimeImage = readJournalValue(
+        await readFile(interrupted.journalPath, "utf8"),
+        "runtime-image-id",
+      );
+      await writeDockerStubContainer(isolated, unrelatedGateway, {
+        image: runtimeImage,
+        running: true,
+        project: "openclaw",
+        service: "openclaw-gateway",
+        candidateLabel: "0".repeat(64),
+      });
+      await resetDockerLog(isolated);
+
+      const recovery = await runVerifierDockerSetup(isolated, {
+        ...interrupted.env,
+        ...recoveryOverrides,
+      });
+      expect(recovery.status).not.toBe(0);
+      expect(recovery.stderr).toContain(expected);
+      const recoveryLines = await readDockerLogLines(isolated);
+      expect(recoveryLines).toContain(`stop ${interrupted.candidateGateway}`);
+      expect(recoveryLines).not.toContain(`rm ${interrupted.candidateGateway}`);
+      expect(recoveryLines).not.toContain(`stop ${unrelatedGateway}`);
+      expect(recoveryLines).not.toContain(`rm ${unrelatedGateway}`);
+      expect(
+        await readFile(
+          join(dockerStubContainerPath(isolated, interrupted.candidateGateway), "running"),
+          "utf8",
+        ),
+      ).toBe("false\n");
+      expect(
+        await readFile(
+          join(dockerStubContainerPath(isolated, unrelatedGateway), "running"),
+          "utf8",
+        ),
+      ).toBe("true\n");
+      expect(await stat(interrupted.transactionRoot)).toBeDefined();
+    },
+  );
+
+  it("rejects structurally tampered override recovery before candidate stop", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const interrupted = await beginInterruptedGatewayCreateIntent(isolated, {
+      configOverrides: { bind: "loopback" },
+      envOverrides: {
+        OPENCLAW_GATEWAY_BIND: "lan",
+        OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: "1",
+      },
+    });
+    expect(interrupted.result.signal).toBe("SIGKILL");
+    await rewriteJournalValues(interrupted.journalPath, {
+      "runtime-gateway-bind": "tailnet",
+    });
+    await resetDockerLog(isolated);
+
+    const recovery = await runVerifierDockerSetup(isolated, interrupted.env);
+    expect(recovery.status).not.toBe(0);
+    expect(recovery.stderr).toMatch(/journal|marker|operation/iu);
+    const recoveryLines = await readDockerLogLines(isolated);
+    expect(recoveryLines).not.toContain(`stop ${interrupted.candidateGateway}`);
+    expect(recoveryLines).not.toContain(`rm ${interrupted.candidateGateway}`);
+    expect(
+      await readFile(
+        join(dockerStubContainerPath(isolated, interrupted.candidateGateway), "running"),
+        "utf8",
+      ),
+    ).toBe("true\n");
+    expect(await stat(interrupted.transactionRoot)).toBeDefined();
+  });
+
+  it("authenticates and cleans an exact b48 version 3 pre-ID Gateway transaction", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const interrupted = await beginInterruptedGatewayCreateIntent(isolated);
+    expect(interrupted.result.signal).toBe("SIGKILL");
+    await rewriteGatewayCreateIntentAsB48(interrupted);
+    await resetDockerLog(isolated);
+
+    const recovery = await runVerifierDockerSetup(isolated, interrupted.env);
+    expect(recovery.status).not.toBe(0);
+    const recoveryLines = await readDockerLogLines(isolated);
+    expect(recoveryLines).toContain(`stop ${interrupted.candidateGateway}`);
+    expect(recoveryLines).toContain(`rm ${interrupted.candidateGateway}`);
+    await expect(stat(interrupted.transactionRoot)).rejects.toThrow();
+    await expect(
+      stat(dockerStubContainerPath(isolated, interrupted.candidateGateway)),
+    ).rejects.toThrow();
+    expect(await readFile(join(isolated.rootDir, "docker-images", "gateway-image"), "utf8")).toBe(
+      `${interrupted.priorImage}\n`,
+    );
+    expect(await readFile(join(isolated.rootDir, "docker-images", "gateway-running"), "utf8")).toBe(
+      "true\n",
+    );
+  });
+
+  it("retains exact b48 state and its stopped candidate when owned removal fails", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const interrupted = await beginInterruptedGatewayCreateIntent(isolated);
+    expect(interrupted.result.signal).toBe("SIGKILL");
+    await rewriteGatewayCreateIntentAsB48(interrupted);
+    await resetDockerLog(isolated);
+
+    const recovery = await runVerifierDockerSetup(isolated, {
+      ...interrupted.env,
+      DOCKER_STUB_FAIL_MATCH: `rm -f ${interrupted.candidateGateway}`,
+    });
+    expect(recovery.status).not.toBe(0);
+    const recoveryLines = await readDockerLogLines(isolated);
+    expect(recoveryLines).toContain(`stop ${interrupted.candidateGateway}`);
+    expect(recoveryLines).toContain(`rm ${interrupted.candidateGateway}`);
+    expect(recoveryLines).toContain(`rm-fail ${interrupted.candidateGateway}`);
+    expect(await stat(interrupted.transactionRoot)).toBeDefined();
+    expect(
+      await readFile(
+        join(dockerStubContainerPath(isolated, interrupted.candidateGateway), "running"),
+        "utf8",
+      ),
+    ).toBe("false\n");
+  });
+
+  it.each(["marker binding", "marker shape", "v4 journal shape"] as const)(
+    "rejects tampered b48 recovery with altered $mutation",
+    async (mutation) => {
+      const isolated = await createDockerSetupSandbox();
+      const interrupted = await beginInterruptedGatewayCreateIntent(isolated);
+      await rewriteGatewayCreateIntentAsB48(interrupted);
+      if (mutation === "v4 journal shape") {
+        const journal = await readFile(interrupted.journalPath, "utf8");
+        await writeFile(
+          interrupted.journalPath,
+          `${journal}configured-gateway-bind=lan\nruntime-gateway-bind=lan\nbind-override-authorized=0\n`,
+        );
+      } else {
+        const marker = JSON.parse(await readFile(interrupted.markerPath, "utf8")) as Record<
+          string,
+          unknown
+        >;
+        if (mutation === "marker binding") {
+          marker.operationBinding = "0".repeat(64);
+        } else {
+          marker.configuredGatewayBind = "lan";
+        }
+        await writeFile(interrupted.markerPath, `${JSON.stringify(marker)}\n`, { mode: 0o600 });
+      }
+      await resetDockerLog(isolated);
+
+      const recovery = await runVerifierDockerSetup(isolated, interrupted.env);
+      expect(recovery.status).not.toBe(0);
+      expect(await readDockerLogLines(isolated)).not.toContain(
+        `stop ${interrupted.candidateGateway}`,
+      );
+      expect(await stat(interrupted.transactionRoot)).toBeDefined();
+    },
+  );
+
   it.each(["missing", "altered", "duplicate", "trailing newline"] as const)(
     "rejects a same-service pre-ID Gateway with a %s transaction label",
     async (mutation) => {
@@ -1840,6 +2294,26 @@ describe("scripts/docker/setup.sh", () => {
     expect(await stat(interrupted.transactionRoot)).toBeDefined();
   });
 
+  it("retains pre-ID recovery state when the resolved candidate disappeared", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const interrupted = await beginInterruptedGatewayCreateIntent(isolated);
+    await rm(dockerStubContainerPath(isolated, interrupted.candidateGateway), {
+      recursive: true,
+      force: true,
+    });
+    await resetDockerLog(isolated);
+
+    const recovery = await runVerifierDockerSetup(isolated, interrupted.env);
+    expect(recovery.status).not.toBe(0);
+    expect(recovery.stderr).toContain("disappeared before identity validation");
+    const recoveryLines = await readDockerLogLines(isolated);
+    expect(recoveryLines).not.toContain(`stop ${interrupted.candidateGateway}`);
+    expect(recoveryLines).not.toContain(`rm ${interrupted.candidateGateway}`);
+    expect(recoveryLines).not.toContain(`stop-missing ${interrupted.candidateGateway}`);
+    expect(recoveryLines).not.toContain(`rm-missing ${interrupted.candidateGateway}`);
+    expect(await stat(interrupted.transactionRoot)).toBeDefined();
+  });
+
   it("stops the journaled post-ID Gateway but rejects its same-label service replacement", async () => {
     const isolated = await createDockerSetupSandbox();
     const fixture = await prepareReadOnlyVerifierFixture(isolated);
@@ -1896,6 +2370,75 @@ describe("scripts/docker/setup.sh", () => {
     expect(recoveryLines).not.toContain(`stop ${replacementGateway}`);
     expect(await stat(transactionRoot)).toBeDefined();
   });
+
+  it.each(["disappeared", "same-ID replacement"] as const)(
+    "retains post-ID recovery state when the journaled Gateway $condition",
+    async (condition) => {
+      const isolated = await createDockerSetupSandbox();
+      const fixture = await prepareReadOnlyVerifierFixture(isolated);
+      const stateRoot = join(isolated.stateRoot, "operator-state", "openclaw", "verifier");
+      const transactionRoot = join(stateRoot, "transaction");
+      const journalPath = join(transactionRoot, "journal");
+      const readyPath = join(isolated.stateRoot, "gateway-started-missing-ready");
+      const continuePath = join(isolated.stateRoot, "gateway-started-missing-continue");
+      const verifierEnv = {
+        ...fixture.env,
+        OPENCLAW_GATEWAY_TOKEN: undefined,
+        DOCKER_STUB_OLD_GATEWAY_ID: "9".repeat(64),
+        DOCKER_STUB_OLD_GATEWAY_IMAGE: `sha256:${"8".repeat(64)}`,
+        DOCKER_STUB_OLD_GATEWAY_RUNNING: "true",
+      };
+      const release = mutateAtTransactionStateBarrier({
+        readyPath,
+        continuePath,
+        phase: "gateway-started",
+        stateRoot,
+        mutate: async () => undefined,
+      });
+      const [interrupted] = await Promise.all([
+        runVerifierDockerSetup(isolated, {
+          ...verifierEnv,
+          OPENCLAW_TEST_TRANSACTION_STATE_PHASE: "gateway-started",
+          OPENCLAW_TEST_TRANSACTION_STATE_READY: readyPath,
+          OPENCLAW_TEST_TRANSACTION_STATE_CONTINUE: continuePath,
+          OPENCLAW_TEST_TRANSACTION_STATE_SIGKILL: "1",
+        }),
+        release,
+      ]);
+      expect(interrupted.signal).toBe("SIGKILL");
+      const journal = await readFile(journalPath, "utf8");
+      const journaledGateway = readJournalValue(journal, "new-gateway-id");
+      const runtimeImage = readJournalValue(journal, "runtime-image-id");
+      await rm(dockerStubContainerPath(isolated, journaledGateway), {
+        recursive: true,
+        force: true,
+      });
+      if (condition === "same-ID replacement") {
+        await writeDockerStubContainer(isolated, journaledGateway, {
+          image: runtimeImage,
+          running: true,
+          project: "openclaw",
+          service: "openclaw-gateway",
+          candidateLabel: "0".repeat(64),
+        });
+      }
+      await resetDockerLog(isolated);
+
+      const recovery = await runVerifierDockerSetup(isolated, verifierEnv);
+      expect(recovery.status).not.toBe(0);
+      expect(recovery.stderr).toMatch(
+        condition === "disappeared"
+          ? /disappeared before identity validation/u
+          : /exact Compose service identity/u,
+      );
+      const recoveryLines = await readDockerLogLines(isolated);
+      expect(recoveryLines).not.toContain(`stop ${journaledGateway}`);
+      expect(recoveryLines).not.toContain(`rm ${journaledGateway}`);
+      expect(recoveryLines).not.toContain(`stop-missing ${journaledGateway}`);
+      expect(recoveryLines).not.toContain(`rm-missing ${journaledGateway}`);
+      expect(await stat(transactionRoot)).toBeDefined();
+    },
+  );
 
   it("validates protected semantics before socket publication without writes or secret output", async () => {
     const isolated = await createDockerSetupSandbox();
@@ -2005,14 +2548,51 @@ describe("scripts/docker/setup.sh", () => {
     expect(retry.status, retry.stderr).toBe(0);
   });
 
+  it("reloads the persisted bind override and revalidates it during crash recovery", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const interrupted = await beginInterruptedReadOnlyVerifier(isolated, {
+      configOverrides: { bind: "loopback" },
+      envOverrides: {
+        OPENCLAW_GATEWAY_BIND: "lan",
+        OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: "1",
+      },
+    });
+    expect(interrupted.result.signal).toBe("SIGKILL");
+    const journal = await readFile(interrupted.journalPath, "utf8");
+    expect(readJournalValue(journal, "configured-gateway-bind")).toBe("loopback");
+    expect(readJournalValue(journal, "runtime-gateway-bind")).toBe("lan");
+    expect(readJournalValue(journal, "bind-override-authorized")).toBe("1");
+    const persisted = await readFile(join(isolated.rootDir, ".env"), "utf8");
+    expect(persisted).toContain("OPENCLAW_GATEWAY_BIND=lan");
+    expect(persisted).toContain("OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=1");
+
+    const recoveryEnv = {
+      ...interrupted.env,
+      OPENCLAW_GATEWAY_BIND: undefined,
+      OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: undefined,
+    };
+    const recovery = await runVerifierDockerSetup(isolated, recoveryEnv);
+    expect(recovery.status).not.toBe(0);
+    expect(recovery.stdout).toContain("config bind: loopback; runtime bind: lan");
+    await expect(stat(interrupted.transactionRoot)).rejects.toThrow();
+    const retry = await runVerifierDockerSetup(isolated, recoveryEnv);
+    expect(retry.status, retry.stderr).toBe(0);
+  });
+
   it.each([
     { description: "missing format", remove: ["transaction-format"] },
     { description: "missing policy", remove: ["config-policy"] },
+    { description: "missing configured bind", remove: ["configured-gateway-bind"] },
+    { description: "missing runtime bind", remove: ["runtime-gateway-bind"] },
+    { description: "missing bind authorization", remove: ["bind-override-authorized"] },
     {
       description: "missing all current discriminator fields",
       remove: [
         "transaction-format",
         "config-policy",
+        "configured-gateway-bind",
+        "runtime-gateway-bind",
+        "bind-override-authorized",
         "config-dev",
         "config-ino",
         "gateway-compose-project",
@@ -2033,9 +2613,13 @@ describe("scripts/docker/setup.sh", () => {
   it.each([
     { mutation: "duplicate", field: "config-policy", value: "read-only" },
     { mutation: "duplicate", field: "transaction-format", value: "2" },
+    { mutation: "duplicate", field: "configured-gateway-bind", value: "lan" },
     { mutation: "duplicate", field: "gateway-candidate-label", value: "0".repeat(64) },
     { mutation: "altered", field: "config-policy", value: "write" },
     { mutation: "altered", field: "transaction-format", value: "legacy" },
+    { mutation: "altered", field: "configured-gateway-bind", value: "loopback" },
+    { mutation: "altered", field: "runtime-gateway-bind", value: "loopback" },
+    { mutation: "altered", field: "bind-override-authorized", value: "1" },
     { mutation: "altered", field: "gateway-candidate-label", value: "0".repeat(64) },
   ] as const)(
     "rejects a $mutation current journal $field field",
@@ -2054,9 +2638,40 @@ describe("scripts/docker/setup.sh", () => {
     },
   );
 
+  it("rejects bind-authorization replay from another protected transaction", async () => {
+    const target = await createDockerSetupSandbox();
+    const targetInterrupted = await beginInterruptedReadOnlyVerifier(target, {
+      configOverrides: { bind: "loopback" },
+      envOverrides: {
+        OPENCLAW_GATEWAY_BIND: "lan",
+        OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: "1",
+      },
+    });
+    const donor = await createDockerSetupSandbox();
+    const donorInterrupted = await beginInterruptedReadOnlyVerifier(donor, {
+      configOverrides: { bind: "lan" },
+      envOverrides: { OPENCLAW_GATEWAY_BIND: "lan" },
+    });
+    const donorJournal = await readFile(donorInterrupted.journalPath, "utf8");
+    await rewriteJournalValues(targetInterrupted.journalPath, {
+      "configured-gateway-bind": readJournalValue(donorJournal, "configured-gateway-bind"),
+      "runtime-gateway-bind": readJournalValue(donorJournal, "runtime-gateway-bind"),
+      "bind-override-authorized": readJournalValue(donorJournal, "bind-override-authorized"),
+      "operation-binding": readJournalValue(donorJournal, "operation-binding"),
+    });
+
+    const replay = await runVerifierDockerSetup(target, targetInterrupted.env);
+    expect(replay.status).not.toBe(0);
+    expect(replay.stderr).toMatch(/journal|marker|operation/iu);
+    expect(await stat(targetInterrupted.transactionRoot)).toBeDefined();
+  });
+
   it.each([
     { field: "configPolicy", value: "write" },
     { field: "transactionFormat", value: "legacy" },
+    { field: "configuredGatewayBind", value: "loopback" },
+    { field: "runtimeGatewayBind", value: "loopback" },
+    { field: "bindOverrideAuthorized", value: "1" },
   ] as const)("rejects an altered current active-marker $field", async ({ field, value }) => {
     const isolated = await createDockerSetupSandbox();
     const interrupted = await beginInterruptedReadOnlyVerifier(isolated);
@@ -2092,6 +2707,9 @@ describe("scripts/docker/setup.sh", () => {
     await removeJournalKeys(interrupted.journalPath, [
       "transaction-format",
       "config-policy",
+      "configured-gateway-bind",
+      "runtime-gateway-bind",
+      "bind-override-authorized",
       "config-dev",
       "config-ino",
       "gateway-compose-project",
@@ -2158,6 +2776,9 @@ describe("scripts/docker/setup.sh", () => {
     await removeJournalKeys(interrupted.journalPath, [
       "transaction-format",
       "config-policy",
+      "configured-gateway-bind",
+      "runtime-gateway-bind",
+      "bind-override-authorized",
       "config-dev",
       "config-ino",
       "gateway-compose-project",
@@ -3067,6 +3688,530 @@ describe("scripts/docker/setup.sh", () => {
     expect(envFile).not.toContain(`OPENCLAW_VERIFIER_IMAGE_ID=sha256:${"e".repeat(64)}`);
   });
 
+  it.each([
+    {
+      policy: "revoked override",
+      outcome: "cleanup-and-persist-normal",
+      recoveryOverrides: {
+        OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
+        OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: undefined,
+      },
+    },
+    {
+      policy: "changed live bind",
+      outcome: "cleanup",
+      recoveryOverrides: {
+        OPENCLAW_GATEWAY_BIND: "tailnet",
+      },
+    },
+    {
+      policy: "explicit contradictory override",
+      outcome: "reject",
+      recoveryOverrides: {
+        OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
+        OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: "1",
+      },
+    },
+  ])(
+    "handles committed override recovery without republication under $policy",
+    async ({ outcome, recoveryOverrides }) => {
+      const isolated = await createDockerSetupSandbox();
+      const fixture = await prepareReadOnlyVerifierFixture(isolated, { bind: "loopback" });
+      const stateRoot = join(isolated.stateRoot, "operator-state", "openclaw", "verifier");
+      const transactionRoot = join(stateRoot, "transaction");
+      const readyPath = join(isolated.stateRoot, "committed-cleanup-ready");
+      const continuePath = join(isolated.stateRoot, "committed-cleanup-continue");
+      const verifierEnv = {
+        ...fixture.env,
+        OPENCLAW_GATEWAY_BIND: "lan",
+        OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: "1",
+      };
+      const release = mutateAtTransactionStateBarrier({
+        readyPath,
+        continuePath,
+        phase: "committed",
+        stateRoot,
+        mutate: async () => undefined,
+      });
+      const [interrupted] = await Promise.all([
+        runVerifierDockerSetup(isolated, {
+          ...verifierEnv,
+          OPENCLAW_TEST_TRANSACTION_STATE_PHASE: "committed",
+          OPENCLAW_TEST_TRANSACTION_STATE_READY: readyPath,
+          OPENCLAW_TEST_TRANSACTION_STATE_CONTINUE: continuePath,
+          OPENCLAW_TEST_TRANSACTION_STATE_SIGKILL: "1",
+        }),
+        release,
+      ]);
+      expect(interrupted.signal).toBe("SIGKILL");
+      const journal = await readFile(join(transactionRoot, "journal"), "utf8");
+      expect(readJournalValue(journal, "phase")).toBe("committed");
+      const committedGateway = readJournalValue(journal, "new-gateway-id");
+      const runtimeImage = readJournalValue(journal, "runtime-image-id");
+      const markerPath = join(
+        dirname(stateRoot),
+        `.openclaw-verifier-active-${createHash("sha256").update(stateRoot).digest("hex")}`,
+      );
+      const configBefore = await readFile(fixture.configPath);
+      await resetDockerLog(isolated);
+
+      const recovered = await runVerifierDockerSetup(isolated, {
+        ...verifierEnv,
+        ...recoveryOverrides,
+      });
+      const recoveryLines = await readDockerLogLines(isolated);
+      expect(recoveryLines.some((line) => line.startsWith("stop "))).toBe(false);
+      expect(recoveryLines.some((line) => line.startsWith("rm "))).toBe(false);
+      expect(
+        recoveryLines.some(
+          (line) =>
+            line.includes("up -d --no-deps --force-recreate openclaw-gateway") ||
+            line.includes("create --no-deps --force-recreate openclaw-gateway"),
+        ),
+      ).toBe(false);
+      expect(
+        await readFile(
+          join(dockerStubContainerPath(isolated, committedGateway), "running"),
+          "utf8",
+        ),
+      ).toBe("true\n");
+      expect(
+        await readFile(join(dockerStubContainerPath(isolated, committedGateway), "image"), "utf8"),
+      ).toBe(`${runtimeImage}\n`);
+      expect(await readFile(fixture.configPath)).toEqual(configBefore);
+      if (outcome === "reject") {
+        expect(recovered.status).not.toBe(0);
+        expect(recovered.stderr).toContain(
+          "OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE requires read-only guarded verifier publication",
+        );
+        const persisted = await readFile(join(isolated.rootDir, ".env"), "utf8");
+        expect(persisted.match(/^OPENCLAW_SETUP_READ_ONLY_CONFIG=.*$/gmu)).toEqual([
+          "OPENCLAW_SETUP_READ_ONLY_CONFIG=1",
+        ]);
+        expect(
+          persisted.match(/^OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=.*$/gmu),
+        ).toEqual(["OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=1"]);
+        expect(await stat(transactionRoot)).toBeDefined();
+        expect(await stat(join(stateRoot, "lock"))).toBeDefined();
+        expect(await stat(markerPath)).toBeDefined();
+        return;
+      }
+      expect(recovered.status, recovered.stderr).toBe(0);
+      expect(recovered.stdout).toContain(
+        "Completed authenticated cleanup for the already-committed guarded verifier publication",
+      );
+      await expect(stat(transactionRoot)).rejects.toThrow();
+      await expect(stat(join(stateRoot, "lock"))).rejects.toThrow();
+      await expect(stat(markerPath)).rejects.toThrow();
+      expect(await stat(join(stateRoot, ".state-instance"))).toBeDefined();
+      if (outcome === "cleanup-and-persist-normal") {
+        const persisted = await readFile(join(isolated.rootDir, ".env"), "utf8");
+        expect(persisted.match(/^OPENCLAW_SETUP_READ_ONLY_CONFIG=.*$/gmu)).toEqual([
+          "OPENCLAW_SETUP_READ_ONLY_CONFIG=0",
+        ]);
+        expect(
+          persisted.match(/^OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=.*$/gmu),
+        ).toEqual(["OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=0"]);
+
+        await resetDockerLog(isolated);
+        const ordinary = runDockerSetup(isolated, {
+          OPENCLAW_SETUP_READ_ONLY_CONFIG: undefined,
+          OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: undefined,
+          OPENCLAW_CONFIG_DIR: fixture.configDir,
+          OPENCLAW_WORKSPACE_DIR: fixture.workspaceDir,
+          OPENCLAW_GATEWAY_BIND: "lan",
+        });
+        expect(ordinary.status, ordinary.stderr).toBe(0);
+        expect(await readDockerLog(isolated)).toContain(
+          "run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js onboard --mode local",
+        );
+      }
+    },
+  );
+
+  it("retains committed state when normal-mode persistence is interrupted and retries idempotently", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await beginInterruptedCommittedOverride(isolated);
+    expect(fixture.result.signal).toBe("SIGKILL");
+    const envBefore = await readFile(join(isolated.rootDir, ".env"), "utf8");
+    const readyPath = join(isolated.stateRoot, "committed-env-persist-ready");
+    const continuePath = join(isolated.stateRoot, "committed-env-persist-continue");
+    const release = mutateAtTransactionStateBarrier({
+      readyPath,
+      continuePath,
+      phase: "committed-env-persist",
+      stateRoot: fixture.stateRoot,
+      mutate: async () => undefined,
+    });
+    const [interrupted] = await Promise.all([
+      runVerifierDockerSetup(isolated, {
+        ...fixture.verifierEnv,
+        OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
+        OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: undefined,
+        OPENCLAW_TEST_TRANSACTION_STATE_PHASE: "committed-env-persist",
+        OPENCLAW_TEST_TRANSACTION_STATE_READY: readyPath,
+        OPENCLAW_TEST_TRANSACTION_STATE_CONTINUE: continuePath,
+        OPENCLAW_TEST_TRANSACTION_STATE_SIGKILL: "1",
+      }),
+      release,
+    ]);
+
+    expect(interrupted.signal).toBe("SIGKILL");
+    expect(await readFile(join(isolated.rootDir, ".env"), "utf8")).toBe(envBefore);
+    expect(await stat(fixture.transactionRoot)).toBeDefined();
+    expect(await stat(join(fixture.stateRoot, "lock"))).toBeDefined();
+    expect(await stat(fixture.markerPath)).toBeDefined();
+    expect(
+      await readFile(
+        join(dockerStubContainerPath(isolated, fixture.committedGateway), "running"),
+        "utf8",
+      ),
+    ).toBe("true\n");
+
+    const retry = await runVerifierDockerSetup(isolated, {
+      ...fixture.verifierEnv,
+      OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
+      OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: undefined,
+    });
+    expect(retry.status, retry.stderr).toBe(0);
+    const persisted = await readFile(join(isolated.rootDir, ".env"), "utf8");
+    expect(persisted.match(/^OPENCLAW_SETUP_READ_ONLY_CONFIG=.*$/gmu)).toEqual([
+      "OPENCLAW_SETUP_READ_ONLY_CONFIG=0",
+    ]);
+    expect(persisted.match(/^OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=.*$/gmu)).toEqual([
+      "OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=0",
+    ]);
+    await expect(stat(fixture.transactionRoot)).rejects.toThrow();
+    await expect(stat(join(fixture.stateRoot, "lock"))).rejects.toThrow();
+    await expect(stat(fixture.markerPath)).rejects.toThrow();
+  });
+
+  it("recovers a durable normal-mode handoff without replaying committed publication", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await beginInterruptedCommittedOverride(isolated);
+    expect(fixture.result.signal).toBe("SIGKILL");
+    const readyPath = join(isolated.stateRoot, "committed-env-durable-ready");
+    const continuePath = join(isolated.stateRoot, "committed-env-durable-continue");
+    const release = mutateAtTransactionStateBarrier({
+      readyPath,
+      continuePath,
+      phase: "committed-env-durable",
+      stateRoot: fixture.stateRoot,
+      mutate: async () => undefined,
+    });
+    await resetDockerLog(isolated);
+    const [interrupted] = await Promise.all([
+      runVerifierDockerSetup(isolated, {
+        ...fixture.verifierEnv,
+        OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
+        OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: undefined,
+        OPENCLAW_TEST_TRANSACTION_STATE_PHASE: "committed-env-durable",
+        OPENCLAW_TEST_TRANSACTION_STATE_READY: readyPath,
+        OPENCLAW_TEST_TRANSACTION_STATE_CONTINUE: continuePath,
+        OPENCLAW_TEST_TRANSACTION_STATE_SIGKILL: "1",
+      }),
+      release,
+    ]);
+
+    expect(interrupted.signal).toBe("SIGKILL");
+    const persistedAfterCrash = await readFile(join(isolated.rootDir, ".env"), "utf8");
+    expect(persistedAfterCrash.match(/^OPENCLAW_SETUP_READ_ONLY_CONFIG=.*$/gmu)).toEqual([
+      "OPENCLAW_SETUP_READ_ONLY_CONFIG=0",
+    ]);
+    expect(
+      persistedAfterCrash.match(/^OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=.*$/gmu),
+    ).toEqual(["OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=0"]);
+    expect(await stat(fixture.transactionRoot)).toBeDefined();
+    expect(
+      readJournalValue(await readFile(join(fixture.transactionRoot, "journal"), "utf8"), "phase"),
+    ).toBe("committed");
+    expect(await stat(join(fixture.stateRoot, "lock"))).toBeDefined();
+    expect(await stat(fixture.markerPath)).toBeDefined();
+    expect(
+      await readFile(
+        join(dockerStubContainerPath(isolated, fixture.committedGateway), "running"),
+        "utf8",
+      ),
+    ).toBe("true\n");
+    expect(
+      await readFile(
+        join(dockerStubContainerPath(isolated, fixture.committedGateway), "image"),
+        "utf8",
+      ),
+    ).toBe(`${fixture.runtimeImage}\n`);
+
+    await resetDockerLog(isolated);
+    const retry = await runVerifierDockerSetup(isolated, {
+      ...fixture.verifierEnv,
+      OPENCLAW_SETUP_READ_ONLY_CONFIG: undefined,
+      OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: undefined,
+    });
+    expect(retry.status, retry.stderr).toBe(0);
+    expect(retry.stdout).toContain(
+      "Completed authenticated cleanup for the already-committed guarded verifier publication",
+    );
+    const recoveryLines = await readDockerLogLines(isolated);
+    expect(recoveryLines.some((line) => line.startsWith("stop "))).toBe(false);
+    expect(recoveryLines.some((line) => line.startsWith("rm "))).toBe(false);
+    expect(recoveryLines.some((line) => line.startsWith("tag "))).toBe(false);
+    expect(recoveryLines.some((line) => line.startsWith("build "))).toBe(false);
+    expect(
+      recoveryLines.some(
+        (line) =>
+          line.includes("up -d --no-deps --force-recreate openclaw-gateway") ||
+          line.includes("create --no-deps --force-recreate openclaw-gateway") ||
+          line.includes("dist/index.js onboard --mode local"),
+      ),
+    ).toBe(false);
+    expect(
+      await readFile(
+        join(dockerStubContainerPath(isolated, fixture.committedGateway), "running"),
+        "utf8",
+      ),
+    ).toBe("true\n");
+    expect(
+      await readFile(
+        join(dockerStubContainerPath(isolated, fixture.committedGateway), "image"),
+        "utf8",
+      ),
+    ).toBe(`${fixture.runtimeImage}\n`);
+    await expect(stat(fixture.transactionRoot)).rejects.toThrow();
+    await expect(stat(join(fixture.stateRoot, "lock"))).rejects.toThrow();
+    await expect(stat(fixture.markerPath)).rejects.toThrow();
+    expect(await readFile(join(isolated.rootDir, ".env"), "utf8")).toBe(persistedAfterCrash);
+  });
+
+  it("retains committed recovery state when the fsynced environment identity is replaced", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await beginInterruptedCommittedOverride(isolated);
+    expect(fixture.result.signal).toBe("SIGKILL");
+    const envPath = join(isolated.rootDir, ".env");
+    const replacementPath = join(isolated.rootDir, ".openclaw-env-identity-replacement");
+    const priorEnvironment = await readFile(envPath, "utf8");
+    const replacementEnvironment = priorEnvironment
+      .replace(/^OPENCLAW_SETUP_READ_ONLY_CONFIG=1$/mu, "OPENCLAW_SETUP_READ_ONLY_CONFIG=0")
+      .replace(
+        /^OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=1$/mu,
+        "OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=0",
+      );
+    expect(replacementEnvironment).not.toBe(priorEnvironment);
+    await writeFile(replacementPath, replacementEnvironment, { mode: 0o600 });
+    await resetDockerLog(isolated);
+
+    const failed = await runVerifierDockerSetup(isolated, {
+      ...fixture.verifierEnv,
+      OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
+      OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: undefined,
+      OPENCLAW_TEST_COMMITTED_ENV_IDENTITY_REPLACEMENT: replacementPath,
+    });
+
+    expect(failed.status).not.toBe(0);
+    expect(failed.stderr).toContain("Normal-mode environment identity changed after file fsync");
+    expect(await readFile(envPath, "utf8")).toBe(replacementEnvironment);
+    expect(await stat(fixture.transactionRoot)).toBeDefined();
+    expect(
+      readJournalValue(await readFile(join(fixture.transactionRoot, "journal"), "utf8"), "phase"),
+    ).toBe("committed");
+    expect(await stat(join(fixture.stateRoot, "lock"))).toBeDefined();
+    expect(await stat(fixture.markerPath)).toBeDefined();
+    const failureLines = await readDockerLogLines(isolated);
+    expect(failureLines.some((line) => line.startsWith("stop "))).toBe(false);
+    expect(failureLines.some((line) => line.startsWith("rm "))).toBe(false);
+    expect(failureLines.some((line) => line.startsWith("start "))).toBe(false);
+    expect(
+      failureLines.some(
+        (line) =>
+          line.includes("up -d --no-deps --force-recreate openclaw-gateway") ||
+          line.includes("create --no-deps --force-recreate openclaw-gateway"),
+      ),
+    ).toBe(false);
+    expect(
+      await readFile(
+        join(dockerStubContainerPath(isolated, fixture.committedGateway), "running"),
+        "utf8",
+      ),
+    ).toBe("true\n");
+    expect(
+      await readFile(
+        join(dockerStubContainerPath(isolated, fixture.committedGateway), "image"),
+        "utf8",
+      ),
+    ).toBe(`${fixture.runtimeImage}\n`);
+
+    await resetDockerLog(isolated);
+    const retry = await runVerifierDockerSetup(isolated, {
+      ...fixture.verifierEnv,
+      OPENCLAW_SETUP_READ_ONLY_CONFIG: undefined,
+      OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: undefined,
+      OPENCLAW_TEST_COMMITTED_ENV_IDENTITY_REPLACEMENT: undefined,
+    });
+    expect(retry.status, retry.stderr).toBe(0);
+    await expect(stat(fixture.transactionRoot)).rejects.toThrow();
+    await expect(stat(join(fixture.stateRoot, "lock"))).rejects.toThrow();
+    await expect(stat(fixture.markerPath)).rejects.toThrow();
+  });
+
+  it.each([
+    ["file", "Injected normal-mode environment file fsync failure"],
+    ["parent", "Injected normal-mode environment parent fsync failure"],
+    ["parent-unsupported", "Injected filesystem does not support directory fsync"],
+  ])(
+    "retains committed recovery state when normal-mode %s fsync fails",
+    async (failureStage, expectedFailure) => {
+      const isolated = await createDockerSetupSandbox();
+      const fixture = await beginInterruptedCommittedOverride(isolated);
+      expect(fixture.result.signal).toBe("SIGKILL");
+      await resetDockerLog(isolated);
+
+      const failed = await runVerifierDockerSetup(isolated, {
+        ...fixture.verifierEnv,
+        OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
+        OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: undefined,
+        OPENCLAW_TEST_COMMITTED_ENV_FSYNC_FAILURE: failureStage,
+      });
+
+      expect(failed.status).not.toBe(0);
+      expect(failed.stderr).toContain(expectedFailure);
+      const persisted = await readFile(join(isolated.rootDir, ".env"), "utf8");
+      expect(persisted.match(/^OPENCLAW_SETUP_READ_ONLY_CONFIG=.*$/gmu)).toEqual([
+        "OPENCLAW_SETUP_READ_ONLY_CONFIG=0",
+      ]);
+      expect(
+        persisted.match(/^OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=.*$/gmu),
+      ).toEqual(["OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=0"]);
+      expect(await stat(fixture.transactionRoot)).toBeDefined();
+      expect(
+        readJournalValue(await readFile(join(fixture.transactionRoot, "journal"), "utf8"), "phase"),
+      ).toBe("committed");
+      expect(await stat(join(fixture.stateRoot, "lock"))).toBeDefined();
+      expect(await stat(fixture.markerPath)).toBeDefined();
+      const failureLines = await readDockerLogLines(isolated);
+      expect(failureLines.some((line) => line.startsWith("stop "))).toBe(false);
+      expect(failureLines.some((line) => line.startsWith("rm "))).toBe(false);
+      expect(failureLines.some((line) => line.startsWith("start "))).toBe(false);
+      expect(
+        failureLines.some(
+          (line) =>
+            line.includes("up -d --no-deps --force-recreate openclaw-gateway") ||
+            line.includes("create --no-deps --force-recreate openclaw-gateway"),
+        ),
+      ).toBe(false);
+      expect(
+        await readFile(
+          join(dockerStubContainerPath(isolated, fixture.committedGateway), "running"),
+          "utf8",
+        ),
+      ).toBe("true\n");
+      expect(
+        await readFile(
+          join(dockerStubContainerPath(isolated, fixture.committedGateway), "image"),
+          "utf8",
+        ),
+      ).toBe(`${fixture.runtimeImage}\n`);
+
+      await resetDockerLog(isolated);
+      const retry = await runVerifierDockerSetup(isolated, {
+        ...fixture.verifierEnv,
+        OPENCLAW_SETUP_READ_ONLY_CONFIG: undefined,
+        OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: undefined,
+        OPENCLAW_TEST_COMMITTED_ENV_FSYNC_FAILURE: undefined,
+      });
+      expect(retry.status, retry.stderr).toBe(0);
+      await expect(stat(fixture.transactionRoot)).rejects.toThrow();
+      await expect(stat(join(fixture.stateRoot, "lock"))).rejects.toThrow();
+      await expect(stat(fixture.markerPath)).rejects.toThrow();
+    },
+  );
+
+  it("keeps environment secrets out of durability child argv and diagnostics", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await beginInterruptedCommittedOverride(isolated);
+    expect(fixture.result.signal).toBe("SIGKILL");
+    const gatewaySecret = "committed-env-gateway-secret";
+    const additionalSecret = "committed-env-additional-secret";
+    const argvAuditPath = join(isolated.stateRoot, "committed-env-argv-audit.json");
+    await resetDockerLog(isolated);
+
+    const recovered = await runVerifierDockerSetup(isolated, {
+      ...fixture.verifierEnv,
+      OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
+      OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: undefined,
+      OPENCLAW_GATEWAY_TOKEN: gatewaySecret,
+      OPENCLAW_TEST_DURABILITY_SECRET: additionalSecret,
+      OPENCLAW_TEST_COMMITTED_ENV_ARGV_AUDIT: argvAuditPath,
+    });
+
+    expect(recovered.status, recovered.stderr).toBe(0);
+    const diagnostics = `${recovered.stdout}\n${recovered.stderr}`;
+    expect(diagnostics).not.toContain(gatewaySecret);
+    expect(diagnostics).not.toContain(additionalSecret);
+    const audit = JSON.parse(await readFile(argvAuditPath, "utf8")) as {
+      argumentCount: number;
+      secretValueCount: number;
+      argumentsContainSecret: boolean;
+    };
+    expect(audit).toMatchObject({
+      argumentCount: 3,
+      argumentsContainSecret: false,
+    });
+    expect(audit.secretValueCount).toBeGreaterThanOrEqual(2);
+    const childArgumentLog = await readDockerLog(isolated);
+    expect(childArgumentLog).not.toContain(gatewaySecret);
+    expect(childArgumentLog).not.toContain(additionalSecret);
+    const persisted = await readFile(join(isolated.rootDir, ".env"), "utf8");
+    expect(persisted).not.toContain(gatewaySecret);
+    expect(persisted).not.toContain(additionalSecret);
+  });
+
+  it("persists normal mode before releasing committed recovery to concurrent setup", async () => {
+    const isolated = await createDockerSetupSandbox();
+    const fixture = await beginInterruptedCommittedOverride(isolated);
+    expect(fixture.result.signal).toBe("SIGKILL");
+    const readyPath = join(isolated.stateRoot, "committed-env-concurrent-ready");
+    const continuePath = join(isolated.stateRoot, "committed-env-concurrent-continue");
+    const ownerPromise = runVerifierDockerSetup(isolated, {
+      ...fixture.verifierEnv,
+      OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
+      OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: undefined,
+      OPENCLAW_TEST_TRANSACTION_STATE_PHASE: "committed-env-persist",
+      OPENCLAW_TEST_TRANSACTION_STATE_READY: readyPath,
+      OPENCLAW_TEST_TRANSACTION_STATE_CONTINUE: continuePath,
+    });
+    const contenderPromise = mutateAtTransactionStateBarrier({
+      readyPath,
+      continuePath,
+      phase: "committed-env-persist",
+      stateRoot: fixture.stateRoot,
+      mutate: async () => {
+        const socketPath = verifierSocketPaths.get(isolated.stateRoot);
+        if (!socketPath) {
+          throw new Error("Verifier socket missing during committed persistence contention.");
+        }
+        return runDockerSetupAsync(isolated, {
+          ...fixture.verifierEnv,
+          OPENCLAW_SETUP_READ_ONLY_CONFIG: "0",
+          OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE: undefined,
+          OPENCLAW_DOCKER_SOCKET: socketPath,
+        });
+      },
+    });
+    const [owner, contender] = await Promise.all([ownerPromise, contenderPromise]);
+
+    expect(contender.status).not.toBe(0);
+    expect(contender.stderr).toContain("Another guarded verifier update owns the lifecycle lock");
+    expect(owner.status, owner.stderr).toBe(0);
+    const persisted = await readFile(join(isolated.rootDir, ".env"), "utf8");
+    expect(persisted.match(/^OPENCLAW_SETUP_READ_ONLY_CONFIG=.*$/gmu)).toEqual([
+      "OPENCLAW_SETUP_READ_ONLY_CONFIG=0",
+    ]);
+    expect(persisted.match(/^OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=.*$/gmu)).toEqual([
+      "OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE=0",
+    ]);
+    await expect(stat(join(fixture.stateRoot, "lock"))).rejects.toThrow();
+    await expect(stat(fixture.transactionRoot)).rejects.toThrow();
+    await expect(stat(fixture.markerPath)).rejects.toThrow();
+  });
+
   it("forward-recovers a committed journal after replacing its stale lock owner", async () => {
     const isolated = await createDockerSetupSandbox();
     await writeFile(join(isolated.rootDir, "Dockerfile.sandbox-verifier"), "FROM scratch\n");
@@ -3520,13 +4665,16 @@ describe("scripts/docker/setup.sh", () => {
         stateTokenDigest: string;
         transactionFormat: string;
         configPolicy: string;
+        configuredGatewayBind: string;
+        runtimeGatewayBind: string;
+        bindOverrideAuthorized: string;
       };
       const stateToken = (
         await readFile(join(displacedStateRoot, ".state-instance"), "utf8")
       ).trim();
       const stateTokenDigest = createHash("sha256").update(stateToken).digest("hex");
       expect(marker).toMatchObject({
-        contractVersion: 3,
+        contractVersion: 4,
         markerState: "active",
         parentDev: String((await stat(shortParent)).dev),
         parentIno: String((await stat(shortParent)).ino),
@@ -3536,12 +4684,23 @@ describe("scripts/docker/setup.sh", () => {
         stateTokenDigest,
         transactionFormat: "2",
         configPolicy: "write",
+        configuredGatewayBind: "lan",
+        runtimeGatewayBind: "lan",
+        bindOverrideAuthorized: "0",
       });
       expect(marker.operationId).toMatch(/^[a-f0-9]{32}$/u);
       expect(marker.operationBinding).toBe(
         createHash("sha256")
           .update(
-            `${stateTokenDigest}\0${marker.operationId}\0${marker.transactionFormat}\0${marker.configPolicy}`,
+            [
+              stateTokenDigest,
+              marker.operationId,
+              marker.transactionFormat,
+              marker.configPolicy,
+              marker.configuredGatewayBind,
+              marker.runtimeGatewayBind,
+              marker.bindOverrideAuthorized,
+            ].join("\0"),
           )
           .digest("hex"),
       );

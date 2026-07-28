@@ -41,8 +41,17 @@ VERIFIER_CONFIG_DEV=""
 VERIFIER_CONFIG_INO=""
 VERIFIER_TRANSACTION_FORMAT="2"
 VERIFIER_CONFIG_POLICY="write"
+VERIFIER_JOURNAL_CONTRACT_VERSION=""
+VERIFIER_OPERATION_CONTRACT_VERSION=""
 VERIFIER_OPERATION_FORMAT=""
 VERIFIER_OPERATION_CONFIG_POLICY=""
+VERIFIER_CONFIGURED_GATEWAY_BIND=""
+VERIFIER_RUNTIME_GATEWAY_BIND=""
+VERIFIER_BIND_OVERRIDE_AUTHORIZED="0"
+VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND=""
+VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND=""
+VERIFIER_OPERATION_BIND_OVERRIDE_AUTHORIZED=""
+VERIFIER_COMMITTED_RECOVERY_COMPLETED=""
 VERIFIER_OVERLAY_BACKUP_PRESENT="0"
 VERIFIER_OVERLAY_BACKUP_DIGEST=""
 VERIFIER_OVERLAY_BACKUP_MODE=""
@@ -59,10 +68,19 @@ PROTECTED_CONFIG_MODE=""
 PROTECTED_CONFIG_DIGEST=""
 PROTECTED_CONFIG_PARENT_DEV=""
 PROTECTED_CONFIG_PARENT_INO=""
+PROTECTED_CONFIG_GATEWAY_BIND=""
 DEFER_PROTECTED_CONFIG_VALIDATION=""
 SOURCE_REVISION_WAS_EXPLICIT=""
 if printenv OPENCLAW_SOURCE_REVISION >/dev/null 2>&1; then
   SOURCE_REVISION_WAS_EXPLICIT="1"
+fi
+READ_ONLY_CONFIG_PROCESS_SETTING_PRESENT=""
+if printenv OPENCLAW_SETUP_READ_ONLY_CONFIG >/dev/null 2>&1; then
+  READ_ONLY_CONFIG_PROCESS_SETTING_PRESENT="1"
+fi
+BIND_OVERRIDE_PROCESS_SETTING_PRESENT=""
+if printenv OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE >/dev/null 2>&1; then
+  BIND_OVERRIDE_PROCESS_SETTING_PRESENT="1"
 fi
 
 load_persisted_setup_defaults() {
@@ -75,7 +93,8 @@ load_persisted_setup_defaults() {
   allowed+="OPENCLAW_VERIFIER_ARTIFACT_DIGEST OPENCLAW_VERIFIER_DEPENDENCY_MANIFEST "
   allowed+="OPENCLAW_VERIFIER_BROWSER_MANIFEST OPENCLAW_VERIFIER_REPOSITORY_IDENTITY "
   allowed+="OPENCLAW_VERIFIER_BROWSER_IDENTITY OPENCLAW_VERIFIER_EFFECTIVE_YARN_VERSION "
-  allowed+="OPENCLAW_SETUP_READ_ONLY_CONFIG "
+  allowed+="OPENCLAW_GATEWAY_BIND OPENCLAW_SETUP_READ_ONLY_CONFIG "
+  allowed+="OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE "
   if [[ ! -f "$ENV_FILE" ]]; then
     return
   fi
@@ -133,6 +152,16 @@ READ_ONLY_CONFIG_ENABLED=""
 READ_ONLY_CONFIG_SETTING_PRESENT=""
 if printenv OPENCLAW_SETUP_READ_ONLY_CONFIG >/dev/null 2>&1; then
   READ_ONLY_CONFIG_SETTING_PRESENT="1"
+fi
+RAW_BIND_OVERRIDE_SETTING="${OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE:-}"
+BIND_OVERRIDE_ENABLED=""
+BIND_OVERRIDE_SETTING_PRESENT=""
+if printenv OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE >/dev/null 2>&1; then
+  BIND_OVERRIDE_SETTING_PRESENT="1"
+fi
+GATEWAY_BIND_SETTING_PRESENT=""
+if printenv OPENCLAW_GATEWAY_BIND >/dev/null 2>&1; then
+  GATEWAY_BIND_SETTING_PRESENT="1"
 fi
 DOCKER_SOCKET_PATH="${OPENCLAW_DOCKER_SOCKET:-}"
 TIMEZONE="${OPENCLAW_TZ:-}"
@@ -663,17 +692,38 @@ run_prestart_cli() {
 }
 
 validate_read_only_existing_config() {
-  case "$OPENCLAW_GATEWAY_BIND" in
+  local expected_configured_bind="${1:-}"
+  local runtime_bind="${2:-$OPENCLAW_GATEWAY_BIND}"
+  local override_authorized="${3:-${VERIFIER_BIND_OVERRIDE_AUTHORIZED:-0}}"
+  local config_dev="${4:-$PROTECTED_CONFIG_DEV}"
+  local config_ino="${5:-$PROTECTED_CONFIG_INO}"
+  local config_digest="${6:-$PROTECTED_CONFIG_DIGEST}"
+  local config_mode="${7:-$PROTECTED_CONFIG_MODE}"
+  local config_parent_dev="${8:-$PROTECTED_CONFIG_PARENT_DEV}"
+  local config_parent_ino="${9:-$PROTECTED_CONFIG_PARENT_INO}"
+  local configured_bind=""
+  case "$runtime_bind" in
     auto | custom | lan | loopback | tailnet) ;;
     *) fail "OPENCLAW_GATEWAY_BIND is not a supported Gateway bind mode." ;;
   esac
+  [[ -z "$expected_configured_bind" ||
+    "$expected_configured_bind" == "auto" ||
+    "$expected_configured_bind" == "custom" ||
+    "$expected_configured_bind" == "lan" ||
+    "$expected_configured_bind" == "loopback" ||
+    "$expected_configured_bind" == "tailnet" ]] ||
+    fail "Expected protected Gateway bind is malformed."
+  [[ "$override_authorized" == "0" || "$override_authorized" == "1" ]] ||
+    fail "Protected-config Gateway bind override authorization is malformed."
   assert_protected_config_immutable \
-    "Protected OpenClaw config before semantic validation"
-  if node - "$OPENCLAW_CONFIG_DIR/openclaw.json" \
-    "$PROTECTED_CONFIG_DEV" "$PROTECTED_CONFIG_INO" \
-    "$PROTECTED_CONFIG_DIGEST" "$PROTECTED_CONFIG_MODE" \
-    "$PROTECTED_CONFIG_PARENT_DEV" "$PROTECTED_CONFIG_PARENT_INO" \
-    "$OPENCLAW_GATEWAY_BIND" <<'NODE'
+    "Protected OpenClaw config before semantic validation" \
+    "$config_dev" "$config_ino" "$config_digest" "$config_mode" \
+    "$config_parent_dev" "$config_parent_ino"
+  if configured_bind="$(
+    node - "$OPENCLAW_CONFIG_DIR/openclaw.json" \
+    "$config_dev" "$config_ino" "$config_digest" "$config_mode" \
+    "$config_parent_dev" "$config_parent_ino" \
+    <<'NODE'
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -686,7 +736,6 @@ const [
   expectedMode,
   expectedParentDev,
   expectedParentIno,
-  expectedBind,
 ] = process.argv.slice(2);
 const directory = path.dirname(configPath);
 const leaf = path.basename(configPath);
@@ -751,25 +800,44 @@ try {
   const parsed = JSON.parse(bytes.toString("utf8"));
   if (
     parsed?.gateway?.mode !== "local" ||
-    parsed?.gateway?.bind !== expectedBind ||
+    !["auto", "custom", "lan", "loopback", "tailnet"].includes(parsed?.gateway?.bind) ||
     parsed?.agents?.defaults?.sandbox?.mode !== "non-main" ||
     parsed?.agents?.defaults?.sandbox?.scope !== "agent" ||
     parsed?.agents?.defaults?.sandbox?.workspaceAccess !== "none"
   ) {
     throw new Error("Protected config does not match the guarded verifier policy.");
   }
+  process.stdout.write(parsed.gateway.bind);
 } finally {
   fs.closeSync(fd);
 }
 NODE
+  )"
   then
     :
   else
     fail "Protected existing config policy validation failed."
   fi
+  [[ "$configured_bind" != *$'\n'* ]] ||
+    fail "Protected existing config returned an ambiguous Gateway bind."
+  [[ -z "$expected_configured_bind" || "$configured_bind" == "$expected_configured_bind" ]] ||
+    fail "Protected existing config Gateway bind changed from its transaction."
+  if [[ "$configured_bind" == "$runtime_bind" ]]; then
+    [[ "$override_authorized" == "0" ]] ||
+      fail "Protected-config Gateway bind override requires an actual bind mismatch."
+  else
+    [[ "$override_authorized" == "1" ]] ||
+      fail "Protected existing config Gateway bind differs from the Docker runtime bind."
+  fi
+  PROTECTED_CONFIG_GATEWAY_BIND="$configured_bind"
+  VERIFIER_CONFIGURED_GATEWAY_BIND="$configured_bind"
+  VERIFIER_RUNTIME_GATEWAY_BIND="$runtime_bind"
+  VERIFIER_BIND_OVERRIDE_AUTHORIZED="$override_authorized"
   assert_protected_config_immutable \
-    "Protected OpenClaw config after semantic validation"
-  echo "Validated existing read-only config and exact guarded verifier sandbox policy."
+    "Protected OpenClaw config after semantic validation" \
+    "$config_dev" "$config_ino" "$config_digest" "$config_mode" \
+    "$config_parent_dev" "$config_parent_ino"
+  echo "Validated existing read-only config and exact guarded verifier sandbox policy (config bind: $configured_bind; runtime bind: $runtime_bind)."
 }
 
 prepare_read_only_existing_config_contract() {
@@ -881,6 +949,30 @@ case "$READ_ONLY_CONFIG_NORMALIZED" in
     ;;
 esac
 export OPENCLAW_SETUP_READ_ONLY_CONFIG
+if [[ -n "$READ_ONLY_CONFIG_PROCESS_SETTING_PRESENT" &&
+  -z "$READ_ONLY_CONFIG_ENABLED" &&
+  -z "$BIND_OVERRIDE_PROCESS_SETTING_PRESENT" ]]; then
+  # An explicit normal-mode invocation overrides a stale persisted authorization
+  # without allowing an explicitly supplied contradictory override to disappear.
+  RAW_BIND_OVERRIDE_SETTING="0"
+  BIND_OVERRIDE_SETTING_PRESENT="1"
+fi
+BIND_OVERRIDE_NORMALIZED="$(
+  printf '%s' "$RAW_BIND_OVERRIDE_SETTING" | tr '[:upper:]' '[:lower:]'
+)"
+case "$BIND_OVERRIDE_NORMALIZED" in
+  1 | true | yes | on)
+    BIND_OVERRIDE_ENABLED="1"
+    OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE="1"
+    ;;
+  "" | 0 | false | no | off)
+    OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE="0"
+    ;;
+  *)
+    fail "OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE must be a boolean value."
+    ;;
+esac
+export OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE
 
 OPENCLAW_CONFIG_DIR="${OPENCLAW_CONFIG_DIR:-$HOME/.openclaw}"
 OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-$HOME/.openclaw/workspace}"
@@ -951,6 +1043,11 @@ fi
 if [[ -n "$READ_ONLY_CONFIG_ENABLED" && -z "$VERIFIER_ENABLED" ]]; then
   fail "OPENCLAW_SETUP_READ_ONLY_CONFIG requires guarded verifier publication."
 fi
+if [[ -n "$BIND_OVERRIDE_ENABLED" && -z "$READ_ONLY_CONFIG_ENABLED" ]]; then
+  [[ -n "$VERIFIER_ENABLED" &&
+    ( -e "$VERIFIER_TRANSACTION_DIR" || -L "$VERIFIER_TRANSACTION_DIR" ) ]] ||
+    fail "OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE requires read-only guarded verifier publication."
+fi
 
 validate_mount_path_value "OPENCLAW_CONFIG_DIR" "$OPENCLAW_CONFIG_DIR"
 validate_mount_path_value "OPENCLAW_WORKSPACE_DIR" "$OPENCLAW_WORKSPACE_DIR"
@@ -997,6 +1094,11 @@ export OPENCLAW_WORKSPACE_DIR
 export OPENCLAW_GATEWAY_PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
 export OPENCLAW_BRIDGE_PORT="${OPENCLAW_BRIDGE_PORT:-18790}"
 export OPENCLAW_GATEWAY_BIND="${OPENCLAW_GATEWAY_BIND:-lan}"
+if [[ -n "$BIND_OVERRIDE_ENABLED" && -z "$GATEWAY_BIND_SETTING_PRESENT" ]]; then
+  [[ -n "$VERIFIER_ENABLED" &&
+    ( -e "$VERIFIER_TRANSACTION_DIR" || -L "$VERIFIER_TRANSACTION_DIR" ) ]] ||
+    fail "OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE requires an explicit OPENCLAW_GATEWAY_BIND."
+fi
 export OPENCLAW_IMAGE="$IMAGE_NAME"
 export OPENCLAW_DOCKER_APT_PACKAGES="${OPENCLAW_DOCKER_APT_PACKAGES:-}"
 export OPENCLAW_EXTENSIONS="${OPENCLAW_EXTENSIONS:-}"
@@ -1018,8 +1120,14 @@ export OPENCLAW_VERIFIER_REPOSITORY_IDENTITY="${OPENCLAW_VERIFIER_REPOSITORY_IDE
 export OPENCLAW_VERIFIER_BROWSER_IDENTITY="${OPENCLAW_VERIFIER_BROWSER_IDENTITY:-}"
 export OPENCLAW_VERIFIER_EFFECTIVE_YARN_VERSION="${OPENCLAW_VERIFIER_EFFECTIVE_YARN_VERSION:-}"
 
+VERIFIER_CONFIGURED_GATEWAY_BIND="$OPENCLAW_GATEWAY_BIND"
+VERIFIER_RUNTIME_GATEWAY_BIND="$OPENCLAW_GATEWAY_BIND"
+VERIFIER_BIND_OVERRIDE_AUTHORIZED="0"
 if [[ -n "$READ_ONLY_CONFIG_ENABLED" ]]; then
   VERIFIER_CONFIG_POLICY="read-only"
+  if [[ -n "$BIND_OVERRIDE_ENABLED" ]]; then
+    VERIFIER_BIND_OVERRIDE_AUTHORIZED="1"
+  fi
   if [[ -e "$VERIFIER_TRANSACTION_DIR" || -L "$VERIFIER_TRANSACTION_DIR" ]]; then
     # An interrupted Gateway recreate must be stopped from authenticated
     # journal state before a missing immutable flag can terminate recovery.
@@ -1279,6 +1387,155 @@ for (const path of process.argv.slice(2)) {
   } finally {
     fs.closeSync(fd);
   }
+}
+NODE
+}
+
+oci_sync_normal_mode_env_handoff() {
+  node - "$ENV_FILE" "$ROOT_DIR" "$(id -u)" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+
+const [envPath, rootPath, expectedUid] = process.argv.slice(2);
+if (
+  !path.isAbsolute(envPath) ||
+  !path.isAbsolute(rootPath) ||
+  path.dirname(envPath) !== rootPath ||
+  !/^[0-9]+$/.test(expectedUid)
+) {
+  throw new Error("Normal-mode environment durability target is malformed.");
+}
+const injectedFailure =
+  process.env.OPENCLAW_DOCKER_SETUP_TEST === "1"
+    ? (process.env.OPENCLAW_TEST_COMMITTED_ENV_FSYNC_FAILURE ?? "")
+    : "";
+if (!["", "file", "parent", "parent-unsupported"].includes(injectedFailure)) {
+  throw new Error("Normal-mode environment fsync failure injection is malformed.");
+}
+const injectedReplacement =
+  process.env.OPENCLAW_DOCKER_SETUP_TEST === "1"
+    ? (process.env.OPENCLAW_TEST_COMMITTED_ENV_IDENTITY_REPLACEMENT ?? "")
+    : "";
+const argvAuditPath =
+  process.env.OPENCLAW_DOCKER_SETUP_TEST === "1"
+    ? (process.env.OPENCLAW_TEST_COMMITTED_ENV_ARGV_AUDIT ?? "")
+    : "";
+const readRoot = () => {
+  const value = fs.lstatSync(rootPath, { bigint: true });
+  if (
+    !value.isDirectory() ||
+    value.isSymbolicLink() ||
+    fs.realpathSync(rootPath) !== rootPath
+  ) {
+    throw new Error("Normal-mode environment parent is unsafe.");
+  }
+  return value;
+};
+const readEnv = () => {
+  const value = fs.lstatSync(envPath, { bigint: true });
+  if (
+    !value.isFile() ||
+    value.isSymbolicLink() ||
+    value.nlink !== 1n ||
+    Number(value.mode & 0o7777n) !== 0o600 ||
+    String(value.uid) !== expectedUid
+  ) {
+    throw new Error("Normal-mode environment file is unsafe.");
+  }
+  return value;
+};
+const sameIdentity = (left, right) =>
+  left.dev === right.dev &&
+  left.ino === right.ino &&
+  left.mode === right.mode &&
+  left.nlink === right.nlink &&
+  left.uid === right.uid;
+
+const root = readRoot();
+const env = readEnv();
+let envFd;
+try {
+  envFd = fs.openSync(envPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const opened = fs.fstatSync(envFd, { bigint: true });
+  if (!sameIdentity(opened, env)) {
+    throw new Error("Normal-mode environment file changed before fsync.");
+  }
+  if (injectedFailure === "file") {
+    throw new Error("Injected normal-mode environment file fsync failure.");
+  }
+  fs.fsyncSync(envFd);
+} finally {
+  if (envFd !== undefined) {
+    fs.closeSync(envFd);
+  }
+}
+if (injectedReplacement !== "") {
+  if (!path.isAbsolute(injectedReplacement) || path.dirname(injectedReplacement) !== rootPath) {
+    throw new Error("Normal-mode environment identity replacement is malformed.");
+  }
+  const replacement = fs.lstatSync(injectedReplacement, { bigint: true });
+  if (
+    !replacement.isFile() ||
+    replacement.isSymbolicLink() ||
+    replacement.nlink !== 1n ||
+    Number(replacement.mode & 0o7777n) !== 0o600 ||
+    String(replacement.uid) !== expectedUid
+  ) {
+    throw new Error("Normal-mode environment identity replacement is unsafe.");
+  }
+  fs.renameSync(injectedReplacement, envPath);
+}
+if (!sameIdentity(readEnv(), env) || !sameIdentity(readRoot(), root)) {
+  throw new Error("Normal-mode environment identity changed after file fsync.");
+}
+let rootFd;
+try {
+  rootFd = fs.openSync(rootPath, fs.constants.O_RDONLY);
+  const opened = fs.fstatSync(rootFd, { bigint: true });
+  if (!sameIdentity(opened, root)) {
+    throw new Error("Normal-mode environment parent changed before fsync.");
+  }
+  if (injectedFailure === "parent") {
+    throw new Error("Injected normal-mode environment parent fsync failure.");
+  }
+  if (injectedFailure === "parent-unsupported") {
+    throw new Error("Injected filesystem does not support directory fsync.");
+  }
+  // Directory fsync is supported by the declared macOS/Linux setup targets.
+  // Any platform or filesystem rejection is intentionally fail-closed.
+  fs.fsyncSync(rootFd);
+} finally {
+  if (rootFd !== undefined) {
+    fs.closeSync(rootFd);
+  }
+}
+if (!sameIdentity(readEnv(), env) || !sameIdentity(readRoot(), root)) {
+  throw new Error("Normal-mode environment identity changed after parent fsync.");
+}
+if (argvAuditPath !== "") {
+  if (!path.isAbsolute(argvAuditPath)) {
+    throw new Error("Normal-mode environment argv audit path is malformed.");
+  }
+  const secretValues = Object.entries(process.env)
+    .filter(
+      ([key, value]) =>
+        typeof value === "string" &&
+        value.length > 0 &&
+        /(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)/u.test(key),
+    )
+    .map(([, value]) => value);
+  const argumentsContainSecret = process.argv
+    .slice(2)
+    .some((argument) => secretValues.some((secret) => argument.includes(secret)));
+  fs.writeFileSync(
+    argvAuditPath,
+    `${JSON.stringify({
+      argumentCount: process.argv.slice(2).length,
+      secretValueCount: secretValues.length,
+      argumentsContainSecret,
+    })}\n`,
+    { flag: "wx", mode: 0o600 },
+  );
 }
 NODE
 }
@@ -1588,6 +1845,9 @@ const expectedKeys = new Set([
   "env-backup-parent-ino",
   "transaction-format",
   "config-policy",
+  "configured-gateway-bind",
+  "runtime-gateway-bind",
+  "bind-override-authorized",
   "config-backup-present",
   "config-backup-digest",
   "config-backup-mode",
@@ -1614,12 +1874,20 @@ const expectedKeys = new Set([
 const currentOnlyKeys = new Set([
   "transaction-format",
   "config-policy",
+  "configured-gateway-bind",
+  "runtime-gateway-bind",
+  "bind-override-authorized",
   "config-dev",
   "config-ino",
   "gateway-compose-project",
   "gateway-compose-service",
   "gateway-candidate-label",
   "gateway-create-binding",
+]);
+const b48OnlyMissingKeys = new Set([
+  "configured-gateway-bind",
+  "runtime-gateway-bind",
+  "bind-override-authorized",
 ]);
 const requested = fs.lstatSync(directory, { bigint: true });
 if (
@@ -1703,14 +1971,18 @@ const parseJournal = (value) => {
     values.set(key, line.slice(separator + 1));
   }
   const missing = [...expectedKeys].filter((key) => !values.has(key));
-  if (
-    missing.length > 0 &&
-    (missing.length !== currentOnlyKeys.size ||
-      missing.some((key) => !currentOnlyKeys.has(key)))
-  ) {
-    return { kind: "incomplete" };
+  const exactlyMissing = (keys) =>
+    missing.length === keys.size && missing.every((key) => keys.has(key));
+  if (missing.length === 0) {
+    return { kind: "complete", values, contractVersion: 4 };
   }
-  return { kind: "complete", values };
+  if (exactlyMissing(b48OnlyMissingKeys)) {
+    return { kind: "complete", values, contractVersion: 3 };
+  }
+  if (exactlyMissing(currentOnlyKeys)) {
+    return { kind: "complete", values, contractVersion: 2 };
+  }
+  return { kind: "incomplete" };
 };
 const fsyncDirectory = () => {
   const fd = fs.openSync(".", fs.constants.O_RDONLY);
@@ -1809,9 +2081,11 @@ NODE
 }
 
 oci_validate_journal_shape() {
-  node - "$VERIFIER_TRANSACTION_DIR" \
-    "$VERIFIER_TRANSACTION_DIR_DEV" "$VERIFIER_TRANSACTION_DIR_INO" \
-    "$(id -u)" <<'NODE'
+  local contract_version=""
+  if contract_version="$(
+    node - "$VERIFIER_TRANSACTION_DIR" \
+      "$VERIFIER_TRANSACTION_DIR_DEV" "$VERIFIER_TRANSACTION_DIR_INO" \
+      "$(id -u)" <<'NODE'
 const fs = require("node:fs");
 const [directory, expectedDev, expectedIno, expectedUid] = process.argv.slice(2);
 const expected = new Set([
@@ -1840,6 +2114,9 @@ const expected = new Set([
   "env-backup-parent-ino",
   "transaction-format",
   "config-policy",
+  "configured-gateway-bind",
+  "runtime-gateway-bind",
+  "bind-override-authorized",
   "config-backup-present",
   "config-backup-digest",
   "config-backup-mode",
@@ -1866,12 +2143,20 @@ const expected = new Set([
 const currentOnlyKeys = new Set([
   "transaction-format",
   "config-policy",
+  "configured-gateway-bind",
+  "runtime-gateway-bind",
+  "bind-override-authorized",
   "config-dev",
   "config-ino",
   "gateway-compose-project",
   "gateway-compose-service",
   "gateway-candidate-label",
   "gateway-create-binding",
+]);
+const b48OnlyMissingKeys = new Set([
+  "configured-gateway-bind",
+  "runtime-gateway-bind",
+  "bind-override-authorized",
 ]);
 const requested = fs.lstatSync(directory, { bigint: true });
 process.chdir(directory);
@@ -1921,14 +2206,30 @@ for (const line of lines) {
   seen.add(key);
 }
 const missing = [...expected].filter((key) => !seen.has(key));
-if (
-  missing.length > 0 &&
-  (missing.length !== currentOnlyKeys.size ||
-    missing.some((key) => !currentOnlyKeys.has(key)))
-) {
+const exactlyMissing = (keys) =>
+  missing.length === keys.size && missing.every((key) => keys.has(key));
+let contractVersion;
+if (missing.length === 0) {
+  contractVersion = 4;
+} else if (exactlyMissing(b48OnlyMissingKeys)) {
+  contractVersion = 3;
+} else if (exactlyMissing(currentOnlyKeys)) {
+  contractVersion = 2;
+} else {
   throw new Error("Verifier transaction journal is incomplete.");
 }
+process.stdout.write(String(contractVersion));
 NODE
+  )"
+  then
+    :
+  else
+    fail "Verifier transaction journal shape validation failed."
+  fi
+  [[ "$contract_version" == "2" || "$contract_version" == "3" ||
+    "$contract_version" == "4" ]] ||
+    fail "Verifier transaction journal returned an unknown contract version."
+  VERIFIER_JOURNAL_CONTRACT_VERSION="$contract_version"
 }
 
 oci_remove_pinned_transaction_dir() {
@@ -2358,6 +2659,9 @@ oci_write_journal() {
     printf 'env-backup-parent-ino=%s\n' "${VERIFIER_ENV_BACKUP_PARENT_INO:-}"
     printf 'transaction-format=%s\n' "${VERIFIER_TRANSACTION_FORMAT:-}"
     printf 'config-policy=%s\n' "${VERIFIER_CONFIG_POLICY:-}"
+    printf 'configured-gateway-bind=%s\n' "${VERIFIER_CONFIGURED_GATEWAY_BIND:-}"
+    printf 'runtime-gateway-bind=%s\n' "${VERIFIER_RUNTIME_GATEWAY_BIND:-}"
+    printf 'bind-override-authorized=%s\n' "${VERIFIER_BIND_OVERRIDE_AUTHORIZED:-}"
     printf 'config-backup-present=%s\n' "${VERIFIER_CONFIG_BACKUP_PRESENT:-0}"
     printf 'config-backup-digest=%s\n' "${VERIFIER_CONFIG_BACKUP_DIGEST:-}"
     printf 'config-backup-mode=%s\n' "${VERIFIER_CONFIG_BACKUP_MODE:-}"
@@ -2512,11 +2816,16 @@ oci_operation_binding() {
   local operation_id="$1"
   local transaction_format="${2:-${VERIFIER_OPERATION_FORMAT:-}}"
   local config_policy="${3:-${VERIFIER_OPERATION_CONFIG_POLICY:-}}"
+  local configured_bind="${4:-${VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND:-}}"
+  local runtime_bind="${5:-${VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND:-}}"
+  local override_authorized="${6:-${VERIFIER_OPERATION_BIND_OVERRIDE_AUTHORIZED:-}}"
+  local contract_version="${7:-${VERIFIER_OPERATION_CONTRACT_VERSION:-}}"
   [[ "$VERIFIER_STATE_TOKEN_DIGEST" =~ ^[a-f0-9]{64}$ &&
     ( "$operation_id" == "recovery" || "$operation_id" == "cleanup" ||
       "$operation_id" =~ ^[a-f0-9]{32}$ ) ]] ||
     fail "Guarded verifier state operation binding input is malformed."
-  if [[ "$transaction_format" == "legacy" && "$config_policy" == "write" ]]; then
+  if [[ "$contract_version" == "2" &&
+    "$transaction_format" == "legacy" && "$config_policy" == "write" ]]; then
     node -e '
       const crypto = require("node:crypto");
       process.stdout.write(
@@ -2528,17 +2837,52 @@ oci_operation_binding() {
   [[ "$transaction_format" == "2" &&
     ( "$config_policy" == "write" || "$config_policy" == "read-only" ) ]] ||
     fail "Guarded verifier transaction binding policy is malformed."
+  if [[ "$contract_version" == "3" ]]; then
+    node -e '
+      const crypto = require("node:crypto");
+      process.stdout.write(
+        crypto
+          .createHash("sha256")
+          .update(process.argv.slice(1).join("\0"))
+          .digest("hex"),
+      );
+    ' "$VERIFIER_STATE_TOKEN_DIGEST" "$operation_id" "$transaction_format" "$config_policy"
+    return
+  fi
+  [[ "$contract_version" == "4" ]] ||
+    fail "Guarded verifier state operation contract version is malformed."
+  case "$configured_bind" in
+    auto | custom | lan | loopback | tailnet) ;;
+    *) fail "Guarded verifier configured Gateway bind is malformed." ;;
+  esac
+  case "$runtime_bind" in
+    auto | custom | lan | loopback | tailnet) ;;
+    *) fail "Guarded verifier runtime Gateway bind is malformed." ;;
+  esac
+  [[ "$override_authorized" == "0" || "$override_authorized" == "1" ]] ||
+    fail "Guarded verifier bind override authorization is malformed."
+  if [[ "$config_policy" == "write" || "$override_authorized" == "0" ]]; then
+    [[ "$configured_bind" == "$runtime_bind" ]] ||
+      fail "Guarded verifier non-override Gateway binds do not match."
+  else
+    [[ "$configured_bind" != "$runtime_bind" ]] ||
+      fail "Guarded verifier bind override does not represent a mismatch."
+  fi
+  [[ "$config_policy" != "write" || "$override_authorized" == "0" ]] ||
+    fail "Config-writing verifier transactions cannot authorize a bind override."
   node -e '
     const crypto = require("node:crypto");
     process.stdout.write(
       crypto
         .createHash("sha256")
         .update(
-          `${process.argv[1]}\0${process.argv[2]}\0${process.argv[3]}\0${process.argv[4]}`,
+          process.argv.slice(1).join("\0"),
         )
         .digest("hex"),
     );
-  ' "$VERIFIER_STATE_TOKEN_DIGEST" "$operation_id" "$transaction_format" "$config_policy"
+  ' \
+    "$VERIFIER_STATE_TOKEN_DIGEST" "$operation_id" "$transaction_format" "$config_policy" \
+    "$configured_bind" "$runtime_bind" "$override_authorized"
 }
 
 oci_gateway_create_binding() {
@@ -2550,6 +2894,10 @@ oci_gateway_create_binding() {
   local candidate_label="$6"
   local transaction_format="$7"
   local config_policy="$8"
+  local configured_bind="$9"
+  local runtime_bind="${10}"
+  local override_authorized="${11}"
+  local contract_version="${12}"
   [[ "$operation_binding" =~ ^[a-f0-9]{64}$ &&
     ( -z "$old_gateway" || "$old_gateway" =~ ^[a-f0-9]{64}$ ) &&
     "$runtime_image" =~ ^sha256:[a-f0-9]{64}$ &&
@@ -2557,7 +2905,32 @@ oci_gateway_create_binding() {
     "$compose_service" == "openclaw-gateway" &&
     "$candidate_label" =~ ^[a-f0-9]{64}$ &&
     "$transaction_format" == "2" &&
-    ( "$config_policy" == "write" || "$config_policy" == "read-only" ) ]] ||
+    ( "$config_policy" == "write" || "$config_policy" == "read-only" ) &&
+    ( "$contract_version" == "3" || "$contract_version" == "4" ) ]] ||
+    fail "Guarded verifier Gateway-create binding input is malformed."
+  if [[ "$contract_version" == "3" ]]; then
+    node -e '
+      const crypto = require("node:crypto");
+      process.stdout.write(
+        crypto
+          .createHash("sha256")
+          .update(process.argv.slice(1).join("\0"))
+          .digest("hex"),
+      );
+    ' \
+      "$operation_binding" "$old_gateway" "$runtime_image" \
+      "$compose_project" "$compose_service" "$candidate_label" \
+      "$transaction_format" "$config_policy"
+    return
+  fi
+  [[
+    ( "$configured_bind" == "auto" || "$configured_bind" == "custom" ||
+      "$configured_bind" == "lan" || "$configured_bind" == "loopback" ||
+      "$configured_bind" == "tailnet" ) &&
+    ( "$runtime_bind" == "auto" || "$runtime_bind" == "custom" ||
+      "$runtime_bind" == "lan" || "$runtime_bind" == "loopback" ||
+      "$runtime_bind" == "tailnet" ) &&
+    ( "$override_authorized" == "0" || "$override_authorized" == "1" ) ]] ||
     fail "Guarded verifier Gateway-create binding input is malformed."
   node -e '
     const crypto = require("node:crypto");
@@ -2570,7 +2943,8 @@ oci_gateway_create_binding() {
   ' \
     "$operation_binding" "$old_gateway" "$runtime_image" \
     "$compose_project" "$compose_service" "$candidate_label" \
-    "$transaction_format" "$config_policy"
+    "$transaction_format" "$config_policy" "$configured_bind" "$runtime_bind" \
+    "$override_authorized"
 }
 
 oci_gateway_candidate_label() {
@@ -2648,11 +3022,17 @@ oci_validate_gateway_create_contract() {
   local candidate_label="$9"
   local create_binding="${10}"
   local config_policy="${11}"
+  local configured_bind="${12}"
+  local runtime_bind="${13}"
+  local override_authorized="${14}"
+  local contract_version="${15}"
   local expected=""
   local expected_candidate_label=""
-  if [[ "$transaction_format" == "legacy" ]]; then
+  if [[ "$contract_version" == "2" && "$transaction_format" == "legacy" ]]; then
     [[ -z "$compose_project" && -z "$compose_service" &&
-      -z "$candidate_label" && -z "$create_binding" ]] ||
+      -z "$candidate_label" && -z "$create_binding" &&
+      -z "$configured_bind" && -z "$runtime_bind" &&
+      -z "$override_authorized" ]] ||
       fail "Legacy verifier journal contains unexpected Gateway-create identity."
     return
   fi
@@ -2668,7 +3048,8 @@ oci_validate_gateway_create_contract() {
     oci_gateway_create_binding \
       "$operation_binding" "$old_gateway" "$runtime_image" \
       "$compose_project" "$compose_service" "$candidate_label" \
-      "$transaction_format" "$config_policy"
+      "$transaction_format" "$config_policy" "$configured_bind" "$runtime_bind" \
+      "$override_authorized" "$contract_version"
   )"
   [[ "$create_binding" == "$expected" ]] ||
     fail "Verifier journal contains an invalid Gateway-create identity."
@@ -2896,8 +3277,12 @@ oci_stop_authenticated_gateway_candidate() {
 }
 
 oci_load_transaction_contract() {
+  local contract_version="$VERIFIER_JOURNAL_CONTRACT_VERSION"
   local transaction_format=""
   local config_policy=""
+  local configured_bind=""
+  local runtime_bind=""
+  local override_authorized=""
   local transaction_id=""
   local operation_binding=""
   local expected_operation_binding=""
@@ -2905,26 +3290,98 @@ oci_load_transaction_contract() {
   config_policy="$(oci_read_journal config-policy write)"
   transaction_id="$(oci_read_journal transaction-id)"
   operation_binding="$(oci_read_journal operation-binding)"
+  configured_bind="$(oci_read_journal configured-gateway-bind '')"
+  runtime_bind="$(oci_read_journal runtime-gateway-bind '')"
+  override_authorized="$(oci_read_journal bind-override-authorized '')"
+  [[ "$contract_version" == "2" || "$contract_version" == "3" ||
+    "$contract_version" == "4" ]] ||
+    fail "Verifier journal contract version is unavailable."
   [[ "$transaction_format" == "legacy" || "$transaction_format" == "2" ]] ||
     fail "Verifier journal contains an unknown transaction format."
   [[ "$config_policy" == "write" || "$config_policy" == "read-only" ]] ||
     fail "Verifier journal contains an unknown config policy."
   [[ "$transaction_format" != "legacy" || "$config_policy" == "write" ]] ||
     fail "Legacy verifier journals cannot claim read-only config handling."
+  if [[ "$contract_version" == "2" ]]; then
+    [[ "$transaction_format" == "legacy" && "$config_policy" == "write" ]] ||
+      fail "Legacy verifier journal has current transaction policy fields."
+    [[ -z "$configured_bind" && -z "$runtime_bind" && -z "$override_authorized" ]] ||
+      fail "Legacy verifier journal contains unexpected Gateway bind authorization."
+  elif [[ "$contract_version" == "3" ]]; then
+    [[ "$transaction_format" == "2" &&
+      -z "$configured_bind" && -z "$runtime_bind" && -z "$override_authorized" ]] ||
+      fail "b48 verifier journal does not match its exact no-override shape."
+    [[ "$VERIFIER_OPERATION_CONTRACT_VERSION" == "3" ]] ||
+      fail "b48 verifier journal requires its authenticated version 3 active marker."
+    configured_bind="$OPENCLAW_GATEWAY_BIND"
+    runtime_bind="$OPENCLAW_GATEWAY_BIND"
+    override_authorized="0"
+  else
+    [[ "$transaction_format" == "2" ]] ||
+      fail "Current verifier journal must use transaction format 2."
+  fi
+  if [[ -n "$VERIFIER_OPERATION_CONTRACT_VERSION" &&
+    "$VERIFIER_OPERATION_CONTRACT_VERSION" != "$contract_version" ]]; then
+    fail "Verifier journal version conflicts with its active-state marker."
+  fi
   if [[ -n "$VERIFIER_OPERATION_FORMAT" &&
     ( "$VERIFIER_OPERATION_FORMAT" != "$transaction_format" ||
-      "$VERIFIER_OPERATION_CONFIG_POLICY" != "$config_policy" ) ]]; then
+      "$VERIFIER_OPERATION_CONFIG_POLICY" != "$config_policy" ||
+      ( "$contract_version" == "4" &&
+        ( "$VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND" != "$configured_bind" ||
+          "$VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND" != "$runtime_bind" ||
+          "$VERIFIER_OPERATION_BIND_OVERRIDE_AUTHORIZED" != "$override_authorized" ) ) ) ]]; then
     fail "Verifier journal policy conflicts with its active-state marker."
   fi
   expected_operation_binding="$(
-    oci_operation_binding "$transaction_id" "$transaction_format" "$config_policy"
+    oci_operation_binding \
+      "$transaction_id" "$transaction_format" "$config_policy" \
+      "$configured_bind" "$runtime_bind" "$override_authorized" "$contract_version"
   )"
   [[ "$transaction_id" =~ ^[a-f0-9]{32}$ &&
     "$operation_binding" == "$expected_operation_binding" ]] ||
     fail "Verifier journal policy is not bound to its state operation."
+  VERIFIER_OPERATION_CONTRACT_VERSION="$contract_version"
   VERIFIER_OPERATION_FORMAT="$transaction_format"
   VERIFIER_OPERATION_CONFIG_POLICY="$config_policy"
-  printf '%s|%s' "$transaction_format" "$config_policy"
+  VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND="$configured_bind"
+  VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND="$runtime_bind"
+  VERIFIER_OPERATION_BIND_OVERRIDE_AUTHORIZED="$override_authorized"
+  printf '%s|%s|%s|%s|%s|%s' \
+    "$contract_version" "$transaction_format" "$config_policy" \
+    "$configured_bind" "$runtime_bind" "$override_authorized"
+}
+
+oci_validate_transaction_live_policy() {
+  local contract_version="${1:-$VERIFIER_OPERATION_CONTRACT_VERSION}"
+  local runtime_bind="${2:-$VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND}"
+  local override_authorized="${3:-$VERIFIER_OPERATION_BIND_OVERRIDE_AUTHORIZED}"
+  if [[ "$contract_version" == "2" ]]; then
+    return
+  fi
+  if [[ "$contract_version" == "3" ]]; then
+    case "$OPENCLAW_GATEWAY_BIND" in
+      auto | custom | lan | loopback | tailnet) ;;
+      *) fail "Current Docker setup Gateway bind is not supported for b48 recovery." ;;
+    esac
+    [[ -z "$BIND_OVERRIDE_ENABLED" ]] ||
+      fail "b48 verifier recovery cannot adopt a bind-override authorization."
+    return
+  fi
+  [[ "$contract_version" == "4" ]] ||
+    fail "Verifier transaction live-policy contract version is unavailable."
+  [[ "$runtime_bind" == "$OPENCLAW_GATEWAY_BIND" ]] ||
+    fail "Verifier journal runtime bind conflicts with the current Docker setup bind."
+  if [[ "$override_authorized" == "1" ]]; then
+    [[ -n "$READ_ONLY_CONFIG_ENABLED" &&
+      -n "$BIND_OVERRIDE_ENABLED" &&
+      -n "$BIND_OVERRIDE_SETTING_PRESENT" &&
+      -n "$GATEWAY_BIND_SETTING_PRESENT" ]] ||
+      fail "Verifier journal bind override is no longer authorized by current setup policy."
+  else
+    [[ -z "$BIND_OVERRIDE_ENABLED" ]] ||
+      fail "Verifier journal bind override conflicts with current operator authorization."
+  fi
 }
 
 oci_prepare_state_instance_token() {
@@ -3153,8 +3610,12 @@ oci_prepare_state_marker_contract() {
   local identity=""
   VERIFIER_STATE_MARKER_PHASE=""
   VERIFIER_STATE_TOKEN_DIGEST=""
+  VERIFIER_OPERATION_CONTRACT_VERSION=""
   VERIFIER_OPERATION_FORMAT=""
   VERIFIER_OPERATION_CONFIG_POLICY=""
+  VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND=""
+  VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND=""
+  VERIFIER_OPERATION_BIND_OVERRIDE_AUTHORIZED=""
   VERIFIER_STATE_PARENT_PATH="$(dirname "$VERIFIER_STATE_PATH")"
   identity="$(
     node - "$VERIFIER_STATE_PARENT_PATH" "$VERIFIER_STATE_PATH" <<'NODE'
@@ -3197,8 +3658,12 @@ const lstatOptional = (value) => {
 let markerState = lstatOptional(markerPath);
 let markerTokenDigest = "";
 let markerPhase = "";
+let markerContractVersion = "";
 let markerOperationFormat = "";
 let markerConfigPolicy = "";
+let markerConfiguredGatewayBind = "";
+let markerRuntimeGatewayBind = "";
+let markerBindOverrideAuthorized = "";
 const markerTemporaryState = lstatOptional(markerTemporaryPath);
 if (markerTemporaryState) {
   if (
@@ -3261,7 +3726,8 @@ if (markerState) {
         .digest("hex") &&
     Object.keys(marker).join(",") ===
       "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,operationId,operationBinding";
-  const currentBinding =
+  const supportedBinds = new Set(["auto", "custom", "lan", "loopback", "tailnet"]);
+  const b48Binding =
     marker?.contractVersion === 3 &&
     marker.transactionFormat === "2" &&
     (marker.configPolicy === "write" || marker.configPolicy === "read-only") &&
@@ -3269,13 +3735,46 @@ if (markerState) {
       crypto
         .createHash("sha256")
         .update(
-          `${marker.stateTokenDigest}\0${marker.operationId}\0${marker.transactionFormat}\0${marker.configPolicy}`,
+          [
+            marker.stateTokenDigest,
+            marker.operationId,
+            marker.transactionFormat,
+            marker.configPolicy,
+          ].join("\0"),
         )
         .digest("hex") &&
     Object.keys(marker).join(",") ===
       "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,transactionFormat,configPolicy,operationId,operationBinding";
+  const currentBinding =
+    marker?.contractVersion === 4 &&
+    marker.transactionFormat === "2" &&
+    (marker.configPolicy === "write" || marker.configPolicy === "read-only") &&
+    supportedBinds.has(marker.configuredGatewayBind) &&
+    supportedBinds.has(marker.runtimeGatewayBind) &&
+    (marker.bindOverrideAuthorized === "0" || marker.bindOverrideAuthorized === "1") &&
+    (marker.bindOverrideAuthorized === "1"
+      ? marker.configPolicy === "read-only" &&
+        marker.configuredGatewayBind !== marker.runtimeGatewayBind
+      : marker.configuredGatewayBind === marker.runtimeGatewayBind) &&
+    marker.operationBinding ===
+      crypto
+        .createHash("sha256")
+        .update(
+          [
+            marker.stateTokenDigest,
+            marker.operationId,
+            marker.transactionFormat,
+            marker.configPolicy,
+            marker.configuredGatewayBind,
+            marker.runtimeGatewayBind,
+            marker.bindOverrideAuthorized,
+          ].join("\0"),
+        )
+        .digest("hex") &&
+    Object.keys(marker).join(",") ===
+      "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,transactionFormat,configPolicy,configuredGatewayBind,runtimeGatewayBind,bindOverrideAuthorized,operationId,operationBinding";
   if (
-    (!legacyBinding && !currentBinding) ||
+    (!legacyBinding && !b48Binding && !currentBinding) ||
     (marker.markerState !== "active" && marker.markerState !== "cleanup") ||
     marker.statePath !== statePath ||
     !/^[0-9]+$/.test(marker.stateDev) ||
@@ -3287,14 +3786,22 @@ if (markerState) {
     !/^(?:recovery|cleanup|[a-f0-9]{32})$/.test(marker.operationId) ||
     !/^[a-f0-9]{64}$/.test(marker.operationBinding) ||
     markerRaw !== `${JSON.stringify(marker)}\n` ||
-    (marker.contractVersion !== 2 && marker.contractVersion !== 3)
+    (marker.contractVersion !== 2 &&
+      marker.contractVersion !== 3 &&
+      marker.contractVersion !== 4)
   ) {
     throw new Error("Guarded verifier active-state marker is malformed.");
   }
   markerTokenDigest = marker.stateTokenDigest;
   markerPhase = marker.markerState;
+  markerContractVersion = String(marker.contractVersion);
   markerOperationFormat = marker.contractVersion === 2 ? "legacy" : marker.transactionFormat;
   markerConfigPolicy = marker.contractVersion === 2 ? "write" : marker.configPolicy;
+  markerConfiguredGatewayBind =
+    marker.contractVersion === 4 ? marker.configuredGatewayBind : "";
+  markerRuntimeGatewayBind = marker.contractVersion === 4 ? marker.runtimeGatewayBind : "";
+  markerBindOverrideAuthorized =
+    marker.contractVersion === 4 ? marker.bindOverrideAuthorized : "";
   const expectedDev = BigInt(marker.stateDev);
   const expectedIno = BigInt(marker.stateIno);
   const current = lstatOptional(statePath);
@@ -3394,8 +3901,12 @@ process.stdout.write(
     markerName,
     markerTokenDigest,
     markerPhase,
+    markerContractVersion,
     markerOperationFormat,
     markerConfigPolicy,
+    markerConfiguredGatewayBind,
+    markerRuntimeGatewayBind,
+    markerBindOverrideAuthorized,
   ].join("|"),
 );
 NODE
@@ -3403,8 +3914,12 @@ NODE
   IFS='|' read -r \
     VERIFIER_STATE_PARENT_DEV VERIFIER_STATE_PARENT_INO \
     VERIFIER_STATE_MARKER_NAME VERIFIER_STATE_TOKEN_DIGEST \
-    VERIFIER_STATE_MARKER_PHASE VERIFIER_OPERATION_FORMAT \
-    VERIFIER_OPERATION_CONFIG_POLICY <<<"$identity"
+    VERIFIER_STATE_MARKER_PHASE VERIFIER_OPERATION_CONTRACT_VERSION \
+    VERIFIER_OPERATION_FORMAT \
+    VERIFIER_OPERATION_CONFIG_POLICY \
+    VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND \
+    VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND \
+    VERIFIER_OPERATION_BIND_OVERRIDE_AUTHORIZED <<<"$identity"
   [[ "$VERIFIER_STATE_PARENT_DEV" =~ ^[0-9]+$ &&
     "$VERIFIER_STATE_PARENT_INO" =~ ^[0-9]+$ &&
     "$VERIFIER_STATE_MARKER_NAME" =~ ^\.openclaw-verifier-active-[a-f0-9]{64}$ &&
@@ -3413,12 +3928,31 @@ NODE
     ( -z "$VERIFIER_STATE_MARKER_PHASE" ||
       "$VERIFIER_STATE_MARKER_PHASE" == "active" ||
       "$VERIFIER_STATE_MARKER_PHASE" == "cleanup" ) &&
+    ( -z "$VERIFIER_OPERATION_CONTRACT_VERSION" ||
+      "$VERIFIER_OPERATION_CONTRACT_VERSION" == "2" ||
+      "$VERIFIER_OPERATION_CONTRACT_VERSION" == "3" ||
+      "$VERIFIER_OPERATION_CONTRACT_VERSION" == "4" ) &&
     ( -z "$VERIFIER_OPERATION_FORMAT" ||
       "$VERIFIER_OPERATION_FORMAT" == "legacy" ||
       "$VERIFIER_OPERATION_FORMAT" == "2" ) &&
     ( -z "$VERIFIER_OPERATION_CONFIG_POLICY" ||
       "$VERIFIER_OPERATION_CONFIG_POLICY" == "write" ||
-      "$VERIFIER_OPERATION_CONFIG_POLICY" == "read-only" ) ]] ||
+      "$VERIFIER_OPERATION_CONFIG_POLICY" == "read-only" ) &&
+    ( -z "$VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND" ||
+      "$VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND" == "auto" ||
+      "$VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND" == "custom" ||
+      "$VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND" == "lan" ||
+      "$VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND" == "loopback" ||
+      "$VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND" == "tailnet" ) &&
+    ( -z "$VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND" ||
+      "$VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND" == "auto" ||
+      "$VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND" == "custom" ||
+      "$VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND" == "lan" ||
+      "$VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND" == "loopback" ||
+      "$VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND" == "tailnet" ) &&
+    ( -z "$VERIFIER_OPERATION_BIND_OVERRIDE_AUTHORIZED" ||
+      "$VERIFIER_OPERATION_BIND_OVERRIDE_AUTHORIZED" == "0" ||
+      "$VERIFIER_OPERATION_BIND_OVERRIDE_AUTHORIZED" == "1" ) ]] ||
     fail "Guarded verifier active-state marker identity is malformed."
 }
 
@@ -3434,7 +3968,11 @@ oci_publish_state_marker() {
     "$VERIFIER_STATE_PARENT_DEV" "$VERIFIER_STATE_PARENT_INO" \
     "$VERIFIER_STATE_PATH" "$VERIFIER_STATE_DIR_DEV" "$VERIFIER_STATE_DIR_INO" \
     "$VERIFIER_STATE_TOKEN_DIGEST" "$operation_id" "$operation_binding" \
-    "$VERIFIER_OPERATION_FORMAT" "$VERIFIER_OPERATION_CONFIG_POLICY" <<'NODE'
+    "$VERIFIER_OPERATION_CONTRACT_VERSION" \
+    "$VERIFIER_OPERATION_FORMAT" "$VERIFIER_OPERATION_CONFIG_POLICY" \
+    "$VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND" \
+    "$VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND" \
+    "$VERIFIER_OPERATION_BIND_OVERRIDE_AUTHORIZED" <<'NODE'
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 
@@ -3448,8 +3986,12 @@ const [
   stateTokenDigest,
   operationId,
   operationBinding,
+  contractVersion,
   transactionFormat,
   configPolicy,
+  configuredGatewayBind,
+  runtimeGatewayBind,
+  bindOverrideAuthorized,
 ] = process.argv.slice(2);
 const expectedUid = BigInt(process.getuid());
 process.chdir("..");
@@ -3463,17 +4005,30 @@ if (
 ) {
   throw new Error("Guarded verifier active-state marker parent identity changed.");
 }
+const supportedBinds = new Set(["auto", "custom", "lan", "loopback", "tailnet"]);
 if (
   !(
-    (transactionFormat === "legacy" && configPolicy === "write") ||
-    (transactionFormat === "2" &&
-      (configPolicy === "write" || configPolicy === "read-only"))
+    (contractVersion === "2" &&
+      transactionFormat === "legacy" &&
+      configPolicy === "write") ||
+    (contractVersion === "3" &&
+      transactionFormat === "2" &&
+      (configPolicy === "write" || configPolicy === "read-only")) ||
+    (contractVersion === "4" &&
+      transactionFormat === "2" &&
+      (configPolicy === "write" || configPolicy === "read-only") &&
+      supportedBinds.has(configuredGatewayBind) &&
+      supportedBinds.has(runtimeGatewayBind) &&
+      (bindOverrideAuthorized === "0" || bindOverrideAuthorized === "1") &&
+      (bindOverrideAuthorized === "1"
+        ? configPolicy === "read-only" && configuredGatewayBind !== runtimeGatewayBind
+        : configuredGatewayBind === runtimeGatewayBind))
   )
 ) {
   throw new Error("Guarded verifier active-state marker policy is malformed.");
 }
 const expected = {
-  contractVersion: transactionFormat === "legacy" ? 2 : 3,
+  contractVersion: Number(contractVersion),
   markerState: "active",
   statePath,
   stateDev,
@@ -3481,7 +4036,19 @@ const expected = {
   parentDev: expectedParentDev,
   parentIno: expectedParentIno,
   stateTokenDigest,
-  ...(transactionFormat === "legacy" ? {} : { transactionFormat, configPolicy }),
+  ...(contractVersion === "2"
+    ? {}
+    : {
+        transactionFormat,
+        configPolicy,
+        ...(contractVersion === "3"
+          ? {}
+          : {
+              configuredGatewayBind,
+              runtimeGatewayBind,
+              bindOverrideAuthorized,
+            }),
+      }),
   operationId,
   operationBinding,
 };
@@ -3529,26 +4096,61 @@ if (existing) {
   const existingFormat =
     existing.contractVersion === 2 ? "legacy" : existing.transactionFormat;
   const existingPolicy = existing.contractVersion === 2 ? "write" : existing.configPolicy;
+  const existingConfiguredBind =
+    existing.contractVersion === 4 ? existing.configuredGatewayBind : "";
+  const existingRuntimeBind =
+    existing.contractVersion === 4 ? existing.runtimeGatewayBind : "";
+  const existingOverride =
+    existing.contractVersion === 4 ? existing.bindOverrideAuthorized : "";
   const existingBinding =
-    existingFormat === "legacy"
+    existing.contractVersion === 2
       ? crypto
           .createHash("sha256")
           .update(`${stateTokenDigest}\0${existing.operationId}`)
           .digest("hex")
-      : crypto
+      : existing.contractVersion === 3
+        ? crypto
+            .createHash("sha256")
+            .update(
+              [
+                stateTokenDigest,
+                existing.operationId,
+                existingFormat,
+                existingPolicy,
+              ].join("\0"),
+            )
+            .digest("hex")
+        : crypto
           .createHash("sha256")
           .update(
-            `${stateTokenDigest}\0${existing.operationId}\0${existingFormat}\0${existingPolicy}`,
+            [
+              stateTokenDigest,
+              existing.operationId,
+              existingFormat,
+              existingPolicy,
+              existingConfiguredBind,
+              existingRuntimeBind,
+              existingOverride,
+            ].join("\0"),
           )
           .digest("hex");
   const expectedKeys =
-    existingFormat === "legacy"
+    existing.contractVersion === 2
       ? "contractVersion,markerState,operationBinding,operationId,parentDev,parentIno,stateDev,stateIno,statePath,stateTokenDigest"
-      : "configPolicy,contractVersion,markerState,operationBinding,operationId,parentDev,parentIno,stateDev,stateIno,statePath,stateTokenDigest,transactionFormat";
+      : existing.contractVersion === 3
+        ? "configPolicy,contractVersion,markerState,operationBinding,operationId,parentDev,parentIno,stateDev,stateIno,statePath,stateTokenDigest,transactionFormat"
+        : "bindOverrideAuthorized,configPolicy,configuredGatewayBind,contractVersion,markerState,operationBinding,operationId,parentDev,parentIno,runtimeGatewayBind,stateDev,stateIno,statePath,stateTokenDigest,transactionFormat";
   if (
-    (existing.contractVersion !== 2 && existing.contractVersion !== 3) ||
+    (existing.contractVersion !== 2 &&
+      existing.contractVersion !== 3 &&
+      existing.contractVersion !== 4) ||
+    String(existing.contractVersion) !== contractVersion ||
     existingFormat !== transactionFormat ||
     existingPolicy !== configPolicy ||
+    (existing.contractVersion === 4 &&
+      (existingConfiguredBind !== configuredGatewayBind ||
+        existingRuntimeBind !== runtimeGatewayBind ||
+        existingOverride !== bindOverrideAuthorized)) ||
     (existing.markerState !== "active" && existing.markerState !== "cleanup") ||
     existing.statePath !== statePath ||
     existing.stateDev !== stateDev ||
@@ -3672,24 +4274,58 @@ try {
 }
 const markerFormat = marker?.contractVersion === 2 ? "legacy" : marker?.transactionFormat;
 const markerPolicy = marker?.contractVersion === 2 ? "write" : marker?.configPolicy;
+const markerConfiguredBind =
+  marker?.contractVersion === 4 ? marker?.configuredGatewayBind : "";
+const markerRuntimeBind = marker?.contractVersion === 4 ? marker?.runtimeGatewayBind : "";
+const markerOverride = marker?.contractVersion === 4 ? marker?.bindOverrideAuthorized : "";
 const markerBinding =
-  markerFormat === "legacy"
+  marker?.contractVersion === 2
     ? crypto
         .createHash("sha256")
         .update(`${stateTokenDigest}\0${marker.operationId}`)
         .digest("hex")
-    : crypto
+    : marker?.contractVersion === 3
+      ? crypto
+          .createHash("sha256")
+          .update(
+            [stateTokenDigest, marker.operationId, markerFormat, markerPolicy].join("\0"),
+          )
+          .digest("hex")
+      : crypto
         .createHash("sha256")
         .update(
-          `${stateTokenDigest}\0${marker.operationId}\0${markerFormat}\0${markerPolicy}`,
+          [
+            stateTokenDigest,
+            marker.operationId,
+            markerFormat,
+            markerPolicy,
+            markerConfiguredBind,
+            markerRuntimeBind,
+            markerOverride,
+          ].join("\0"),
         )
         .digest("hex");
 const expectedKeys =
-  markerFormat === "legacy"
+  marker?.contractVersion === 2
     ? "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,operationId,operationBinding"
-    : "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,transactionFormat,configPolicy,operationId,operationBinding";
+    : marker?.contractVersion === 3
+      ? "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,transactionFormat,configPolicy,operationId,operationBinding"
+      : "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,transactionFormat,configPolicy,configuredGatewayBind,runtimeGatewayBind,bindOverrideAuthorized,operationId,operationBinding";
+const supportedBinds = new Set(["auto", "custom", "lan", "loopback", "tailnet"]);
 if (
-  (marker?.contractVersion !== 2 && marker?.contractVersion !== 3) ||
+  (marker?.contractVersion !== 2 &&
+    marker?.contractVersion !== 3 &&
+    marker?.contractVersion !== 4) ||
+  (marker?.contractVersion === 3 &&
+    (markerFormat !== "2" ||
+      (markerPolicy !== "write" && markerPolicy !== "read-only"))) ||
+  (marker?.contractVersion === 4 &&
+    (!supportedBinds.has(markerConfiguredBind) ||
+      !supportedBinds.has(markerRuntimeBind) ||
+      (markerOverride !== "0" && markerOverride !== "1") ||
+      (markerOverride === "1"
+        ? markerPolicy !== "read-only" || markerConfiguredBind === markerRuntimeBind
+        : markerConfiguredBind !== markerRuntimeBind))) ||
   (marker.markerState !== "active" && marker.markerState !== "cleanup") ||
   marker.statePath !== statePath ||
   marker.stateDev !== stateDev ||
@@ -3833,24 +4469,58 @@ try {
 }
 const markerFormat = marker?.contractVersion === 2 ? "legacy" : marker?.transactionFormat;
 const markerPolicy = marker?.contractVersion === 2 ? "write" : marker?.configPolicy;
+const markerConfiguredBind =
+  marker?.contractVersion === 4 ? marker?.configuredGatewayBind : "";
+const markerRuntimeBind = marker?.contractVersion === 4 ? marker?.runtimeGatewayBind : "";
+const markerOverride = marker?.contractVersion === 4 ? marker?.bindOverrideAuthorized : "";
 const expectedBinding =
-  markerFormat === "legacy"
+  marker?.contractVersion === 2
     ? crypto
         .createHash("sha256")
         .update(`${stateTokenDigest}\0${marker.operationId}`)
         .digest("hex")
-    : crypto
+    : marker?.contractVersion === 3
+      ? crypto
+          .createHash("sha256")
+          .update(
+            [stateTokenDigest, marker.operationId, markerFormat, markerPolicy].join("\0"),
+          )
+          .digest("hex")
+      : crypto
         .createHash("sha256")
         .update(
-          `${stateTokenDigest}\0${marker.operationId}\0${markerFormat}\0${markerPolicy}`,
+          [
+            stateTokenDigest,
+            marker.operationId,
+            markerFormat,
+            markerPolicy,
+            markerConfiguredBind,
+            markerRuntimeBind,
+            markerOverride,
+          ].join("\0"),
         )
         .digest("hex");
 const expectedKeys =
-  markerFormat === "legacy"
+  marker?.contractVersion === 2
     ? "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,operationId,operationBinding"
-    : "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,transactionFormat,configPolicy,operationId,operationBinding";
+    : marker?.contractVersion === 3
+      ? "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,transactionFormat,configPolicy,operationId,operationBinding"
+      : "contractVersion,markerState,statePath,stateDev,stateIno,parentDev,parentIno,stateTokenDigest,transactionFormat,configPolicy,configuredGatewayBind,runtimeGatewayBind,bindOverrideAuthorized,operationId,operationBinding";
+const supportedBinds = new Set(["auto", "custom", "lan", "loopback", "tailnet"]);
 if (
-  (marker?.contractVersion !== 2 && marker?.contractVersion !== 3) ||
+  (marker?.contractVersion !== 2 &&
+    marker?.contractVersion !== 3 &&
+    marker?.contractVersion !== 4) ||
+  (marker?.contractVersion === 3 &&
+    (markerFormat !== "2" ||
+      (markerPolicy !== "write" && markerPolicy !== "read-only"))) ||
+  (marker?.contractVersion === 4 &&
+    (!supportedBinds.has(markerConfiguredBind) ||
+      !supportedBinds.has(markerRuntimeBind) ||
+      (markerOverride !== "0" && markerOverride !== "1") ||
+      (markerOverride === "1"
+        ? markerPolicy !== "read-only" || markerConfiguredBind === markerRuntimeBind
+        : markerConfiguredBind !== markerRuntimeBind))) ||
   marker.markerState !== "cleanup" ||
   marker.statePath !== statePath ||
   marker.stateDev !== stateDev ||
@@ -5415,6 +6085,9 @@ finish_committed_verifier_transaction() {
   local env_backup_parent_ino=""
   local transaction_format=""
   local config_policy=""
+  local configured_bind=""
+  local runtime_bind=""
+  local override_authorized=""
   local config_backup_present=""
   local config_backup_digest=""
   local config_backup_mode=""
@@ -5439,6 +6112,9 @@ finish_committed_verifier_transaction() {
   oci_load_transaction_contract >/dev/null
   transaction_format="$VERIFIER_OPERATION_FORMAT"
   config_policy="$VERIFIER_OPERATION_CONFIG_POLICY"
+  configured_bind="$VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND"
+  runtime_bind="$VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND"
+  override_authorized="$VERIFIER_OPERATION_BIND_OVERRIDE_AUTHORIZED"
   phase="$(oci_read_journal phase)"
   oci_assert_known_phase "$phase"
   [[ "$phase" == "committed" ]] ||
@@ -5500,13 +6176,19 @@ finish_committed_verifier_transaction() {
   oci_validate_gateway_create_contract \
     "$phase" "$transaction_format" "$operation_binding" "$old_gateway" \
     "$transaction_id" "$runtime_image" "$compose_project" "$compose_service" \
-    "$candidate_label" "$create_binding" "$config_policy"
+    "$candidate_label" "$create_binding" "$config_policy" \
+    "$configured_bind" "$runtime_bind" "$override_authorized" \
+    "$VERIFIER_OPERATION_CONTRACT_VERSION"
   oci_validate_config_transaction_artifact \
     "$config_policy" "$config_backup_present" "$config_backup_digest"
   oci_validate_restore_state
   [[ -z "$(oci_read_journal restore-state)" ]] ||
     fail "Committed verifier transaction retains incomplete restore state."
   if [[ "$config_policy" == "read-only" ]]; then
+    validate_read_only_existing_config \
+      "$configured_bind" "$runtime_bind" "$override_authorized" \
+      "$config_dev" "$config_ino" "$config_backup_digest" "$config_backup_mode" \
+      "$config_backup_parent_dev" "$config_backup_parent_ino"
     [[ ! -e "$VERIFIER_TRANSACTION_DIR/config.backup" &&
       ! -L "$VERIFIER_TRANSACTION_DIR/config.backup" ]] ||
       fail "Read-only verifier transaction contains a plaintext config backup."
@@ -5528,6 +6210,12 @@ finish_committed_verifier_transaction() {
       "true" "$candidate_label" >/dev/null
   fi
   oci_assert_exact_gateway_ready "$new_gateway" "$runtime_image" "$docker_socket_path"
+  if [[ -n "$READ_ONLY_CONFIG_PROCESS_SETTING_PRESENT" &&
+    -z "$READ_ONLY_CONFIG_ENABLED" &&
+    -n "$BIND_OVERRIDE_PROCESS_SETTING_PRESENT" &&
+    -n "$BIND_OVERRIDE_ENABLED" ]]; then
+    fail "OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE requires read-only guarded verifier publication."
+  fi
   if [[ -n "$candidate" ]]; then
     oci_remove_exact_tag "$candidate_tag" "$candidate"
     # The published metadata image is an intentional direct child of the
@@ -5545,6 +6233,25 @@ finish_committed_verifier_transaction() {
   [[ ! -L "$VERIFIER_LOCK_DIR" ]] ||
     fail "Guarded verifier lifecycle lock must not be a symlink."
   [[ ! -d "$VERIFIER_LOCK_DIR" ]] || oci_assert_lock_tree
+  if [[ -z "$READ_ONLY_CONFIG_ENABLED" &&
+    ( -n "$READ_ONLY_CONFIG_PROCESS_SETTING_PRESENT" ||
+      ( "$config_policy" == "read-only" &&
+        -n "$READ_ONLY_CONFIG_SETTING_PRESENT" ) ) ]]; then
+    [[ -z "$BIND_OVERRIDE_ENABLED" ]] ||
+      fail "OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE requires read-only guarded verifier publication."
+    OPENCLAW_SETUP_READ_ONLY_CONFIG="0"
+    OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE="0"
+    export \
+      OPENCLAW_SETUP_READ_ONLY_CONFIG \
+      OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE
+    oci_wait_transaction_state_test_barrier committed-env-persist
+    upsert_env "$ENV_FILE" \
+      OPENCLAW_SETUP_READ_ONLY_CONFIG \
+      OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE
+    oci_sync_normal_mode_env_handoff
+    oci_wait_transaction_state_test_barrier committed-env-durable
+    [[ ! -d "$VERIFIER_LOCK_DIR" ]] || oci_assert_lock_tree
+  fi
   oci_mark_state_cleanup
   oci_remove_pinned_transaction_dir
   rm -rf "$VERIFIER_LOCK_DIR"
@@ -5579,6 +6286,9 @@ rollback_verifier_transaction() {
   local env_backup_parent_ino=""
   local transaction_format=""
   local config_policy=""
+  local configured_bind=""
+  local runtime_bind=""
+  local override_authorized=""
   local config_backup_present=""
   local config_backup_digest=""
   local config_backup_mode=""
@@ -5614,6 +6324,9 @@ rollback_verifier_transaction() {
     oci_load_transaction_contract >/dev/null
     transaction_format="$VERIFIER_OPERATION_FORMAT"
     config_policy="$VERIFIER_OPERATION_CONFIG_POLICY"
+    configured_bind="$VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND"
+    runtime_bind="$VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND"
+    override_authorized="$VERIFIER_OPERATION_BIND_OVERRIDE_AUTHORIZED"
     phase="$(oci_read_journal phase)"
     oci_assert_known_phase "$phase"
     if [[ "$phase" == "committed" ]]; then
@@ -5677,7 +6390,9 @@ rollback_verifier_transaction() {
     oci_validate_gateway_create_contract \
       "$phase" "$transaction_format" "$operation_binding" "$old_gateway" \
       "$transaction_id" "$runtime_image" "$compose_project" "$compose_service" \
-      "$candidate_label" "$create_binding" "$config_policy"
+      "$candidate_label" "$create_binding" "$config_policy" \
+      "$configured_bind" "$runtime_bind" "$override_authorized" \
+      "$VERIFIER_OPERATION_CONTRACT_VERSION"
     oci_validate_config_transaction_artifact \
       "$config_policy" "$config_backup_present" "$config_backup_digest"
     oci_validate_restore_state
@@ -5704,7 +6419,17 @@ rollback_verifier_transaction() {
       fi
       fail "Verifier recovery could not authenticate its exact Gateway candidate."
     fi
+    oci_validate_transaction_live_policy \
+      "$VERIFIER_OPERATION_CONTRACT_VERSION" "$runtime_bind" "$override_authorized"
     if [[ "$config_policy" == "read-only" ]]; then
+      assert_protected_config_immutable \
+        "Protected OpenClaw config before verifier recovery" \
+        "$config_dev" "$config_ino" "$config_backup_digest" "$config_backup_mode" \
+        "$config_backup_parent_dev" "$config_backup_parent_ino"
+      validate_read_only_existing_config \
+        "$configured_bind" "$runtime_bind" "$override_authorized" \
+        "$config_dev" "$config_ino" "$config_backup_digest" "$config_backup_mode" \
+        "$config_backup_parent_dev" "$config_backup_parent_ino"
       [[ ! -e "$VERIFIER_TRANSACTION_DIR/config.backup" &&
         ! -L "$VERIFIER_TRANSACTION_DIR/config.backup" ]] ||
         fail "Read-only verifier transaction contains a plaintext config backup."
@@ -5714,10 +6439,6 @@ rollback_verifier_transaction() {
         "$config_backup_parent_dev" "$config_backup_parent_ino" \
         "$config_dev" "$config_ino" \
         "Protected OpenClaw config before verifier recovery"
-      assert_protected_config_immutable \
-        "Protected OpenClaw config before verifier recovery" \
-        "$config_dev" "$config_ino" "$config_backup_digest" "$config_backup_mode" \
-        "$config_backup_parent_dev" "$config_backup_parent_ino"
     fi
     oci_assert_owned_mode "$VERIFIER_TRANSACTION_DIR/env.backup" 600
     oci_restore_transaction_file \
@@ -5841,6 +6562,7 @@ recover_existing_verifier_transaction_before_mutation() {
     oci_load_transaction_contract >/dev/null
   fi
   if [[ -z "$VERIFIER_OPERATION_FORMAT" ]]; then
+    VERIFIER_OPERATION_CONTRACT_VERSION="2"
     VERIFIER_OPERATION_FORMAT="legacy"
     VERIFIER_OPERATION_CONFIG_POLICY="write"
   fi
@@ -5890,6 +6612,7 @@ recover_existing_verifier_transaction_before_mutation() {
       oci_assert_known_phase "$phase"
       if [[ "$phase" == "committed" ]]; then
         finish_committed_verifier_transaction
+        VERIFIER_COMMITTED_RECOVERY_COMPLETED="1"
       else
         # Recovery exits with the prior failure status. Most importantly, it
         # runs before any setup write can replace a substituted protected path.
@@ -6062,8 +6785,12 @@ prepare_and_publish_verifier_toolchain() {
   OPENCLAW_VERIFIER_TRANSACTION_ID="$(
     node -e 'process.stdout.write(require("node:crypto").randomBytes(16).toString("hex"))'
   )"
+  VERIFIER_OPERATION_CONTRACT_VERSION="4"
   VERIFIER_OPERATION_FORMAT="$VERIFIER_TRANSACTION_FORMAT"
   VERIFIER_OPERATION_CONFIG_POLICY="$VERIFIER_CONFIG_POLICY"
+  VERIFIER_OPERATION_CONFIGURED_GATEWAY_BIND="$VERIFIER_CONFIGURED_GATEWAY_BIND"
+  VERIFIER_OPERATION_RUNTIME_GATEWAY_BIND="$VERIFIER_RUNTIME_GATEWAY_BIND"
+  VERIFIER_OPERATION_BIND_OVERRIDE_AUTHORIZED="$VERIFIER_BIND_OVERRIDE_AUTHORIZED"
   VERIFIER_OPERATION_BINDING="$(
     oci_operation_binding "$OPENCLAW_VERIFIER_TRANSACTION_ID"
   )"
@@ -6288,7 +7015,9 @@ NODE
       "$VERIFIER_OPERATION_BINDING" "$VERIFIER_OLD_GATEWAY_ID" \
       "$VERIFIER_RUNTIME_IMAGE_ID" "$VERIFIER_GATEWAY_COMPOSE_PROJECT" \
       "$VERIFIER_GATEWAY_COMPOSE_SERVICE" "$VERIFIER_GATEWAY_CANDIDATE_LABEL" \
-      "$VERIFIER_TRANSACTION_FORMAT" "$VERIFIER_CONFIG_POLICY"
+      "$VERIFIER_TRANSACTION_FORMAT" "$VERIFIER_CONFIG_POLICY" \
+      "$VERIFIER_CONFIGURED_GATEWAY_BIND" "$VERIFIER_RUNTIME_GATEWAY_BIND" \
+      "$VERIFIER_BIND_OVERRIDE_AUTHORIZED" "$VERIFIER_OPERATION_CONTRACT_VERSION"
   )"
   oci_write_journal gateway-create-intent
   OPENCLAW_IMAGE="$VERIFIER_RUNTIME_IMAGE_ID" \
@@ -6372,6 +7101,10 @@ if [[ -n "$VERIFIER_ENABLED" ]]; then
   # images, or changing the running Gateway.
   oci_assert_state_dir
   recover_existing_verifier_transaction_before_mutation
+  if [[ -n "$VERIFIER_COMMITTED_RECOVERY_COMPLETED" ]]; then
+    echo "Completed authenticated cleanup for the already-committed guarded verifier publication."
+    exit 0
+  fi
   oci_assert_pinned_state_dir
 fi
 if [[ -n "$READ_ONLY_CONFIG_ENABLED" ]]; then
@@ -6386,6 +7119,11 @@ if [[ -n "$READ_ONLY_CONFIG_SETTING_PRESENT" ]]; then
   # Persist an explicit choice so interrupted verifier recovery cannot silently
   # fall back to the config-mutating default on retry.
   upsert_env "$ENV_FILE" OPENCLAW_SETUP_READ_ONLY_CONFIG
+fi
+if [[ -n "$BIND_OVERRIDE_SETTING_PRESENT" ]]; then
+  # The override is an explicit operator authorization and must survive a
+  # verifier crash without being inferred from the normal Docker bind default.
+  upsert_env "$ENV_FILE" OPENCLAW_SETUP_READ_ONLY_CONFIG_ALLOW_BIND_OVERRIDE
 fi
 upsert_env "$ENV_FILE" \
   OPENCLAW_CONFIG_DIR \
