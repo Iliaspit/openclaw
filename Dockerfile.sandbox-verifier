@@ -58,7 +58,9 @@ USER node
 RUN --mount=type=cache,id=openclaw-verifier-yarn-cache,target=/home/node/.yarn-cache,uid=1000,gid=1000,sharing=locked \
   declared_package_manager="$(node -p "require('./package.json').packageManager")" \
   && test "${declared_package_manager}" = "${OPENCLAW_VERIFIER_PACKAGE_MANAGER}" \
-  && YARN_ENABLE_GLOBAL_CACHE=1 YARN_CACHE_FOLDER=/home/node/.yarn-cache yarn install --immutable \
+  && YARN_ENABLE_GLOBAL_CACHE=1 YARN_CACHE_FOLDER=/home/node/.yarn-cache \
+    YARN_NODE_LINKER=node-modules yarn install --immutable \
+  && test -d /build/workspace/node_modules \
   && PLAYWRIGHT_BROWSERS_PATH=/build/browsers yarn exec playwright install chromium \
   && test -n "$(find /build/browsers -type f \
     \( -name chrome -o -name chrome-headless-shell -o -name chromium -o -name headless_shell \) \

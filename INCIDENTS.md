@@ -604,3 +604,8 @@ Consult this before investigating a new issue or making a related change.
    - **Issue:** `WORKDIR /build/workspace` created the directory as root before source was copied with `--chown=node:node`. The non-root Yarn install could read the copied repository but failed when it tried to create `/build/workspace/.yarn`.
    - **Fix and why:** Create both verifier build roots explicitly as `node:node` before switching the builder to the non-root user. Keep the source copy and install non-root.
    - **Result:** The offline verifier toolchain build can create its transient Yarn and browser state without granting broader privileges.
+
+5. **A repository PnP default left no verifier dependency tree to publish**
+   - **Issue:** The guarded verifier image publishes a read-only `node_modules` artifact, but Yarn honored the repository's PnP linker during its immutable install. Preparation therefore failed when the required physical dependency root did not exist.
+   - **Fix and why:** Keep the repository-pinned Yarn version and immutable lockfile install while selecting Yarn's supported `node-modules` linker for this dedicated artifact build, then require the dependency root before browser installation and provenance preparation.
+   - **Result:** The verifier publishes the physical, content-verified dependency tree required by its read-only image mount without changing the product repository or its package-manager files.
