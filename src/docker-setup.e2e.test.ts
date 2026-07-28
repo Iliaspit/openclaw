@@ -1597,7 +1597,14 @@ describe("scripts/docker/setup.sh", () => {
       true,
     );
     expect(
-      buildLines.some((line) => line.includes(`OPENCLAW_RUNTIME_IMAGE=sha256:${"a".repeat(64)}`)),
+      buildLines.some((line) =>
+        line.includes(`OPENCLAW_RUNTIME_IMAGE=openclaw-verifier-runtime-id:${"a".repeat(64)}`),
+      ),
+    ).toBe(true);
+    expect(
+      buildLines.some((line) =>
+        line.includes(`OPENCLAW_RUNTIME_IMAGE_ID=sha256:${"a".repeat(64)}`),
+      ),
     ).toBe(true);
     const lines = setupLog.split("\n").filter(Boolean);
     expect(
@@ -2831,6 +2838,32 @@ describe("scripts/docker/setup.sh", () => {
     await expect(
       stat(join(isolated.stateRoot, "operator-state", "openclaw", "verifier", "lock")),
     ).rejects.toThrow();
+  });
+
+  it("reuses an unchanged running Gateway after a pre-create publication failure", async () => {
+    const isolated = await createDockerSetupSandbox();
+    await writeFile(join(isolated.rootDir, "Dockerfile.sandbox-verifier"), "FROM scratch\n");
+    const priorGateway = "9".repeat(64);
+    const priorImage = `sha256:${"8".repeat(64)}`;
+    const result = await runVerifierDockerSetup(isolated, {
+      OPENCLAW_SANDBOX: "1",
+      OPENCLAW_VERIFIER_WORKSPACE_DIR: isolated.rootDir,
+      OPENCLAW_VERIFIER_GATEWAY_WORKSPACE: "/workspace/project",
+      OPENCLAW_VERIFIER_PACKAGE_MANAGER: "yarn@4.9.2",
+      DOCKER_STUB_OLD_GATEWAY_ID: priorGateway,
+      DOCKER_STUB_OLD_GATEWAY_IMAGE: priorImage,
+      DOCKER_STUB_OLD_GATEWAY_RUNNING: "true",
+      DOCKER_STUB_FAIL_MATCH: ":candidate-",
+    });
+
+    expect(result.status).not.toBe(0);
+    const lines = await readDockerLogLines(isolated);
+    expect(lines.some((line) => isGatewayStartLine(line))).toBe(false);
+    expect(lines).not.toContain(`stop ${priorGateway}`);
+    expect(lines).not.toContain(`rm ${priorGateway}`);
+    const stateRoot = join(isolated.stateRoot, "operator-state", "openclaw", "verifier");
+    await expect(stat(join(stateRoot, "transaction"))).rejects.toThrow();
+    await expect(stat(join(stateRoot, "lock"))).rejects.toThrow();
   });
 
   it("refuses to commit when the exact Gateway recreate lacks the socket overlay", async () => {

@@ -115,7 +115,10 @@ describe("Dockerfile", () => {
     expect(dockerfile).toContain("grep -Eq '^yarn@");
     expect(dockerfile).not.toContain("pnpm|npm|bun");
     expect(dockerfile).toContain('org.opencontainers.image.revision="${OPENCLAW_SOURCE_REVISION}"');
-    expect(dockerfile).toContain('ai.openclaw.verifier.runtime-image="${OPENCLAW_RUNTIME_IMAGE}"');
+    expect(dockerfile).toContain("ARG OPENCLAW_RUNTIME_IMAGE_ID");
+    expect(dockerfile).toContain(
+      'ai.openclaw.verifier.runtime-image="${OPENCLAW_RUNTIME_IMAGE_ID}"',
+    );
     expect(dockerfile).toContain('ai.openclaw.sandbox.contract="guarded-verifier-candidate-v1"');
     expect(dockerfile).toContain("chromium");
     expect(dockerfile).toContain("-perm /111 -print -quit");

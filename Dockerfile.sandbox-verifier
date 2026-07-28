@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG OPENCLAW_RUNTIME_IMAGE
+ARG OPENCLAW_RUNTIME_IMAGE_ID
 ARG OPENCLAW_NODE_BOOKWORM_IMAGE="node:24-bookworm@sha256:3a09aa6354567619221ef6c45a5051b671f953f0a1924d1f819ffb236e520e6b"
 
 FROM ${OPENCLAW_RUNTIME_IMAGE} AS openclaw-runtime
@@ -72,6 +73,7 @@ RUN OPENCLAW_VERIFIER_PREPARE=1 \
 
 FROM verifier-base
 ARG OPENCLAW_RUNTIME_IMAGE
+ARG OPENCLAW_RUNTIME_IMAGE_ID
 ARG OPENCLAW_SOURCE_REVISION
 ARG OPENCLAW_VERIFIER_PACKAGE_MANAGER
 ARG OPENCLAW_VERIFIER_REPOSITORY_HEAD
@@ -79,7 +81,7 @@ ARG OPENCLAW_VERIFIER_REPOSITORY_HEAD
 LABEL org.opencontainers.image.source="https://github.com/openclaw/openclaw" \
   org.opencontainers.image.revision="${OPENCLAW_SOURCE_REVISION}" \
   org.opencontainers.image.title="OpenClaw guarded verifier candidate" \
-  ai.openclaw.verifier.runtime-image="${OPENCLAW_RUNTIME_IMAGE}" \
+  ai.openclaw.verifier.runtime-image="${OPENCLAW_RUNTIME_IMAGE_ID}" \
   ai.openclaw.sandbox.contract="guarded-verifier-candidate-v1" \
   ai.openclaw.sandbox.package-manager="${OPENCLAW_VERIFIER_PACKAGE_MANAGER}" \
   ai.openclaw.verifier.repository-head="${OPENCLAW_VERIFIER_REPOSITORY_HEAD}"

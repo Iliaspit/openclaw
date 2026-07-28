@@ -26,6 +26,7 @@ VERIFIER_TRANSACTION_DIR_INO=""
 VERIFIER_LOCK_DIR=""
 VERIFIER_SOCKET_OVERLAY_READY=""
 VERIFIER_RUNTIME_IMAGE_ID=""
+VERIFIER_RUNTIME_IMAGE_REF=""
 VERIFIER_OLD_GATEWAY_ID=""
 VERIFIER_OLD_GATEWAY_IMAGE_ID=""
 VERIFIER_GATEWAY_COMPOSE_PROJECT=""
@@ -1375,6 +1376,67 @@ oci_remove_exact_tag() {
       fail "Verifier transaction tag no longer names the journaled exact image."
     docker image rm "$tag" >/dev/null
   fi
+}
+
+oci_content_addressed_image_ref() {
+  local kind="$1"
+  local image_id="$2"
+  local repository=""
+  [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]] ||
+    fail "Refusing to derive an image reference from a malformed image ID."
+  case "$kind" in
+    gateway-rollback) repository="openclaw-gateway-rollback-id" ;;
+    verifier-runtime) repository="openclaw-verifier-runtime-id" ;;
+    *) fail "Refusing to derive an unrecognized content-addressed image reference." ;;
+  esac
+  printf '%s:%s' "$repository" "${image_id#sha256:}"
+}
+
+oci_pin_content_addressed_image_ref() {
+  local kind="$1"
+  local image_id="$2"
+  local reference=""
+  local actual=""
+  reference="$(oci_content_addressed_image_ref "$kind" "$image_id")"
+  actual="$(docker image inspect --format '{{.Id}}' "$reference" 2>/dev/null || true)"
+  if [[ -n "$actual" ]]; then
+    [[ "$actual" == "$image_id" ]] ||
+      fail "Content-addressed Docker image reference no longer names its exact image."
+  else
+    docker image inspect "$image_id" >/dev/null 2>&1 ||
+      fail "Exact Docker image is unavailable for content-addressed pinning."
+    docker tag "$image_id" "$reference"
+  fi
+  [[ "$(docker image inspect --format '{{.Id}}' "$reference")" == "$image_id" ]] ||
+    fail "Content-addressed Docker image reference did not retain its exact image."
+  printf '%s' "$reference"
+}
+
+oci_require_content_addressed_image_ref() {
+  local kind="$1"
+  local image_id="$2"
+  local reference=""
+  reference="$(oci_content_addressed_image_ref "$kind" "$image_id")"
+  [[ "$(docker image inspect --format '{{.Id}}' "$reference" 2>/dev/null || true)" == "$image_id" ]] ||
+    fail "Required content-addressed Docker image reference is unavailable or changed."
+  printf '%s' "$reference"
+}
+
+pin_current_gateway_image_for_verifier_update() {
+  local gateway=""
+  local image_id=""
+  local reference=""
+  [[ -n "$VERIFIER_ENABLED" ]] || return
+  gateway="$(docker compose "${COMPOSE_ARGS[@]}" ps -a -q --no-trunc openclaw-gateway)"
+  [[ "$gateway" != *$'\n'* &&
+    ( -z "$gateway" || "$gateway" =~ ^[a-f0-9]{64}$ ) ]] ||
+    fail "Existing Gateway resolved to an ambiguous container identity before build."
+  [[ -n "$gateway" ]] || return 0
+  image_id="$(docker inspect --format '{{.Image}}' "$gateway")"
+  [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]] ||
+    fail "Existing Gateway resolved to a malformed image ID before build."
+  reference="$(oci_pin_content_addressed_image_ref gateway-rollback "$image_id")"
+  echo "Pinned current Gateway rollback image as $reference."
 }
 
 oci_sync_paths() {
@@ -6306,6 +6368,7 @@ rollback_verifier_transaction() {
   local current_gateway=""
   local candidate_status=""
   local restored_gateway=""
+  local old_gateway_ref=""
   local -a rollback_args=()
   trap - EXIT INT TERM
   set -e
@@ -6495,9 +6558,18 @@ rollback_verifier_transaction() {
     if [[ "$gateway_was_running" == "1" ]]; then
       [[ "$old_gateway_image" =~ ^sha256:[a-f0-9]{64}$ ]] ||
         fail "Verifier recovery lacks the prior running Gateway image."
-      OPENCLAW_IMAGE="$old_gateway_image" \
-        docker compose "${rollback_args[@]}" up -d --no-deps --force-recreate openclaw-gateway
-      restored_gateway="$(docker compose "${rollback_args[@]}" ps -q openclaw-gateway)"
+      if [[ "$current_gateway" == "$old_gateway" &&
+        "$(docker inspect --format '{{.Image}}' "$current_gateway")" == "$old_gateway_image" &&
+        "$(docker inspect --format '{{.State.Running}}' "$current_gateway")" == "true" ]]; then
+        restored_gateway="$current_gateway"
+      else
+        old_gateway_ref="$(
+          oci_require_content_addressed_image_ref gateway-rollback "$old_gateway_image"
+        )"
+        OPENCLAW_IMAGE="$old_gateway_ref" \
+          docker compose "${rollback_args[@]}" up -d --no-deps --force-recreate openclaw-gateway
+        restored_gateway="$(docker compose "${rollback_args[@]}" ps -q openclaw-gateway)"
+      fi
       [[ "$restored_gateway" =~ ^[a-f0-9]{64}$ &&
         "$(docker inspect --format '{{.Image}}' "$restored_gateway")" == "$old_gateway_image" &&
         "$(docker inspect --format '{{.State.Running}}' "$restored_gateway")" == "true" ]] ||
@@ -6507,7 +6579,10 @@ rollback_verifier_transaction() {
         docker stop "$current_gateway" >/dev/null
         restored_gateway="$current_gateway"
       else
-        OPENCLAW_IMAGE="$old_gateway_image" \
+        old_gateway_ref="$(
+          oci_require_content_addressed_image_ref gateway-rollback "$old_gateway_image"
+        )"
+        OPENCLAW_IMAGE="$old_gateway_ref" \
           docker compose "${rollback_args[@]}" create --no-deps --force-recreate openclaw-gateway
         restored_gateway="$(docker compose "${rollback_args[@]}" ps -a -q openclaw-gateway)"
       fi
@@ -6800,6 +6875,7 @@ prepare_and_publish_verifier_toolchain() {
   VERIFIER_FINAL_IMAGE_ID=""
   VERIFIER_NEW_GATEWAY_ID=""
   VERIFIER_RUNTIME_IMAGE_ID=""
+  VERIFIER_RUNTIME_IMAGE_REF=""
   VERIFIER_OLD_GATEWAY_ID=""
   VERIFIER_OLD_GATEWAY_IMAGE_ID=""
   VERIFIER_GATEWAY_COMPOSE_PROJECT=""
@@ -6858,15 +6934,19 @@ prepare_and_publish_verifier_toolchain() {
   VERIFIER_RUNTIME_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE_NAME")"
   [[ "$VERIFIER_RUNTIME_IMAGE_ID" =~ ^sha256:[a-f0-9]{64}$ ]] ||
     fail "Guarded verifier runtime image did not resolve to an immutable image ID."
+  VERIFIER_RUNTIME_IMAGE_REF="$(
+    oci_pin_content_addressed_image_ref verifier-runtime "$VERIFIER_RUNTIME_IMAGE_ID"
+  )"
   [[ -S "$DOCKER_SOCKET_PATH" ]] ||
     fail "Guarded verifier setup requires the configured Docker socket before publication."
-  OPENCLAW_IMAGE="$VERIFIER_RUNTIME_IMAGE_ID" \
+  OPENCLAW_IMAGE="$VERIFIER_RUNTIME_IMAGE_REF" \
     docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps \
     --entrypoint docker openclaw-gateway --version >/dev/null
 
   begin_verifier_transaction
   run_docker_build \
-    --build-arg "OPENCLAW_RUNTIME_IMAGE=$VERIFIER_RUNTIME_IMAGE_ID" \
+    --build-arg "OPENCLAW_RUNTIME_IMAGE=$VERIFIER_RUNTIME_IMAGE_REF" \
+    --build-arg "OPENCLAW_RUNTIME_IMAGE_ID=$VERIFIER_RUNTIME_IMAGE_ID" \
     --build-arg "OPENCLAW_SOURCE_REVISION=$OPENCLAW_SOURCE_REVISION" \
     --build-arg "OPENCLAW_VERIFIER_PACKAGE_MANAGER=$OPENCLAW_VERIFIER_PACKAGE_MANAGER" \
     --build-arg "OPENCLAW_VERIFIER_REPOSITORY_HEAD=$VERIFIER_REPOSITORY_HEAD" \
@@ -6986,7 +7066,10 @@ NODE
   fi
   oci_write_journal socket-overlay-written
   if [[ "$VERIFIER_CONFIG_POLICY" == "write" ]]; then
-    OPENCLAW_IMAGE="$VERIFIER_RUNTIME_IMAGE_ID" \
+    VERIFIER_RUNTIME_IMAGE_REF="$(
+      oci_require_content_addressed_image_ref verifier-runtime "$VERIFIER_RUNTIME_IMAGE_ID"
+    )"
+    OPENCLAW_IMAGE="$VERIFIER_RUNTIME_IMAGE_REF" \
       run_prestart_cli config set --batch-json \
       '[{"path":"agents.defaults.sandbox.mode","value":"non-main"},{"path":"agents.defaults.sandbox.scope","value":"agent"},{"path":"agents.defaults.sandbox.workspaceAccess","value":"none"}]' >/dev/null
   fi
@@ -7020,7 +7103,10 @@ NODE
       "$VERIFIER_BIND_OVERRIDE_AUTHORIZED" "$VERIFIER_OPERATION_CONTRACT_VERSION"
   )"
   oci_write_journal gateway-create-intent
-  OPENCLAW_IMAGE="$VERIFIER_RUNTIME_IMAGE_ID" \
+  VERIFIER_RUNTIME_IMAGE_REF="$(
+    oci_require_content_addressed_image_ref verifier-runtime "$VERIFIER_RUNTIME_IMAGE_ID"
+  )"
+  OPENCLAW_IMAGE="$VERIFIER_RUNTIME_IMAGE_REF" \
     docker compose "${COMPOSE_ARGS[@]}" up -d --no-deps --force-recreate openclaw-gateway
   gateway="$(
     oci_resolve_gateway_service_container \
@@ -7113,6 +7199,11 @@ if [[ -n "$READ_ONLY_CONFIG_ENABLED" ]]; then
     DEFER_PROTECTED_CONFIG_VALIDATION=""
   fi
   validate_read_only_existing_config
+fi
+if [[ -n "$VERIFIER_ENABLED" ]]; then
+  # Preserve a runnable, content-addressed reference before a local build or
+  # registry pull advances the ordinary Gateway image tag.
+  pin_current_gateway_image_for_verifier_update
 fi
 
 if [[ -n "$READ_ONLY_CONFIG_SETTING_PRESENT" ]]; then
