@@ -28,7 +28,7 @@ const RepositoryIdentitySchema = z
     packageJsonSha256: z.string().regex(SHA256),
     lockfileName: z.literal("yarn.lock"),
     lockfileSha256: z.string().regex(SHA256),
-    yarnRcSha256: z.string().regex(SHA256),
+    yarnRcSha256: z.string().regex(SHA256).nullable(),
     yarnPath: z.string().min(1).max(1024).nullable(),
     yarnPathSha256: z.string().regex(SHA256).nullable(),
     yarnPathMode: z.number().int().min(0).max(0o777).nullable(),
@@ -252,6 +252,20 @@ async function readBoundedMetadata(
   }
 }
 
+async function readOptionalBoundedMetadata(
+  filename: string,
+  control?: GuardedVerifierVerificationControl,
+): Promise<Buffer | null> {
+  try {
+    return await readBoundedMetadata(filename, control);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
 function isWithin(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
@@ -379,7 +393,7 @@ export async function captureGuardedVerifierRepositoryIdentity(params: {
     throw new Error("Guarded verifier effective Yarn version does not match packageManager.");
   }
   const lockfile = await digestFile(path.join(params.workspaceDir, "yarn.lock"), params.control);
-  const yarnRcContent = await readBoundedMetadata(
+  const yarnRcContent = await readOptionalBoundedMetadata(
     path.join(params.workspaceDir, ".yarnrc.yml"),
     params.control,
   );
@@ -392,7 +406,7 @@ export async function captureGuardedVerifierRepositoryIdentity(params: {
         .optional(),
     })
     .passthrough()
-    .parse(parseYaml(yarnRcContent.toString("utf8")) as unknown);
+    .parse(yarnRcContent ? (parseYaml(yarnRcContent.toString("utf8")) ?? {}) : {});
   const resolveRepositoryFile = async (
     relativePath: string,
   ): Promise<{ path: string; sha256: string; mode: number }> => {
@@ -432,7 +446,7 @@ export async function captureGuardedVerifierRepositoryIdentity(params: {
     packageJsonSha256: sha256(packageJsonContent),
     lockfileName: "yarn.lock" as const,
     lockfileSha256: lockfile.digest,
-    yarnRcSha256: sha256(yarnRcContent),
+    yarnRcSha256: yarnRcContent ? sha256(yarnRcContent) : null,
     yarnPath: yarnPathIdentity?.path ?? null,
     yarnPathSha256: yarnPathIdentity?.sha256 ?? null,
     yarnPathMode: yarnPathIdentity?.mode ?? null,

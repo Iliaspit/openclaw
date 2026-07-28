@@ -609,3 +609,8 @@ Consult this before investigating a new issue or making a related change.
    - **Issue:** The guarded verifier image publishes a read-only `node_modules` artifact, but Yarn honored the repository's PnP linker during its immutable install. Preparation therefore failed when the required physical dependency root did not exist.
    - **Fix and why:** Keep the repository-pinned Yarn version and immutable lockfile install while selecting Yarn's supported `node-modules` linker for both installation and Playwright invocation in this dedicated artifact build, then require the dependency root before browser installation and provenance preparation.
    - **Result:** The verifier publishes the physical, content-verified dependency tree required by its read-only image mount without changing the product repository or its package-manager files.
+
+6. **Verifier preparation required an optional Yarn configuration file**
+   - **Issue:** A repository with a pinned Yarn `packageManager` and lockfile but no `.yarnrc.yml` installed successfully, then verifier provenance preparation failed on the absent optional file.
+   - **Fix and why:** Record an absent `.yarnrc.yml` explicitly as `null`, with no Yarn path or plugins, while retaining strict hashing and validation whenever the file exists.
+   - **Result:** Repositories using Yarn defaults remain reproducible without fabricating or modifying repository configuration.

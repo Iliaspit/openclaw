@@ -89,6 +89,35 @@ describe("guarded verifier volume provenance", () => {
     }
   });
 
+  it("records a missing optional Yarn configuration deterministically", async () => {
+    const fixture = await createFixture();
+    try {
+      await rm(path.join(fixture.workspaceDir, ".yarnrc.yml"));
+      const prepared = await prepareGuardedVerifierVolumeProvenance({
+        ...fixture,
+        repositoryHead: REPOSITORY_HEAD,
+        sourceRevision: SOURCE_REVISION,
+        effectiveYarnVersion: "4.9.2",
+      });
+      const verified = await verifyGuardedVerifierVolumeProvenance({
+        ...fixture,
+        repositoryHead: REPOSITORY_HEAD,
+        sourceRevision: SOURCE_REVISION,
+        effectiveYarnVersion: "4.9.2",
+      });
+      expect(verified.dependencyManifest.repository).toMatchObject({
+        yarnRcSha256: null,
+        yarnPath: null,
+        yarnPathSha256: null,
+        yarnPathMode: null,
+        plugins: [],
+      });
+      expect(prepared.toolchainDigest).toBe(verified.identityDigest);
+    } finally {
+      await rm(fixture.workspaceDir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects substituted dependencies, browser executables, lockfiles, and revisions", async () => {
     for (const mutate of [
       async (fixture: Awaited<ReturnType<typeof createFixture>>) =>
