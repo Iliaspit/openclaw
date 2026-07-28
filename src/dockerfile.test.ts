@@ -130,6 +130,9 @@ describe("Dockerfile", () => {
     );
     expect(dockerfile).toContain("COPY --chown=node:node . .");
     expect(dockerfile).toContain("YARN_NODE_LINKER=node-modules yarn install --immutable");
+    expect(dockerfile).toContain(
+      "YARN_NODE_LINKER=node-modules PLAYWRIGHT_BROWSERS_PATH=/build/browsers",
+    );
     expect(dockerfile).toContain("test -d /build/workspace/node_modules");
     expect(dockerfile).toContain("/opt/openclaw-verifier/dependencies");
     expect(dockerfile).not.toContain("docker-ce-cli");

@@ -607,5 +607,5 @@ Consult this before investigating a new issue or making a related change.
 
 5. **A repository PnP default left no verifier dependency tree to publish**
    - **Issue:** The guarded verifier image publishes a read-only `node_modules` artifact, but Yarn honored the repository's PnP linker during its immutable install. Preparation therefore failed when the required physical dependency root did not exist.
-   - **Fix and why:** Keep the repository-pinned Yarn version and immutable lockfile install while selecting Yarn's supported `node-modules` linker for this dedicated artifact build, then require the dependency root before browser installation and provenance preparation.
+   - **Fix and why:** Keep the repository-pinned Yarn version and immutable lockfile install while selecting Yarn's supported `node-modules` linker for both installation and Playwright invocation in this dedicated artifact build, then require the dependency root before browser installation and provenance preparation.
    - **Result:** The verifier publishes the physical, content-verified dependency tree required by its read-only image mount without changing the product repository or its package-manager files.
