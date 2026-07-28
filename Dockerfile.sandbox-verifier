@@ -50,6 +50,7 @@ RUN install -d -m 0755 "${COREPACK_HOME}" \
   && install -d -o node -g node -m 0755 /workspace
 
 FROM verifier-base AS verifier-builder
+RUN install -d -o node -g node -m 0755 /build/workspace /build/browsers
 WORKDIR /build/workspace
 COPY --chown=node:node . .
 

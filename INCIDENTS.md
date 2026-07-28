@@ -599,3 +599,8 @@ Consult this before investigating a new issue or making a related change.
    - **Issue:** On Docker Desktop, `/var/run/docker.sock` is a host symlink, and the socket's group can differ again when the bind is presented inside the Linux VM/container. Reading either host inode could give a recreated sandbox-enabled Gateway the wrong supplemental group and remove Docker access.
    - **Fix and why:** After the exact runtime image is built or pulled, setup mounts the configured socket read-only into a networkless, read-only, capability-free one-shot container and reads the group visible in the consuming Linux namespace. A regression supplies a distinct container-visible group and requires the persisted Compose group to match it.
    - **Result:** Gateway recreation preserves access to the actual mounted Docker socket without hard-coding a host-specific group.
+
+4. **The guarded verifier builder could not create Yarn state**
+   - **Issue:** `WORKDIR /build/workspace` created the directory as root before source was copied with `--chown=node:node`. The non-root Yarn install could read the copied repository but failed when it tried to create `/build/workspace/.yarn`.
+   - **Fix and why:** Create both verifier build roots explicitly as `node:node` before switching the builder to the non-root user. Keep the source copy and install non-root.
+   - **Result:** The offline verifier toolchain build can create its transient Yarn and browser state without granting broader privileges.

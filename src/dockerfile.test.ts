@@ -125,6 +125,9 @@ describe("Dockerfile", () => {
     expect(dockerfile).toContain("PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright");
     expect(dockerfile).not.toContain("apt-get upgrade");
     expect(dockerfile).toContain("FROM verifier-base AS verifier-builder");
+    expect(dockerfile).toContain(
+      "install -d -o node -g node -m 0755 /build/workspace /build/browsers",
+    );
     expect(dockerfile).toContain("COPY --chown=node:node . .");
     expect(dockerfile).toContain("/opt/openclaw-verifier/dependencies");
     expect(dockerfile).not.toContain("docker-ce-cli");
