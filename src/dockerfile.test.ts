@@ -105,6 +105,7 @@ describe("Dockerfile", () => {
       'ARG OPENCLAW_NODE_BOOKWORM_IMAGE="node:24-bookworm@sha256:3a09aa6354567619221ef6c45a5051b671f953f0a1924d1f819ffb236e520e6b"',
     );
     expect(dockerfile).toContain("ARG OPENCLAW_VERIFIER_PACKAGE_MANAGER");
+    expect(dockerfile).toContain("ARG OPENCLAW_VERIFIER_YARNRC_SHA256");
     expect(dockerfile).toContain(
       'corepack prepare "${OPENCLAW_VERIFIER_PACKAGE_MANAGER}" --activate',
     );
@@ -133,6 +134,8 @@ describe("Dockerfile", () => {
     expect(dockerfile).toContain(
       "YARN_NODE_LINKER=node-modules PLAYWRIGHT_BROWSERS_PATH=/build/browsers",
     );
+    expect(dockerfile.match(/id=openclaw-verifier-yarnrc/g)).toHaveLength(2);
+    expect(dockerfile.match(/sha256sum \/build\/workspace\/\.yarnrc\.yml/g)).toHaveLength(2);
     expect(dockerfile).toContain("test -d /build/workspace/node_modules");
     expect(dockerfile).toContain("/opt/openclaw-verifier/dependencies");
     expect(dockerfile).not.toContain("docker-ce-cli");

@@ -619,3 +619,8 @@ Consult this before investigating a new issue or making a related change.
    - **Issue:** Docker Desktop rejected a verifier container that mounted dependency and browser subpaths from the same image with `AlreadyExists` for the daemon content lease.
    - **Fix and why:** Keep the dependency tree as the sole read-only image subpath mount and execute the browser directly from the same immutable, read-only verifier root image.
    - **Result:** The verifier retains exact content-addressed browser provenance without asking the daemon to acquire the same image-mount lease twice for one container.
+
+8. **A repository Docker ignore rule omitted tracked Yarn configuration from verifier provenance**
+   - **Issue:** The verifier image build context could omit a tracked `.yarnrc.yml` while the live guarded workspace still contained it. Preparation therefore recorded an absent Yarn configuration and the mandatory pre-publication comparison correctly rejected the candidate as stale.
+   - **Fix and why:** Setup now supplies the exact regular, non-symlink Yarn configuration through a BuildKit secret, binds its SHA-256 into both cache-sensitive build steps, and verifies the digest before dependency installation and provenance preparation. An actually absent file remains an explicit, validated `absent` state.
+   - **Result:** Docker ignore policy can no longer silently remove the repository-pinned Yarn configuration from guarded verifier preparation, while changed, substituted, linked, or unexpectedly present configuration still fails closed.

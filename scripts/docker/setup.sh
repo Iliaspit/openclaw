@@ -6874,6 +6874,8 @@ prepare_and_publish_verifier_toolchain() {
   local digest=""
   local candidate_layers=""
   local final_layers=""
+  local yarnrc_path="$OPENCLAW_VERIFIER_WORKSPACE_DIR/.yarnrc.yml"
+  local yarnrc_sha256="absent"
   oci_assert_pinned_state_dir
   OPENCLAW_VERIFIER_TRANSACTION_ID="$(
     node -e 'process.stdout.write(require("node:crypto").randomBytes(16).toString("hex"))'
@@ -6962,12 +6964,24 @@ prepare_and_publish_verifier_toolchain() {
     --entrypoint docker openclaw-gateway --version >/dev/null
 
   begin_verifier_transaction
+  if [[ -e "$yarnrc_path" || -L "$yarnrc_path" ]]; then
+    [[ -f "$yarnrc_path" && ! -L "$yarnrc_path" ]] ||
+      fail "Guarded verifier Yarn configuration must be a regular non-symlink file."
+    yarnrc_sha256="$(oci_file_digest "$yarnrc_path")"
+    [[ "$yarnrc_sha256" =~ ^[a-f0-9]{64}$ ]] ||
+      fail "Guarded verifier Yarn configuration returned a malformed digest."
+    set -- --secret "id=openclaw-verifier-yarnrc,src=$yarnrc_path"
+  else
+    set --
+  fi
   run_docker_build \
+    "$@" \
     --build-arg "OPENCLAW_RUNTIME_IMAGE=$VERIFIER_RUNTIME_IMAGE_REF" \
     --build-arg "OPENCLAW_RUNTIME_IMAGE_ID=$VERIFIER_RUNTIME_IMAGE_ID" \
     --build-arg "OPENCLAW_SOURCE_REVISION=$OPENCLAW_SOURCE_REVISION" \
     --build-arg "OPENCLAW_VERIFIER_PACKAGE_MANAGER=$OPENCLAW_VERIFIER_PACKAGE_MANAGER" \
     --build-arg "OPENCLAW_VERIFIER_REPOSITORY_HEAD=$VERIFIER_REPOSITORY_HEAD" \
+    --build-arg "OPENCLAW_VERIFIER_YARNRC_SHA256=$yarnrc_sha256" \
     -t "$VERIFIER_CANDIDATE_TAG" \
     -f "$ROOT_DIR/Dockerfile.sandbox-verifier" \
     "$OPENCLAW_VERIFIER_WORKSPACE_DIR"

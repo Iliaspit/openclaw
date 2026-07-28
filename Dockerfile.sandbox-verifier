@@ -11,11 +11,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG OPENCLAW_SOURCE_REVISION
 ARG OPENCLAW_VERIFIER_PACKAGE_MANAGER
 ARG OPENCLAW_VERIFIER_REPOSITORY_HEAD
+ARG OPENCLAW_VERIFIER_YARNRC_SHA256
 
 RUN printf '%s' "${OPENCLAW_SOURCE_REVISION}" | grep -Eq '^[a-f0-9]{40}$'
 RUN printf '%s' "${OPENCLAW_VERIFIER_REPOSITORY_HEAD}" | grep -Eq '^[a-f0-9]{40}$'
 RUN printf '%s' "${OPENCLAW_VERIFIER_PACKAGE_MANAGER}" \
   | grep -Eq '^yarn@[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9._-]+)?$'
+RUN printf '%s' "${OPENCLAW_VERIFIER_YARNRC_SHA256}" \
+  | grep -Eq '^(absent|[a-f0-9]{64})$'
 
 RUN --mount=type=cache,id=openclaw-verifier-apt-cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,id=openclaw-verifier-apt-lists,target=/var/lib/apt,sharing=locked \
@@ -56,7 +59,14 @@ COPY --chown=node:node . .
 
 USER node
 RUN --mount=type=cache,id=openclaw-verifier-yarn-cache,target=/home/node/.yarn-cache,uid=1000,gid=1000,sharing=locked \
-  declared_package_manager="$(node -p "require('./package.json').packageManager")" \
+  --mount=type=secret,id=openclaw-verifier-yarnrc,target=/build/workspace/.yarnrc.yml,uid=1000,gid=1000,mode=0444,required=false \
+  if [ "${OPENCLAW_VERIFIER_YARNRC_SHA256}" = "absent" ]; then \
+    test ! -e /build/workspace/.yarnrc.yml; \
+  else \
+    test -f /build/workspace/.yarnrc.yml \
+    && test "$(sha256sum /build/workspace/.yarnrc.yml | cut -d ' ' -f 1)" = "${OPENCLAW_VERIFIER_YARNRC_SHA256}"; \
+  fi \
+  && declared_package_manager="$(node -p "require('./package.json').packageManager")" \
   && test "${declared_package_manager}" = "${OPENCLAW_VERIFIER_PACKAGE_MANAGER}" \
   && YARN_ENABLE_GLOBAL_CACHE=1 YARN_CACHE_FOLDER=/home/node/.yarn-cache \
     YARN_NODE_LINKER=node-modules yarn install --immutable \
@@ -68,7 +78,14 @@ RUN --mount=type=cache,id=openclaw-verifier-yarn-cache,target=/home/node/.yarn-c
     -perm /111 -print -quit)"
 
 USER root
-RUN OPENCLAW_VERIFIER_PREPARE=1 \
+RUN --mount=type=secret,id=openclaw-verifier-yarnrc,target=/build/workspace/.yarnrc.yml,mode=0444,required=false \
+  if [ "${OPENCLAW_VERIFIER_YARNRC_SHA256}" = "absent" ]; then \
+    test ! -e /build/workspace/.yarnrc.yml; \
+  else \
+    test -f /build/workspace/.yarnrc.yml \
+    && test "$(sha256sum /build/workspace/.yarnrc.yml | cut -d ' ' -f 1)" = "${OPENCLAW_VERIFIER_YARNRC_SHA256}"; \
+  fi \
+  && OPENCLAW_VERIFIER_PREPARE=1 \
   node /opt/openclaw/openclaw.mjs sandbox verifier-prepare \
     --workspace /build/workspace \
     --browser-root /build/browsers \
