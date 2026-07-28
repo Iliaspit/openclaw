@@ -30,8 +30,6 @@ describe.runIf(runLive)("guarded verifier raw image diagnostic (not acceptance)"
         `type=bind,src=${workspace},dst=/workspace,readonly`,
         "--mount",
         `type=image,src=${image},dst=/workspace/node_modules,readonly,image-subpath=opt/openclaw-verifier/dependencies`,
-        "--mount",
-        `type=image,src=${image},dst=/home/node/.cache/ms-playwright,readonly,image-subpath=opt/openclaw-verifier/browsers`,
         "--tmpfs",
         "/tmp:rw,nosuid,nodev,noexec,size=1g,uid=1000,gid=1000",
         "--tmpfs",

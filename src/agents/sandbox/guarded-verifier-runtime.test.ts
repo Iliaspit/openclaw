@@ -344,20 +344,12 @@ describe("guarded verifier sandbox runtime", () => {
         subpath: "opt/openclaw-verifier/dependencies",
         readOnly: true as const,
       },
-      {
-        imageId: IMAGE_ID,
-        target: "/home/node/.cache/ms-playwright",
-        subpath: "opt/openclaw-verifier/browsers",
-        readOnly: true as const,
-      },
     ];
     const args: string[] = [];
     appendGuardedVerifierImageMountArgs(args, mounts);
     expect(args).toEqual([
       "--mount",
       `type=image,src=${IMAGE_ID},dst=/workspace/node_modules,readonly,image-subpath=opt/openclaw-verifier/dependencies`,
-      "--mount",
-      `type=image,src=${IMAGE_ID},dst=/home/node/.cache/ms-playwright,readonly,image-subpath=opt/openclaw-verifier/browsers`,
     ]);
     expect(args.join(" ")).not.toContain("docker.sock");
     expect(args.join(" ")).not.toContain("type=bind");

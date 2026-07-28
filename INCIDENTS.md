@@ -614,3 +614,8 @@ Consult this before investigating a new issue or making a related change.
    - **Issue:** A repository with a pinned Yarn `packageManager` and lockfile but no `.yarnrc.yml` installed successfully, then verifier provenance preparation failed on the absent optional file.
    - **Fix and why:** Record an absent `.yarnrc.yml` explicitly as `null`, with no Yarn path or plugins, while retaining strict hashing and validation whenever the file exists.
    - **Result:** Repositories using Yarn defaults remain reproducible without fabricating or modifying repository configuration.
+
+7. **Repeated image mounts of one verifier artifact collided in Docker Desktop**
+   - **Issue:** Docker Desktop rejected a verifier container that mounted dependency and browser subpaths from the same image with `AlreadyExists` for the daemon content lease.
+   - **Fix and why:** Keep the dependency tree as the sole read-only image subpath mount and execute the browser directly from the same immutable, read-only verifier root image.
+   - **Result:** The verifier retains exact content-addressed browser provenance without asking the daemon to acquire the same image-mount lease twice for one container.

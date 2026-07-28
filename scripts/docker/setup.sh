@@ -6854,12 +6854,11 @@ oci_verify_image() {
     --workdir "$OPENCLAW_VERIFIER_GATEWAY_WORKSPACE" \
     --mount "type=bind,src=$OPENCLAW_VERIFIER_WORKSPACE_DIR,dst=$OPENCLAW_VERIFIER_GATEWAY_WORKSPACE,readonly" \
     --mount "type=image,src=$image_id,dst=$OPENCLAW_VERIFIER_GATEWAY_WORKSPACE/node_modules,readonly,image-subpath=opt/openclaw-verifier/dependencies" \
-    --mount "type=image,src=$image_id,dst=/home/node/.cache/ms-playwright,readonly,image-subpath=opt/openclaw-verifier/browsers" \
     --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m \
     --env OPENCLAW_VERIFIER_VERIFY=1 --entrypoint node "$image_id" \
     /opt/openclaw/openclaw.mjs sandbox verifier-verify \
     --workspace "$OPENCLAW_VERIFIER_GATEWAY_WORKSPACE" \
-    --browser-root /home/node/.cache/ms-playwright \
+    --browser-root /opt/openclaw-verifier/browsers \
     --repository-head "$VERIFIER_REPOSITORY_HEAD" \
     --source-revision "$OPENCLAW_SOURCE_REVISION" \
     "$@"

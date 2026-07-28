@@ -90,7 +90,7 @@ LABEL org.opencontainers.image.source="https://github.com/openclaw/openclaw" \
   ai.openclaw.sandbox.package-manager="${OPENCLAW_VERIFIER_PACKAGE_MANAGER}" \
   ai.openclaw.verifier.repository-head="${OPENCLAW_VERIFIER_REPOSITORY_HEAD}"
 
-ENV PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/openclaw-verifier/browsers
 
 COPY --from=verifier-builder --chown=node:node \
   /build/workspace/node_modules /opt/openclaw-verifier/dependencies

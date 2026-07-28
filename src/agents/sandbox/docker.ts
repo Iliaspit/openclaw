@@ -232,7 +232,6 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/u;
 const GUARDED_VERIFIER_EXECUTION_DEADLINE_MS = 60_000;
 const GUARDED_VERIFIER_DEPENDENCY_ROOT = "opt/openclaw-verifier/dependencies";
-const GUARDED_VERIFIER_BROWSER_ROOT = "opt/openclaw-verifier/browsers";
 const GUARDED_VERIFIER_MASKED_PATHS = [
   "/proc/acpi",
   "/proc/asound",
@@ -842,12 +841,6 @@ async function inspectGuardedVerifierRuntimeIdentity(params: {
         imageId,
         target: path.posix.join(params.workdir, "node_modules"),
         subpath: GUARDED_VERIFIER_DEPENDENCY_ROOT,
-        readOnly: true,
-      },
-      {
-        imageId,
-        target: GUARDED_VERIFIER_BROWSER_CACHE,
-        subpath: GUARDED_VERIFIER_BROWSER_ROOT,
         readOnly: true,
       },
     ],

@@ -122,7 +122,7 @@ describe("Dockerfile", () => {
     expect(dockerfile).toContain('ai.openclaw.sandbox.contract="guarded-verifier-candidate-v1"');
     expect(dockerfile).toContain("chromium");
     expect(dockerfile).toContain("-perm /111 -print -quit");
-    expect(dockerfile).toContain("PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright");
+    expect(dockerfile).toContain("PLAYWRIGHT_BROWSERS_PATH=/opt/openclaw-verifier/browsers");
     expect(dockerfile).not.toContain("apt-get upgrade");
     expect(dockerfile).toContain("FROM verifier-base AS verifier-builder");
     expect(dockerfile).toContain(

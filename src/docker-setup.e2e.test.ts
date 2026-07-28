@@ -5415,6 +5415,8 @@ describe("scripts/docker/setup.sh", () => {
     expect(functionStart).toBeGreaterThanOrEqual(0);
     expect(functionEnd).toBeGreaterThan(functionStart);
     const functionSource = script.slice(functionStart, functionEnd + 2);
+    expect(functionSource).not.toContain("dst=/home/node/.cache/ms-playwright");
+    expect(functionSource).toContain("--browser-root /opt/openclaw-verifier/browsers");
     const probe = spawnSync(
       systemBash,
       [
