@@ -226,6 +226,10 @@ if [[ "\${1:-}" == "build" ]]; then
 fi
 if [[ "\${1:-}" == "run" ]]; then
   echo "run $*" >>"$log"
+  if [[ "$*" == *"--entrypoint stat"* && "$*" == *"/var/run/docker.sock"* ]]; then
+    printf '%s\n' "\${DOCKER_STUB_SOCKET_GID:-0}"
+    exit 0
+  fi
   printf '%s\n' '{"status":"verified","dependencyManifestDigest":"${"1".repeat(64)}","browserManifestDigest":"${"2".repeat(64)}","toolchainDigest":"${"3".repeat(64)}","repositoryIdentityDigest":"${"4".repeat(64)}","browserIdentityDigest":"${"5".repeat(64)}","effectiveYarnVersion":"4.9.2"}'
   exit 0
 fi
@@ -5298,6 +5302,40 @@ describe("scripts/docker/setup.sh", () => {
       await expect(
         stat(join(activeSandbox.rootDir, "docker-compose.sandbox.yml")),
       ).rejects.toThrow();
+    });
+  });
+
+  it("uses the Docker socket GID visible inside the runtime container", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const activeSandbox = requireSandbox(sandbox);
+    await resetDockerLog(activeSandbox);
+    const socketTarget = join(activeSandbox.rootDir, "docker-target.sock");
+    const socketLink = join(activeSandbox.rootDir, "docker.sock");
+
+    await withUnixSocket(socketTarget, async () => {
+      await symlink(socketTarget, socketLink);
+      const effectiveContainerGid = 4242;
+
+      const result = runDockerSetup(activeSandbox, {
+        OPENCLAW_SANDBOX: "1",
+        OPENCLAW_DOCKER_SOCKET: socketLink,
+        DOCKER_STUB_SOCKET_GID: String(effectiveContainerGid),
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      const envFile = await readFile(join(activeSandbox.rootDir, ".env"), "utf8");
+      expect(envFile).toContain(`DOCKER_GID=${effectiveContainerGid}`);
+      const overlay = await readFile(
+        join(activeSandbox.rootDir, "docker-compose.sandbox.yml"),
+        "utf8",
+      );
+      expect(overlay).toContain(`- "${effectiveContainerGid}"`);
+      const log = await readDockerLog(activeSandbox);
+      expect(log).toContain(
+        `--mount type=bind,source=${socketLink},target=/var/run/docker.sock,readonly --entrypoint stat openclaw:local -c %g /var/run/docker.sock`,
+      );
     });
   });
 

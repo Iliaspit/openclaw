@@ -204,6 +204,27 @@ run_docker_build() {
   DOCKER_BUILDKIT=1 docker build "$@"
 }
 
+detect_container_docker_socket_gid() {
+  local image="$1"
+  local socket_path="$2"
+  local gid=""
+  [[ "$socket_path" != *","* ]] ||
+    fail "OPENCLAW_DOCKER_SOCKET cannot contain a comma during effective GID detection."
+  gid="$(
+    docker run --rm \
+      --network none \
+      --read-only \
+      --cap-drop ALL \
+      --security-opt no-new-privileges:true \
+      --mount "type=bind,source=$socket_path,target=/var/run/docker.sock,readonly" \
+      --entrypoint stat \
+      "$image" -c '%g' /var/run/docker.sock
+  )"
+  [[ "$gid" =~ ^[0-9]+$ ]] ||
+    fail "Docker socket did not expose one valid group ID inside the runtime image."
+  printf '%s' "$gid"
+}
+
 is_truthy_value() {
   local raw="${1:-}"
   raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
@@ -1139,11 +1160,9 @@ if [[ -n "$READ_ONLY_CONFIG_ENABLED" ]]; then
 fi
 VERIFIER_OPERATION_CONFIG_POLICY="$VERIFIER_CONFIG_POLICY"
 
-# Detect Docker socket GID for sandbox group_add.
+# The effective Docker socket GID is measured after the runtime image exists.
+# Docker Desktop can present a different group inside Linux than on the host.
 DOCKER_GID=""
-if [[ -n "$SANDBOX_ENABLED" && -S "$DOCKER_SOCKET_PATH" ]]; then
-  DOCKER_GID="$(stat -c '%g' "$DOCKER_SOCKET_PATH" 2>/dev/null || stat -f '%g' "$DOCKER_SOCKET_PATH" 2>/dev/null || echo "")"
-fi
 export DOCKER_GID
 
 if [[ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]]; then
@@ -7307,6 +7326,11 @@ else
 fi
 export OPENCLAW_SOURCE_REVISION="$SOURCE_REVISION"
 upsert_env "$ENV_FILE" OPENCLAW_SOURCE_REVISION
+if [[ -n "$SANDBOX_ENABLED" && -S "$DOCKER_SOCKET_PATH" ]]; then
+  DOCKER_GID="$(detect_container_docker_socket_gid "$IMAGE_NAME" "$DOCKER_SOCKET_PATH")"
+  export DOCKER_GID
+  upsert_env "$ENV_FILE" DOCKER_GID
+fi
 
 if [[ -n "$READ_ONLY_CONFIG_ENABLED" ]]; then
   echo ""
