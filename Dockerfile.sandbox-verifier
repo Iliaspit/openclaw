@@ -116,4 +116,5 @@ COPY --from=verifier-builder --chown=node:node \
 
 USER 1000:1000
 WORKDIR /workspace
+ENTRYPOINT []
 CMD ["sleep", "infinity"]

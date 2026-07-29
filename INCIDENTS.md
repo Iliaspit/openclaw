@@ -647,3 +647,9 @@ Consult this before investigating a new issue or making a related change.
 - **Issue:** Docker Desktop reports its daemon-side socket proxy path in a container's inspected mounts instead of the configured macOS host path. Final publication tried to resolve that Linux-only `/run/host-services/...` path on macOS, failed closed, and rolled the otherwise healthy Gateway back.
 - **Fix and why:** Final publication still requires one exact writable bind at `/var/run/docker.sock`, then compares the socket device, inode, type, and group visible inside the exact Gateway with a hardened networkless, read-only, capability-free one-shot mount of the configured socket. This validates the mounted object without trusting or dereferencing Docker Desktop's daemon-private pathname.
 - **Result:** Legitimate Docker Desktop source translation no longer blocks publication, while a substituted or different mounted socket still fails closed.
+
+13. **The verifier artifact inherited the Node image entrypoint**
+
+- **Issue:** The guarded verifier image set its command but inherited `docker-entrypoint.sh` from the pinned Node base image. Installed verifier provisioning therefore rejected the published artifact because protected execution requires an empty image entrypoint.
+- **Fix and why:** The verifier producer now explicitly clears the inherited entrypoint while retaining the exact non-root user, workdir, and inert `sleep infinity` default command.
+- **Result:** The published image matches the protected executor's closed command-path contract instead of relying on base-image entrypoint behavior.

@@ -5402,7 +5402,7 @@ describe("scripts/docker/setup.sh", () => {
     expect(result.status, result.stderr).toBe(0);
     const log = await readDockerLog(activeSandbox);
     expect(log).toContain(
-      "--entrypoint stat sha256:" + `${"a".repeat(64)} -Lc %d:%i:%F:%g /var/run/docker.sock`,
+      `--entrypoint stat sha256:${"a".repeat(64)} -Lc %d:%i:%F:%g /var/run/docker.sock`,
     );
   });
 
