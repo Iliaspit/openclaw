@@ -659,3 +659,9 @@ Consult this before investigating a new issue or making a related change.
 - **Issue:** The immutable verifier artifact built successfully, but Docker Desktop could not hash its approximately 60,000 dependency and browser files within the shared 60-second verification deadline. Publication rolled back before Gateway recreation on two consecutive attempts.
 - **Fix and why:** Extended the bounded artifact-verification deadline to three minutes. Guarded verifier command execution retains its separate explicit 60-second authorization and input-validation deadline.
 - **Result:** Publication can validate the complete immutable verifier artifact on Docker Desktop without weakening the protected execution deadline or bypassing content verification.
+
+15. **Docker 28 inspect omitted optional storage data**
+
+- **Issue:** Docker 28.3.2 returned `GraphDriver.Data: null` and omitted `HostConfig.StorageOpt` for a freshly created guarded verifier container. The strict inspect decoder rejected the legitimate representation before the closed runtime profile could be validated or Playwright could start.
+- **Fix and why:** Accept only Docker's documented empty representations for those two unused metadata fields: nullable graph-driver data and absent, null, or string-map storage options. All security-relevant container, network, mount, resource, and identity fields remain strict and are still validated fail-closed.
+- **Result:** The real Docker 28 inspect shape reaches the existing closed-profile verifier without allowing unknown fields or weakening isolation checks.

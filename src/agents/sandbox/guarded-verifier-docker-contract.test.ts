@@ -342,6 +342,26 @@ describe("guarded verifier OCI Docker contract", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("accepts Docker 28 nullable graph data and omitted storage options", async () => {
+    const value = containerFixture();
+    (value.GraphDriver as { Data: Record<string, string> | null }).Data = null;
+    delete (value.HostConfig as Partial<typeof value.HostConfig>).StorageOpt;
+
+    await expect(
+      assertGuardedVerifierContainerRuntime({
+        containerId: "c".repeat(64),
+        configHash: "config",
+        runtimeIdentity,
+        authorization,
+        workspaceDir: "/repo",
+        workspaceMountSource: "/host/repo",
+        workdir: "/workspace",
+        tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=1g,uid=1000,gid=1000,mode=1777"],
+        inspect: async () => value,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it("rejects writable, substituted, networked, privileged, and port-exposed profiles", async () => {
     for (const mutate of [
       (value: ReturnType<typeof containerFixture>) => {

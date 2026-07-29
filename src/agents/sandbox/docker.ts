@@ -463,7 +463,7 @@ const DockerVerifierContainerSchema = z
     AppArmorProfile: z.string(),
     GraphDriver: z
       .object({
-        Data: z.record(z.string(), z.string()),
+        Data: z.record(z.string(), z.string()).nullable(),
         Name: z.string(),
       })
       .strict(),
@@ -544,7 +544,7 @@ const DockerVerifierContainerSchema = z
         }),
         SecurityOpt: z.array(z.string()).nullable().optional(),
         ShmSize: z.number().int().nonnegative(),
-        StorageOpt: z.record(z.string(), z.string()).nullable(),
+        StorageOpt: z.record(z.string(), z.string()).nullable().optional(),
         Tmpfs: z.record(z.string(), z.string()).nullable().optional(),
         Ulimits: z
           .array(
