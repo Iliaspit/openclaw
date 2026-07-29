@@ -6060,12 +6060,48 @@ NODE
 
 write_sandbox_compose_overlay() {
   local tmp=""
+  local overlay_gid="${DOCKER_GID:-}"
+  local existing_group_state=""
   [[ "$VERIFIER_GATEWAY_CANDIDATE_LABEL" =~ ^[a-f0-9]{64}$ ]] ||
     fail "Guarded verifier Gateway candidate label is unavailable."
   [[ -S "$DOCKER_SOCKET_PATH" ]] ||
     fail "Guarded verifier setup requires the configured Docker socket."
+  if [[ -n "$overlay_gid" ]]; then
+    if ! existing_group_state="$(
+      docker compose "${BASE_COMPOSE_ARGS[@]}" config --format json |
+        node -e '
+          let input = "";
+          process.stdin.setEncoding("utf8");
+          process.stdin.on("data", (chunk) => {
+            input += chunk;
+          });
+          process.stdin.on("end", () => {
+            const gid = process.argv[1];
+            const config = JSON.parse(input);
+            const service = config.services?.["openclaw-gateway"];
+            if (!service || typeof service !== "object" || Array.isArray(service)) {
+              throw new Error("Gateway service is missing from the base Compose config.");
+            }
+            const groups = service.group_add ?? [];
+            if (!Array.isArray(groups)) {
+              throw new Error("Gateway group_add must be an array.");
+            }
+            process.stdout.write(
+              groups.some((group) => String(group) === gid) ? "present" : "absent",
+            );
+          });
+        ' "$overlay_gid"
+    )"; then
+      fail "Guarded verifier could not inspect the base Gateway supplemental groups."
+    fi
+    case "$existing_group_state" in
+      present) overlay_gid="" ;;
+      absent) ;;
+      *) fail "Guarded verifier received an invalid supplemental-group inspection result." ;;
+    esac
+  fi
   tmp="$(mktemp "$ROOT_DIR/.docker-compose.sandbox.XXXXXX")"
-  node - "$tmp" "$DOCKER_SOCKET_PATH" "${DOCKER_GID:-}" \
+  node - "$tmp" "$DOCKER_SOCKET_PATH" "$overlay_gid" \
     "$VERIFIER_GATEWAY_CANDIDATE_LABEL" <<'NODE'
 const fs = require("node:fs");
 const [outputPath, socketPath, dockerGid, candidateLabel] = process.argv.slice(2);

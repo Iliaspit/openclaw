@@ -629,3 +629,9 @@ Consult this before investigating a new issue or making a related change.
    - **Issue:** Candidate verification retained an exact `sha256:` image ID, but the metadata-only publish Dockerfile received that bare ID in `FROM`. Docker interpreted it as a registry repository and failed after the candidate had otherwise passed provenance verification.
    - **Fix and why:** Pin the verified candidate to the same deterministic content-addressed local-reference contract already used for exact runtime and rollback images, while retaining the immutable image ID as publication authority.
    - **Result:** BuildKit receives a runnable local reference without weakening exact candidate identity or metadata-only ancestry verification.
+
+10. **Socket GID publication duplicated an operator-managed Compose group**
+
+- **Issue:** An operator-managed Compose overlay already supplied the detected Docker socket GID, and the generated guarded-verifier overlay appended the same group again. Compose rejected the duplicate before resolving the Gateway identity.
+- **Fix and why:** Before generating the socket overlay, setup inspects the effective base Compose service and omits only an already-present exact GID. A missing GID is still added, and malformed or unreadable group state fails closed.
+- **Result:** Existing operator-managed socket access composes cleanly with guarded-verifier publication without weakening container-visible GID detection.

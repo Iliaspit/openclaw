@@ -458,10 +458,15 @@ if [[ "\${1:-}" == "compose" ]]; then
   fi
   if [[ "$*" == *" config --format json"* ]]; then
     read_only="\${DOCKER_STUB_CONFIG_READ_ONLY:-false}"
-    printf '{"name":"%s","services":{"openclaw-gateway":{"labels":{"ai.openclaw.verifier.gateway-candidate":"%s"},"volumes":[{"type":"bind","source":"%s","read_only":%s},{"type":"bind","source":"%s","read_only":%s}]}}}\n' \
+    compose_group_add_json='[]'
+    if [[ -n "\${DOCKER_STUB_COMPOSE_GROUP_ADD:-}" ]]; then
+      compose_group_add_json='["'"\${DOCKER_STUB_COMPOSE_GROUP_ADD}"'"]'
+    fi
+    printf '{"name":"%s","services":{"openclaw-gateway":{"labels":{"ai.openclaw.verifier.gateway-candidate":"%s"},"volumes":[{"type":"bind","source":"%s","read_only":%s},{"type":"bind","source":"%s","read_only":%s}],"group_add":%s}}}\n' \
       "\${DOCKER_STUB_COMPOSE_PROJECT:-openclaw}" \
       "$compose_candidate_label" \
-      "$OPENCLAW_CONFIG_DIR" "$read_only" "$OPENCLAW_WORKSPACE_DIR" "$read_only"
+      "$OPENCLAW_CONFIG_DIR" "$read_only" "$OPENCLAW_WORKSPACE_DIR" "$read_only" \
+      "$compose_group_add_json"
     exit 0
   fi
   if [[ "$*" == *"dist/index.js config get gateway.mode"* ]]; then
@@ -5337,6 +5342,34 @@ describe("scripts/docker/setup.sh", () => {
         `--mount type=bind,source=${socketLink},target=/var/run/docker.sock,readonly --entrypoint stat openclaw:local -c %g /var/run/docker.sock`,
       );
     });
+  });
+
+  it("does not duplicate a Docker socket GID already supplied by the base Compose files", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const activeSandbox = requireSandbox(sandbox);
+    await resetDockerLog(activeSandbox);
+    const effectiveContainerGid = "4242";
+
+    const result = await runVerifierDockerSetup(activeSandbox, {
+      OPENCLAW_SANDBOX: "1",
+      OPENCLAW_VERIFIER_WORKSPACE_DIR: activeSandbox.rootDir,
+      OPENCLAW_VERIFIER_GATEWAY_WORKSPACE: "/workspace/project",
+      OPENCLAW_VERIFIER_PACKAGE_MANAGER: "yarn@4.9.2",
+      DOCKER_STUB_SOCKET_GID: effectiveContainerGid,
+      DOCKER_STUB_COMPOSE_GROUP_ADD: effectiveContainerGid,
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    const overlay = await readFile(
+      join(activeSandbox.rootDir, "docker-compose.sandbox.yml"),
+      "utf8",
+    );
+    expect(overlay).not.toContain("group_add:");
+    expect(await readFile(join(activeSandbox.rootDir, ".env"), "utf8")).toContain(
+      `DOCKER_GID=${effectiveContainerGid}`,
+    );
   });
 
   it("rejects injected multiline OPENCLAW_EXTRA_MOUNTS values", async () => {
