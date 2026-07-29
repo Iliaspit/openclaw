@@ -624,3 +624,8 @@ Consult this before investigating a new issue or making a related change.
    - **Issue:** The verifier image build context could omit a tracked `.yarnrc.yml` while the live guarded workspace still contained it. Preparation therefore recorded an absent Yarn configuration and the mandatory pre-publication comparison correctly rejected the candidate as stale.
    - **Fix and why:** Setup now supplies the exact regular, non-symlink Yarn configuration through a BuildKit secret, binds its SHA-256 into both cache-sensitive build steps, and verifies the digest before dependency installation and provenance preparation. An actually absent file remains an explicit, validated `absent` state.
    - **Result:** Docker ignore policy can no longer silently remove the repository-pinned Yarn configuration from guarded verifier preparation, while changed, substituted, linked, or unexpectedly present configuration still fails closed.
+
+9. **Metadata-only verifier publication reused a bare candidate image ID**
+   - **Issue:** Candidate verification retained an exact `sha256:` image ID, but the metadata-only publish Dockerfile received that bare ID in `FROM`. Docker interpreted it as a registry repository and failed after the candidate had otherwise passed provenance verification.
+   - **Fix and why:** Pin the verified candidate to the same deterministic content-addressed local-reference contract already used for exact runtime and rollback images, while retaining the immutable image ID as publication authority.
+   - **Result:** BuildKit receives a runnable local reference without weakening exact candidate identity or metadata-only ancestry verification.

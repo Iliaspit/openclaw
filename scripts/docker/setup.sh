@@ -1405,6 +1405,7 @@ oci_content_addressed_image_ref() {
     fail "Refusing to derive an image reference from a malformed image ID."
   case "$kind" in
     gateway-rollback) repository="openclaw-gateway-rollback-id" ;;
+    verifier-candidate) repository="openclaw-verifier-candidate-id" ;;
     verifier-runtime) repository="openclaw-verifier-runtime-id" ;;
     *) fail "Refusing to derive an unrecognized content-addressed image reference." ;;
   esac
@@ -6871,6 +6872,7 @@ prepare_and_publish_verifier_toolchain() {
   local gateway=""
   local gateway_health=""
   local compose_identity=""
+  local candidate_image_ref=""
   local digest=""
   local candidate_layers=""
   local final_layers=""
@@ -7011,9 +7013,12 @@ prepare_and_publish_verifier_toolchain() {
   [[ "$OPENCLAW_VERIFIER_EFFECTIVE_YARN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9._-]+)?$ ]] ||
     fail "Verifier candidate returned malformed Yarn provenance."
   oci_write_journal candidate-verified
+  candidate_image_ref="$(
+    oci_pin_content_addressed_image_ref verifier-candidate "$VERIFIER_CANDIDATE_IMAGE_ID"
+  )"
 
   run_docker_build \
-    --build-arg "OPENCLAW_VERIFIER_CANDIDATE_IMAGE=$VERIFIER_CANDIDATE_IMAGE_ID" \
+    --build-arg "OPENCLAW_VERIFIER_CANDIDATE_IMAGE=$candidate_image_ref" \
     --build-arg "OPENCLAW_VERIFIER_DEPENDENCY_MANIFEST=$OPENCLAW_VERIFIER_DEPENDENCY_MANIFEST" \
     --build-arg "OPENCLAW_VERIFIER_BROWSER_MANIFEST=$OPENCLAW_VERIFIER_BROWSER_MANIFEST" \
     --build-arg "OPENCLAW_VERIFIER_ARTIFACT_DIGEST=$OPENCLAW_VERIFIER_ARTIFACT_DIGEST" \
