@@ -635,3 +635,9 @@ Consult this before investigating a new issue or making a related change.
 - **Issue:** An operator-managed Compose overlay already supplied the detected Docker socket GID, and the generated guarded-verifier overlay appended the same group again. Compose rejected the duplicate before resolving the Gateway identity.
 - **Fix and why:** Before generating the socket overlay, setup inspects the effective base Compose service and omits only an already-present exact GID. A missing GID is still added, and malformed or unreadable group state fails closed.
 - **Result:** Existing operator-managed socket access composes cleanly with guarded-verifier publication without weakening container-visible GID detection.
+
+11. **Verifier publication timed out before a large protected Gateway could become healthy**
+
+- **Issue:** The publication transaction allowed only 60 seconds for container health. A healthy installed Gateway with large protected state required about 90 seconds to open core state and about 143 seconds to finish channel initialization, so setup rejected the still-progressing candidate and rolled back safely.
+- **Fix and why:** Extend only the bounded container-health polling window to three minutes while retaining exact container/image validation, immediate unhealthy rejection, `/readyz`, and transactional rollback.
+- **Result:** Large protected installations can complete normal startup without weakening publication readiness or failure handling.

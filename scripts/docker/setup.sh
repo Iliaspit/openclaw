@@ -7199,7 +7199,10 @@ NODE
       "Protected OpenClaw config at post-create boundary"
   fi
   gateway_health=""
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  # Protected-ledger open and channel initialization can legitimately exceed
+  # one minute on large installed state. Keep the wait bounded while allowing
+  # the container health check up to three minutes to become green.
+  for _ in {1..36}; do
     gateway_health="$(
       docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
         "$gateway"
