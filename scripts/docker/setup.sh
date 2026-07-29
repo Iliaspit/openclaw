@@ -6144,20 +6144,40 @@ oci_assert_exact_gateway_ready() {
       "$gateway_id")" == "healthy" ]] ||
     fail "Guarded verifier publication Gateway identity or health changed."
   mounts_json="$(docker inspect --format '{{json .Mounts}}' "$gateway_id")"
-  node - "$socket_path" "$mounts_json" <<'NODE'
-const fs = require("node:fs");
-const expected = fs.realpathSync(process.argv[2]);
-const mounts = JSON.parse(process.argv[3]);
+  node - "$mounts_json" <<'NODE'
+const path = require("node:path");
+const mounts = JSON.parse(process.argv[2]);
 const socketMounts = mounts.filter((mount) => mount.Destination === "/var/run/docker.sock");
 if (
   socketMounts.length !== 1 ||
   socketMounts[0].Type !== "bind" ||
-  fs.realpathSync(socketMounts[0].Source) !== expected ||
+  typeof socketMounts[0].Source !== "string" ||
+  !path.isAbsolute(socketMounts[0].Source) ||
   socketMounts[0].RW !== true
 ) {
   throw new Error("Gateway Docker socket mount does not match the verifier transaction.");
 }
 NODE
+  local expected_socket_identity=""
+  local gateway_socket_identity=""
+  expected_socket_identity="$(
+    docker run --rm \
+      --network none \
+      --read-only \
+      --cap-drop ALL \
+      --security-opt no-new-privileges:true \
+      --env LC_ALL=C \
+      --mount "type=bind,source=$socket_path,target=/var/run/docker.sock,readonly" \
+      --entrypoint stat \
+      "$image_id" -Lc '%d:%i:%F:%g' /var/run/docker.sock
+  )"
+  gateway_socket_identity="$(
+    docker exec --env LC_ALL=C "$gateway_id" \
+      stat -Lc '%d:%i:%F:%g' /var/run/docker.sock
+  )"
+  [[ "$expected_socket_identity" =~ ^[0-9]+:[0-9]+:socket:[0-9]+$ &&
+    "$gateway_socket_identity" == "$expected_socket_identity" ]] ||
+    fail "Gateway Docker socket identity does not match the verifier transaction."
   config_value="$(
     docker exec "$gateway_id" node dist/index.js config get agents.defaults.sandbox.mode
   )"

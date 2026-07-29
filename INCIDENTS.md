@@ -641,3 +641,9 @@ Consult this before investigating a new issue or making a related change.
 - **Issue:** The publication transaction allowed only 60 seconds for container health. A healthy installed Gateway with large protected state required about 90 seconds to open core state and about 143 seconds to finish channel initialization, so setup rejected the still-progressing candidate and rolled back safely.
 - **Fix and why:** Extend only the bounded container-health polling window to three minutes while retaining exact container/image validation, immediate unhealthy rejection, `/readyz`, and transactional rollback.
 - **Result:** Large protected installations can complete normal startup without weakening publication readiness or failure handling.
+
+12. **Docker Desktop rewrote the inspected Docker socket bind source**
+
+- **Issue:** Docker Desktop reports its daemon-side socket proxy path in a container's inspected mounts instead of the configured macOS host path. Final publication tried to resolve that Linux-only `/run/host-services/...` path on macOS, failed closed, and rolled the otherwise healthy Gateway back.
+- **Fix and why:** Final publication still requires one exact writable bind at `/var/run/docker.sock`, then compares the socket device, inode, type, and group visible inside the exact Gateway with a hardened networkless, read-only, capability-free one-shot mount of the configured socket. This validates the mounted object without trusting or dereferencing Docker Desktop's daemon-private pathname.
+- **Result:** Legitimate Docker Desktop source translation no longer blocks publication, while a substituted or different mounted socket still fails closed.

@@ -227,7 +227,11 @@ fi
 if [[ "\${1:-}" == "run" ]]; then
   echo "run $*" >>"$log"
   if [[ "$*" == *"--entrypoint stat"* && "$*" == *"/var/run/docker.sock"* ]]; then
-    printf '%s\n' "\${DOCKER_STUB_SOCKET_GID:-0}"
+    if [[ "$*" == *"%d:%i:%F:%g"* ]]; then
+      printf '%s\n' "\${DOCKER_STUB_EXPECTED_SOCKET_IDENTITY:-28:25:socket:\${DOCKER_STUB_SOCKET_GID:-0}}"
+    else
+      printf '%s\n' "\${DOCKER_STUB_SOCKET_GID:-0}"
+    fi
     exit 0
   fi
   printf '%s\n' '{"status":"verified","dependencyManifestDigest":"${"1".repeat(64)}","browserManifestDigest":"${"2".repeat(64)}","toolchainDigest":"${"3".repeat(64)}","repositoryIdentityDigest":"${"4".repeat(64)}","browserIdentityDigest":"${"5".repeat(64)}","effectiveYarnVersion":"4.9.2"}'
@@ -345,6 +349,10 @@ if [[ "\${1:-}" == "exec" && "$*" == *"config get agents.defaults.sandbox.scope"
 fi
 if [[ "\${1:-}" == "exec" && "$*" == *"config get agents.defaults.sandbox.workspaceAccess"* ]]; then
   printf '%s\n' none
+  exit 0
+fi
+if [[ "\${1:-}" == "exec" && "$*" == *"stat -Lc %d:%i:%F:%g /var/run/docker.sock"* ]]; then
+  printf '%s\n' "\${DOCKER_STUB_GATEWAY_SOCKET_IDENTITY:-28:25:socket:\${DOCKER_STUB_SOCKET_GID:-0}}"
   exit 0
 fi
 if [[ "\${1:-}" == "tag" ]]; then
@@ -531,7 +539,8 @@ if [[ "\${1:-}" == "compose" ]]; then
   if [[ "$*" == *" up -d --no-deps --force-recreate openclaw-gateway"* ]]; then
     if [[ -n "$compose_socket_source" &&
       -z "\${DOCKER_STUB_IGNORE_SOCKET_OVERLAY:-}" ]]; then
-      printf '%s\n' "$compose_socket_source" >"$image_dir/gateway-socket-source"
+      printf '%s\n' "\${DOCKER_STUB_INSPECT_SOCKET_SOURCE:-$compose_socket_source}" \
+        >"$image_dir/gateway-socket-source"
     else
       rm -f "$image_dir/gateway-socket-source"
     fi
@@ -5369,6 +5378,55 @@ describe("scripts/docker/setup.sh", () => {
     expect(overlay).not.toContain("group_add:");
     expect(await readFile(join(activeSandbox.rootDir, ".env"), "utf8")).toContain(
       `DOCKER_GID=${effectiveContainerGid}`,
+    );
+  });
+
+  it("accepts Docker Desktop socket source rewriting only for the same mounted socket identity", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const activeSandbox = requireSandbox(sandbox);
+    await resetDockerLog(activeSandbox);
+
+    const result = await runVerifierDockerSetup(activeSandbox, {
+      OPENCLAW_SANDBOX: "1",
+      OPENCLAW_VERIFIER_WORKSPACE_DIR: activeSandbox.rootDir,
+      OPENCLAW_VERIFIER_GATEWAY_WORKSPACE: "/workspace/project",
+      OPENCLAW_VERIFIER_PACKAGE_MANAGER: "yarn@4.9.2",
+      DOCKER_STUB_INSPECT_SOCKET_SOURCE: "/run/host-services/docker.proxy.sock",
+      DOCKER_STUB_EXPECTED_SOCKET_IDENTITY: "28:25:socket:4242",
+      DOCKER_STUB_GATEWAY_SOCKET_IDENTITY: "28:25:socket:4242",
+      DOCKER_STUB_SOCKET_GID: "4242",
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    const log = await readDockerLog(activeSandbox);
+    expect(log).toContain(
+      "--entrypoint stat sha256:" + `${"a".repeat(64)} -Lc %d:%i:%F:%g /var/run/docker.sock`,
+    );
+  });
+
+  it("rejects a rewritten Docker socket source with a different mounted socket identity", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const activeSandbox = requireSandbox(sandbox);
+    await resetDockerLog(activeSandbox);
+
+    const result = await runVerifierDockerSetup(activeSandbox, {
+      OPENCLAW_SANDBOX: "1",
+      OPENCLAW_VERIFIER_WORKSPACE_DIR: activeSandbox.rootDir,
+      OPENCLAW_VERIFIER_GATEWAY_WORKSPACE: "/workspace/project",
+      OPENCLAW_VERIFIER_PACKAGE_MANAGER: "yarn@4.9.2",
+      DOCKER_STUB_INSPECT_SOCKET_SOURCE: "/run/host-services/docker.proxy.sock",
+      DOCKER_STUB_EXPECTED_SOCKET_IDENTITY: "28:25:socket:4242",
+      DOCKER_STUB_GATEWAY_SOCKET_IDENTITY: "28:26:socket:4242",
+      DOCKER_STUB_SOCKET_GID: "4242",
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      "Gateway Docker socket identity does not match the verifier transaction.",
     );
   });
 
