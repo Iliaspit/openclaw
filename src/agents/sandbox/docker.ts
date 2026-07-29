@@ -1020,6 +1020,9 @@ export async function assertGuardedVerifierContainerRuntime(params: {
     container.State.Pid === 0;
   const runningStateIsValid =
     expectedRunning && container.State.Status === "running" && container.State.Pid > 0;
+  const outputAttachProfileIsValid =
+    container.Config.AttachStdout === container.Config.AttachStderr;
+  const oomKillProfileIsValid = container.HostConfig.OomKillDisable !== true;
   const ulimits = (container.HostConfig.Ulimits ?? [])
     .map((entry) => `${entry.Name}:${entry.Soft}:${entry.Hard}`)
     .toSorted();
@@ -1045,8 +1048,7 @@ export async function assertGuardedVerifierContainerRuntime(params: {
     container.Config.Hostname !== container.Id.slice(0, 12) ||
     container.Config.Domainname !== "" ||
     container.Config.AttachStdin ||
-    container.Config.AttachStdout ||
-    container.Config.AttachStderr ||
+    !outputAttachProfileIsValid ||
     container.Config.WorkingDir !== params.workdir ||
     command.length !== 2 ||
     command[0] !== "sleep" ||
@@ -1130,7 +1132,7 @@ export async function assertGuardedVerifierContainerRuntime(params: {
     container.HostConfig.PublishAllPorts ||
     (container.NetworkSettings.Ports != null &&
       Object.keys(container.NetworkSettings.Ports).length !== 0) ||
-    container.HostConfig.OomKillDisable !== null ||
+    !oomKillProfileIsValid ||
     container.HostConfig.OomScoreAdj !== 0 ||
     container.HostConfig.PidsLimit !== 512 ||
     networkAttachments.length !== 1 ||
@@ -1204,7 +1206,7 @@ export async function assertGuardedVerifierContainerRuntime(params: {
     !workspaceMount ||
     workspaceMount.Type !== "bind" ||
     workspaceMount.Source !== params.workspaceMountSource ||
-    workspaceMount.Driver !== "" ||
+    (workspaceMount.Driver ?? "") !== "" ||
     workspaceMount.Mode !== "ro,z" ||
     workspaceMount.Propagation !== "rprivate" ||
     imageMountMismatch ||
@@ -1212,7 +1214,9 @@ export async function assertGuardedVerifierContainerRuntime(params: {
       (mount) =>
         mount.RW ||
         (mount.Destination !== params.workdir &&
-          (mount.Driver !== "" || mount.Mode !== "" || mount.Propagation !== "")) ||
+          ((mount.Driver ?? "") !== "" ||
+            (mount.Mode ?? "") !== "" ||
+            !["", "rprivate"].includes(mount.Propagation ?? ""))) ||
         (mount.Destination === params.workdir && mount.Type !== "bind") ||
         (mount.Destination !== params.workdir && mount.Type !== "image"),
     )

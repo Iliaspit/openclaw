@@ -665,3 +665,9 @@ Consult this before investigating a new issue or making a related change.
 - **Issue:** Docker 28.3.2 returned `GraphDriver.Data: null` and omitted `HostConfig.StorageOpt` for a freshly created guarded verifier container. The strict inspect decoder rejected the legitimate representation before the closed runtime profile could be validated or Playwright could start.
 - **Fix and why:** Accept only Docker's documented empty representations for those two unused metadata fields: nullable graph-driver data and absent, null, or string-map storage options. All security-relevant container, network, mount, resource, and identity fields remain strict and are still validated fail-closed.
 - **Result:** The real Docker 28 inspect shape reaches the existing closed-profile verifier without allowing unknown fields or weakening isolation checks.
+
+16. **Docker Desktop inspect represented safe verifier defaults differently**
+
+- **Issue:** Docker Desktop 28.3.2 reported CLI-created verifier containers with stdout/stderr attachment enabled, OOM-kill suppression as `false`, omitted empty top-level mount drivers, and `rprivate` propagation on read-only image mounts. The synthetic contract fixture expected only the alternative empty representations, so valid isolated tester and reviewer containers were rejected before Playwright could start.
+- **Fix and why:** Accept only the equivalent paired output-attachment states, disabled OOM-kill suppression representations, absent-or-empty mount drivers, and absent, empty, or `rprivate` propagation for exact read-only image mounts. Mismatched attachment flags, enabled OOM-kill suppression, nonempty drivers, writable mounts, and shared propagation remain fail-closed.
+- **Result:** Real Docker Desktop verifier containers can reach protected execution without weakening container identity, mount immutability, network isolation, or the closed runtime profile.

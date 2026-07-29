@@ -362,6 +362,33 @@ describe("guarded verifier OCI Docker contract", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("accepts Docker Desktop 28 output, OOM, and mount metadata defaults", async () => {
+    const value = containerFixture();
+    value.Config.AttachStdout = true;
+    value.Config.AttachStderr = true;
+    value.HostConfig.OomKillDisable = false;
+    for (const mount of value.Mounts) {
+      delete (mount as Partial<typeof mount>).Driver;
+      if (mount.Type === "image") {
+        mount.Propagation = "rprivate";
+      }
+    }
+
+    await expect(
+      assertGuardedVerifierContainerRuntime({
+        containerId: "c".repeat(64),
+        configHash: "config",
+        runtimeIdentity,
+        authorization,
+        workspaceDir: "/repo",
+        workspaceMountSource: "/host/repo",
+        workdir: "/workspace",
+        tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=1g,uid=1000,gid=1000,mode=1777"],
+        inspect: async () => value,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it("rejects writable, substituted, networked, privileged, and port-exposed profiles", async () => {
     for (const mutate of [
       (value: ReturnType<typeof containerFixture>) => {
@@ -461,6 +488,19 @@ describe("guarded verifier OCI Docker contract", () => {
       },
       (value: ReturnType<typeof containerFixture>) => {
         value.Config.User = "0";
+      },
+      (value: ReturnType<typeof containerFixture>) => {
+        value.Config.AttachStdout = true;
+        value.Config.AttachStderr = false;
+      },
+      (value: ReturnType<typeof containerFixture>) => {
+        value.HostConfig.OomKillDisable = true;
+      },
+      (value: ReturnType<typeof containerFixture>) => {
+        value.Mounts[0].Driver = "local";
+      },
+      (value: ReturnType<typeof containerFixture>) => {
+        value.Mounts[1].Propagation = "shared";
       },
     ]) {
       const value = containerFixture();
