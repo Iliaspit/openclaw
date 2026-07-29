@@ -653,3 +653,9 @@ Consult this before investigating a new issue or making a related change.
 - **Issue:** The guarded verifier image set its command but inherited `docker-entrypoint.sh` from the pinned Node base image. Installed verifier provisioning therefore rejected the published artifact because protected execution requires an empty image entrypoint.
 - **Fix and why:** The verifier producer now explicitly clears the inherited entrypoint while retaining the exact non-root user, workdir, and inert `sleep infinity` default command.
 - **Result:** The published image matches the protected executor's closed command-path contract instead of relying on base-image entrypoint behavior.
+
+14. **Verifier publication exceeded the execution-sized artifact deadline**
+
+- **Issue:** The immutable verifier artifact built successfully, but Docker Desktop could not hash its approximately 60,000 dependency and browser files within the shared 60-second verification deadline. Publication rolled back before Gateway recreation on two consecutive attempts.
+- **Fix and why:** Extended the bounded artifact-verification deadline to three minutes. Guarded verifier command execution retains its separate explicit 60-second authorization and input-validation deadline.
+- **Result:** Publication can validate the complete immutable verifier artifact on Docker Desktop without weakening the protected execution deadline or bypassing content verification.

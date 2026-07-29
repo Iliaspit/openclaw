@@ -204,6 +204,26 @@ describe("guarded verifier volume provenance", () => {
           ...fixture,
           repositoryHead: REPOSITORY_HEAD,
           sourceRevision: SOURCE_REVISION,
+          effectiveYarnVersion: "4.9.2",
+          deadlineMs: 180_000,
+        }),
+      ).resolves.toMatchObject({
+        dependencyManifest: { sourceRevision: SOURCE_REVISION },
+      });
+      await expect(
+        verifyGuardedVerifierVolumeProvenance({
+          ...fixture,
+          repositoryHead: REPOSITORY_HEAD,
+          sourceRevision: SOURCE_REVISION,
+          effectiveYarnVersion: "4.9.2",
+          deadlineMs: 180_001,
+        }),
+      ).rejects.toThrow("deadline is invalid");
+      await expect(
+        verifyGuardedVerifierVolumeProvenance({
+          ...fixture,
+          repositoryHead: REPOSITORY_HEAD,
+          sourceRevision: SOURCE_REVISION,
           effectiveYarnVersion: "4.9.3",
         }),
       ).rejects.toThrow();

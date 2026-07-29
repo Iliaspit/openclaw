@@ -16,7 +16,10 @@ const MAX_TREE_BYTES = 16 * 1024 * 1024 * 1024;
 const MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES = 50_000;
 const MAX_METADATA_BYTES = 1024 * 1024;
-const DEFAULT_VERIFICATION_DEADLINE_MS = 60_000;
+// Publication verifies the complete immutable dependency/browser artifact and
+// can take longer on Docker Desktop. Guarded execution still supplies its
+// separate 60-second caller deadline.
+const DEFAULT_VERIFICATION_DEADLINE_MS = 180_000;
 
 const RepositoryIdentitySchema = z
   .object({
