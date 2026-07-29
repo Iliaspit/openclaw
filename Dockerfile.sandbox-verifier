@@ -85,6 +85,9 @@ RUN --mount=type=secret,id=openclaw-verifier-yarnrc,target=/build/workspace/.yar
     test -f /build/workspace/.yarnrc.yml \
     && test "$(sha256sum /build/workspace/.yarnrc.yml | cut -d ' ' -f 1)" = "${OPENCLAW_VERIFIER_YARNRC_SHA256}"; \
   fi \
+  && test ! -e /build/workspace/node_modules/.vite-temp \
+  && test ! -L /build/workspace/node_modules/.vite-temp \
+  && install -d -o node -g node -m 0755 /build/workspace/node_modules/.vite-temp \
   && OPENCLAW_VERIFIER_PREPARE=1 \
   node /opt/openclaw/openclaw.mjs sandbox verifier-prepare \
     --workspace /build/workspace \

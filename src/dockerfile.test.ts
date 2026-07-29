@@ -141,4 +141,29 @@ describe("Dockerfile", () => {
     expect(dockerfile).not.toContain("docker-ce-cli");
     expect(dockerfile).toContain("/opt/openclaw/openclaw.mjs");
   });
+
+  it("precreates the Vite scratch mount point before verifier publication", async () => {
+    const dockerfile = await readFile(verifierDockerfilePath, "utf8");
+    const dependencyReadyIndex = dockerfile.indexOf("test -d /build/workspace/node_modules");
+    const scratchRefusalIndex = dockerfile.indexOf(
+      "test ! -e /build/workspace/node_modules/.vite-temp",
+    );
+    const scratchSymlinkRefusalIndex = dockerfile.indexOf(
+      "test ! -L /build/workspace/node_modules/.vite-temp",
+    );
+    const scratchMountIndex = dockerfile.indexOf(
+      "install -d -o node -g node -m 0755 /build/workspace/node_modules/.vite-temp",
+    );
+    const provenanceIndex = dockerfile.indexOf("sandbox verifier-prepare");
+    const publicationCopyIndex = dockerfile.indexOf(
+      "/build/workspace/node_modules /opt/openclaw-verifier/dependencies",
+    );
+
+    expect(dependencyReadyIndex).toBeGreaterThan(-1);
+    expect(scratchRefusalIndex).toBeGreaterThan(dependencyReadyIndex);
+    expect(scratchSymlinkRefusalIndex).toBeGreaterThan(scratchRefusalIndex);
+    expect(scratchMountIndex).toBeGreaterThan(scratchSymlinkRefusalIndex);
+    expect(provenanceIndex).toBeGreaterThan(scratchMountIndex);
+    expect(publicationCopyIndex).toBeGreaterThan(provenanceIndex);
+  });
 });

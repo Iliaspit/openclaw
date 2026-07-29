@@ -671,3 +671,11 @@ Consult this before investigating a new issue or making a related change.
 - **Issue:** Docker Desktop 28.3.2 reported CLI-created verifier containers with stdout/stderr attachment enabled, OOM-kill suppression as `false`, omitted empty top-level mount drivers, and `rprivate` propagation on read-only image mounts. The synthetic contract fixture expected only the alternative empty representations, so valid isolated tester and reviewer containers were rejected before Playwright could start.
 - **Fix and why:** Accept only the equivalent paired output-attachment states, disabled OOM-kill suppression representations, absent-or-empty mount drivers, and absent, empty, or `rprivate` propagation for exact read-only image mounts. Mismatched attachment flags, enabled OOM-kill suppression, nonempty drivers, writable mounts, and shared propagation remain fail-closed.
 - **Result:** Real Docker Desktop verifier containers can reach protected execution without weakening container identity, mount immutability, network isolation, or the closed runtime profile.
+
+## 2026-07-29
+
+1. **Immutable verifier dependencies lacked the Vite scratch mount point**
+
+- **Issue:** Guarded verifier startup mounted a bounded tmpfs at `/workspace/node_modules/.vite-temp`, but the immutable dependency image did not contain that nested directory. Docker could not create it beneath the read-only image mount, so the container failed before Playwright started.
+- **Fix and why:** Refuse a preexisting path, then create the node-owned `0755` mount point in the built dependency tree before provenance preparation and immutable OCI publication. The exact image identity carries the directory, while the existing `nosuid,nodev,noexec` tmpfs remains the only writable content under `node_modules` at runtime.
+- **Result:** Published verifier dependencies now carry the exact nested mount point without making dependency content writable or changing sandbox access, network, ownership, or cleanup policy.
